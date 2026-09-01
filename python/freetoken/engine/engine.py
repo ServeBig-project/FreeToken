@@ -1097,30 +1097,47 @@ class Engine:
         graph_runner.prepare_layer_range_replay(batch)
         current_layer = start_layer
         while current_layer < end_layer:
-            group_end = graph_runner.layer_range_end(current_layer)
-            if group_end is None or group_end > end_layer:
-                group_end = end_layer
             cache = self.moe_offload_cache
-            resident = (
-                cache is not None
-                and cache.has_resident_prefill_layer(current_layer)
+            graph_end = next(
+                (
+                    candidate_end
+                    for candidate_end in graph_runner.layer_range_candidate_ends(
+                        current_layer
+                    )
+                    if candidate_end <= end_layer
+                    and not any(
+                        cache is not None
+                        and cache.has_resident_prefill_layer(layer_id)
+                        for layer_id in range(current_layer, candidate_end)
+                    )
+                ),
+                None,
             )
-            if (
-                not resident
-                and graph_runner.layer_range_end(current_layer) == group_end
-            ):
+            if graph_end is not None:
                 state = graph_runner.replay_layer_range(
                     batch,
                     state,
                     current_layer,
-                    group_end,
+                    graph_end,
                 )
+                next_layer = graph_end
             else:
+                next_graph_start = graph_runner.next_layer_range_start(
+                    current_layer,
+                    end_layer,
+                )
+                next_layer = (
+                    next_graph_start
+                    if next_graph_start is not None
+                    else end_layer
+                )
                 with self.ctx.forward_batch(batch):
                     if state is None:
                         state = self.model.begin_layer_group_prefill(batch.input_ids)
-                    state = self.model.advance_layer_group_prefill(state, group_end)
-            current_layer = group_end
+                    state = self.model.advance_layer_group_prefill(state, next_layer)
+            if next_layer <= current_layer:
+                raise RuntimeError("decode layer-range walker made no progress")
+            current_layer = next_layer
         return state
 
     def finish_layer_group_prefill(

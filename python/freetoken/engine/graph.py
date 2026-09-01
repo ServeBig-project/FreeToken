@@ -134,6 +134,7 @@ class GraphRunner:
             tuple[int, int, int], _LayerRangeCapture
         ] = {}
         self.layer_range_group_ends: dict[int, int] = {}
+        self.layer_range_group_end_candidates: dict[int, tuple[int, ...]] = {}
         self.layer_range_batch_sizes: tuple[int, ...] = ()
         self._layer_range_state_inputs: object | None = None
         self._prepared_layer_range_batch: Batch | None = None
@@ -207,11 +208,11 @@ class GraphRunner:
         self,
         model: BaseLLMModel,
     ) -> None:
-        """Capture decode graphs for resident prefill layer groups.
+        """Capture decode graphs for resident and coarse layer ranges.
 
-        Capturing one graph per group keeps startup graph work linear in model depth.
         The active resident group remains eager because its decode rows are merged with
-        prefill rows; these graphs cover only the decode-only groups before and after it.
+        prefill rows.  Width-four graphs reduce launch overhead in the decode-only
+        ranges before and after it, while resident-stage graphs remain as fallbacks.
         """
         cache = self.moe_offload_cache
         adapter = self.layered_execution_adapter
@@ -227,15 +228,42 @@ class GraphRunner:
             (stage.start_layer, stage.end_layer)
             for stage in cache.resident_stages()
         ]
+        num_layers = cache.num_layers
+        coarse_groups = [
+            (start_layer, min(start_layer + 4, num_layers))
+            for start_layer in range(0, num_layers, 4)
+        ]
+        group_set = set(groups)
+        capture_groups = sorted(
+            group_set.union(coarse_groups),
+            key=lambda group: (group[0], -group[1]),
+        )
+        extra_coarse_groups = [
+            group for group in coarse_groups if group not in group_set
+        ]
         batch_sizes = self.graph_bs_list
         if not batch_sizes:
             return
 
         self.layer_range_batch_sizes = tuple(batch_sizes)
-        self.layer_range_group_ends = dict(groups)
+        candidate_ends: dict[int, list[int]] = {}
+        for start_layer, end_layer in capture_groups:
+            candidate_ends.setdefault(start_layer, []).append(end_layer)
+        self.layer_range_group_end_candidates = {
+            start_layer: tuple(sorted(ends, reverse=True))
+            for start_layer, ends in candidate_ends.items()
+        }
+        self.layer_range_group_ends = {
+            start_layer: ends[0]
+            for start_layer, ends in self.layer_range_group_end_candidates.items()
+        }
         logger.info_rank0(
             "Capturing resident-prefill decode range graphs: "
             f"groups={groups}, batch_sizes={batch_sizes}"
+        )
+        logger.info_rank0(
+            "Additional coarse decode ranges: "
+            f"ranges={extra_coarse_groups}"
         )
 
         # A shared, graph-external input state lets every group graph accept the
@@ -248,7 +276,7 @@ class GraphRunner:
         self._set_dummy_linear_slots(seed_bs)
         with get_global_ctx().forward_batch(seed_batch):
             seed = model.begin_layer_group_prefill(seed_batch.input_ids)
-            seed = model.advance_layer_group_prefill(seed, groups[0][1])
+            seed = model.advance_layer_group_prefill(seed, capture_groups[0][1])
         self._layer_range_state_inputs = adapter.create_range_graph_inputs(seed)
         self._reset_moe_offload_cache()
 
@@ -262,7 +290,7 @@ class GraphRunner:
             self.attn_backend.prepare_for_layer_range_capture(batch)
             self.buffer.set_batch(batch)
             self._set_dummy_linear_slots(bs)
-            for start_layer, end_layer in groups:
+            for start_layer, end_layer in capture_groups:
                 graph = torch.cuda.CUDAGraph()
                 with get_global_ctx().forward_batch(batch):
                     if start_layer == 0:
@@ -332,6 +360,25 @@ class GraphRunner:
     def layer_range_end(self, start_layer: int) -> int | None:
         return self.layer_range_group_ends.get(start_layer)
 
+    def layer_range_candidate_ends(self, start_layer: int) -> tuple[int, ...]:
+        """Return captured ends for ``start_layer``, widest first."""
+        return self.layer_range_group_end_candidates.get(start_layer, ())
+
+    def next_layer_range_start(
+        self,
+        current_layer: int,
+        end_layer: int,
+    ) -> int | None:
+        """Return the next captured start strictly inside the requested range."""
+        return min(
+            (
+                start_layer
+                for start_layer in self.layer_range_group_ends
+                if current_layer < start_layer < end_layer
+            ),
+            default=None,
+        )
+
     def prepare_layer_range_replay(self, batch: Batch) -> None:
         if not self.has_layer_range_graphs_for(batch):
             raise ValueError("batch is not eligible for a layer-range graph")
@@ -389,6 +436,7 @@ class GraphRunner:
         self.graph_map = {}
         self.layer_range_graph_map = {}
         self.layer_range_group_ends = {}
+        self.layer_range_group_end_candidates = {}
         self.layer_range_batch_sizes = ()
         self._layer_range_state_inputs = None
         self._prepared_layer_range_batch = None
