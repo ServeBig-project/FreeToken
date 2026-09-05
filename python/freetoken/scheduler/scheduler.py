@@ -26,6 +26,13 @@ from freetoken.utils import (
     load_toolcall_anchor_id,
 )
 
+from .adaptive_gate import (
+    AdaptiveFastPathGate,
+    AdaptiveFastPathStats,
+    adaptive_gate_enabled,
+    direct_prefill_batch_is_eligible,
+    pending_complete_prefill_depth,
+)
 from .cache import CacheManager
 from .config import SchedulerConfig
 from .decode import DecodeManager
@@ -42,7 +49,7 @@ from .layered_pipeline import LayeredPipelineExecutor
 from .mixed_batch import LegacyBatchComposer, MixedBatchComposer
 from .prefill import ChunkedReq, PrefillManager
 from .resident_decode import StableDecodeInput, prepare_stable_decode
-from .resident_wave import ResidentExecutor
+from .resident_wave import ResidentExecutor, request_output_view
 from .status import SchedulerStatusReporter
 from .table import TableManager
 
@@ -101,6 +108,8 @@ class Scheduler(SchedulerIOMixin):
         self.layered_stats = LayeredExecutionStats()
         self.resident_executor: ResidentExecutor | None = None
         self.layered_pipeline_executor: LayeredPipelineExecutor | None = None
+        self.adaptive_fast_path_gate: AdaptiveFastPathGate | None = None
+        self.adaptive_fast_path_stats = AdaptiveFastPathStats()
         self._resident_decode_input: StableDecodeInput | None = None
         if config.batching_policy == "legacy":
             composer_cls = LegacyBatchComposer
@@ -144,6 +153,12 @@ class Scheduler(SchedulerIOMixin):
                 free_req_resources=self._free_req_resources,
             )
             self.resident_executor = self.layered_pipeline_executor
+            self.adaptive_fast_path_gate = AdaptiveFastPathGate(
+                config.max_running_req,
+                enabled=adaptive_gate_enabled(
+                    str(ENV.LP_ADAPTIVE_GATE), warn=logger.warning_rank0
+                ),
+            )
         else:
             raise ValueError(f"Unknown batching policy: {config.batching_policy!r}")
         self.batch_composer = (
@@ -753,6 +768,17 @@ class Scheduler(SchedulerIOMixin):
         self.stream.wait_stream(self.engine.stream)
         outputs: list[ForwardData] = []
         if not executor.active:
+            gate = self.adaptive_fast_path_gate
+            if gate is not None:
+                pending_depth = pending_complete_prefill_depth(
+                    self.prefill_manager.pending_list, self.prefill_budget
+                )
+                continuation_uids = {
+                    pending.uid
+                    for pending in self.prefill_manager.pending_list
+                    if pending.chunked_req is not None
+                    or pending.layered_cached_len is not None
+                }
             batch = executor.schedule_first_batch(self.prefill_budget)
             if batch is not None and not batch.has_prefill:
                 forward_input = self._prepare_resident_decode_batch(batch)
@@ -769,7 +795,39 @@ class Scheduler(SchedulerIOMixin):
                 outputs = [data]
             elif batch is not None:
                 self._resident_decode_input = None
-                executor.begin_wave(batch, self.prefill_budget)
+                use_fast_path = False
+                if gate is not None:
+                    use_fast_path, blocked_by = gate.should_use_fast_path(
+                        running_decode_count=len(self.decode_manager.running_reqs),
+                        pending_complete_prefill_depth=pending_depth,
+                        wave_active=executor.active,
+                        now=time.monotonic(),
+                    )
+                    if blocked_by == "decode":
+                        self.adaptive_fast_path_stats.gate_blocks_by_decode += 1
+                    elif blocked_by == "queue":
+                        self.adaptive_fast_path_stats.gate_blocks_by_queue += 1
+                    elif blocked_by == "cooldown":
+                        self.adaptive_fast_path_stats.gate_blocks_by_cooldown += 1
+                    use_fast_path = use_fast_path and direct_prefill_batch_is_eligible(
+                        batch,
+                        token_budget=self.prefill_budget,
+                        continuation_uids=continuation_uids,
+                    )
+                if use_fast_path:
+                    pipeline_executor = self.layered_pipeline_executor
+                    if pipeline_executor is None:
+                        raise RuntimeError("adaptive fast path requires layered pipeline")
+                    pipeline_executor.discard_staged_admission()
+                    outputs = self._forward_direct_resident_batch(batch)
+                    self.adaptive_fast_path_stats.fast_path_forwards += 1
+                    self.adaptive_fast_path_stats.fast_path_prefills += len(
+                        batch.prefill_reqs
+                    )
+                else:
+                    executor.begin_wave(batch, self.prefill_budget)
+                    if gate is not None:
+                        self.adaptive_fast_path_stats.wave_opens += 1
         elif executor.active:
             executor.prepare_step(self.prefill_budget)
 
@@ -777,6 +835,8 @@ class Scheduler(SchedulerIOMixin):
             self.engine.stream.wait_stream(self.stream)
             with self.engine_stream_ctx:
                 outputs = executor.advance_step()
+            if self.adaptive_fast_path_gate is not None and not executor.active:
+                self.adaptive_fast_path_gate.note_wave_closed(time.monotonic())
             if self.config.batching_policy == "layered-pipeline":
                 for data in outputs:
                     output_batch = data[0].batch
@@ -807,6 +867,40 @@ class Scheduler(SchedulerIOMixin):
         self._process_last_outputs(ready_outputs)
         self._resident_last_outputs = deferred_outputs
         self._flush_abort_acks()
+
+    def _forward_direct_resident_batch(self, batch: Batch) -> list[ForwardData]:
+        """Run one eager resident-loop batch and retain resident drain timing."""
+        forward_input = self._prepare_resident_batch(batch)
+        self._report_prompt_admissions(batch)
+        with self.engine_stream_ctx:
+            self.engine.stream.wait_stream(self.stream)
+            self._restore_linear_states(batch)
+            output = self._forward(forward_input)
+        if batch.has_decode:
+            self.cache_manager.reserve_next_decode(batch.decode_reqs)
+        if not batch.is_mixed:
+            return [(forward_input, output)]
+
+        decode_indices = list(range(batch.decode_size))
+        prefill_indices = list(range(batch.decode_size, batch.size))
+        decode_input = request_output_view(forward_input, decode_indices)
+        decode_input.batch.decode_size = len(decode_indices)
+        prefill_input = request_output_view(forward_input, prefill_indices)
+        prefill_input.batch.log_new_tokens = batch.log_new_tokens
+        prefill_input.batch.log_cached_tokens = batch.log_cached_tokens
+        prefill_input.batch.prompt_admissions = list(batch.prompt_admissions)
+        decode_output = output._replace(
+            next_tokens_gpu=output.next_tokens_gpu[: batch.decode_size],
+            next_tokens_cpu=output.next_tokens_cpu[: batch.decode_size],
+        )
+        prefill_output = output._replace(
+            next_tokens_gpu=output.next_tokens_gpu[batch.decode_size :],
+            next_tokens_cpu=output.next_tokens_cpu[batch.decode_size :],
+        )
+        return [
+            (decode_input, decode_output),
+            (prefill_input, prefill_output),
+        ]
 
     @torch.inference_mode()
     def run_forever(self) -> NoReturn:

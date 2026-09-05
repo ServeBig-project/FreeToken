@@ -216,6 +216,14 @@ class LayeredPipelineExecutor:
             state=prefill_state,
         )
 
+    def discard_staged_admission(self) -> None:
+        """Consume admission metadata when the scheduled batch runs eagerly."""
+        if self._wave is not None:
+            raise RuntimeError("cannot discard admission for an active wave")
+        if self._staged_admission is None:
+            raise RuntimeError("layered pipeline has no staged prefill admission")
+        self._staged_admission = None
+
     def prepare_step(self, token_budget: int) -> None:
         del token_budget
         wave = self._require_wave()
