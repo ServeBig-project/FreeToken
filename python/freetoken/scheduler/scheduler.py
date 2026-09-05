@@ -153,12 +153,12 @@ class Scheduler(SchedulerIOMixin):
                 free_req_resources=self._free_req_resources,
             )
             self.resident_executor = self.layered_pipeline_executor
-            self.adaptive_fast_path_gate = AdaptiveFastPathGate(
-                config.max_running_req,
-                enabled=adaptive_gate_enabled(
-                    str(ENV.LP_ADAPTIVE_GATE), warn=logger.warning_rank0
-                ),
-            )
+            if adaptive_gate_enabled(
+                str(ENV.LP_ADAPTIVE_GATE), warn=logger.warning_rank0
+            ):
+                self.adaptive_fast_path_gate = AdaptiveFastPathGate(
+                    config.max_running_req
+                )
         else:
             raise ValueError(f"Unknown batching policy: {config.batching_policy!r}")
         self.batch_composer = (

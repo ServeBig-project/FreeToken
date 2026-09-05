@@ -20,7 +20,7 @@ def adaptive_gate_enabled(
     *,
     warn: Callable[[str], None] | None = None,
 ) -> bool:
-    """Parse the narrow on/off kill switch, defaulting unknown values to on."""
+    """Parse the narrow on/off experiment switch, defaulting unknown values to off."""
     global _UNKNOWN_ENV_WARNED
 
     normalized = value.strip().lower()
@@ -33,9 +33,9 @@ def adaptive_gate_enabled(
         if warn is not None:
             warn(
                 f"Unknown FREETOKEN_LP_ADAPTIVE_GATE={value!r}; expected 'on' "
-                "or 'off', enabling the adaptive gate"
+                "or 'off', disabling the adaptive gate"
             )
-    return True
+    return False
 
 
 @dataclass

@@ -96,6 +96,10 @@ See [models.md](models.md#moe-backends) for what each backend does.
 | `--moe-prefill-hit-d2d` | off | Ordinary streaming prefill: copy cache-hit experts device-side into its buffer and stream only misses (CUDA >= 13); shared-pool policies reuse canonical slots directly |
 | `--disable-moe-prefill-overlap` | overlap on | Disable prefill-copy overlap; ordinary streaming uses two buffers, while `joint` and `layered-pipeline` require overlap and canonical group admission |
 
+For an A/B comparison of the experimental load-adaptive `layered-pipeline`
+fast path, set `FREETOKEN_LP_ADAPTIVE_GATE=on`. It is off by default; when
+off, `layered-pipeline` retains its original wave execution path.
+
 ### API behaviour
 
 | Flag | Default | Meaning |
