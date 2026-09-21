@@ -191,6 +191,7 @@ def routed_experts_fp4_prefill(
     down_scale: torch.Tensor,      # [S, H, I//32] e8m0
     swiglu_limit: float,
     num_rows: int,
+    expert_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Grouped-GEMM counterpart of :func:`routed_experts_fp4` for dense prefill
     chunks: one moe_align sort shared by both GEMMs, each expert's weights
@@ -199,6 +200,8 @@ def routed_experts_fp4_prefill(
     order (tl.dot tree vs sequential K-walk)."""
     T, top_k = slots.shape
     if T * top_k < _GROUPED_MIN_ROUTES:
+        if expert_map is not None:
+            slots = expert_map[slots.long()]
         return routed_experts_fp4(
             x, slots, topk_weights,
             gate_up_packed, gate_up_scale, down_packed, down_scale, swiglu_limit,
@@ -214,7 +217,9 @@ def routed_experts_fp4_prefill(
         BLOCK_SIZE_M=64, BLOCK_SIZE_N=64, BLOCK_SIZE_K=64, GROUP_SIZE_M=8,
         num_warps=8, num_stages=1,
     )
-    sorted_ids, expert_ids, ntpp = moe_align_block_size(slots, cfg["BLOCK_SIZE_M"], num_rows)
+    sorted_ids, expert_ids, ntpp = moe_align_block_size(
+        slots, cfg["BLOCK_SIZE_M"], num_rows, expert_map
+    )
     tw = topk_weights.reshape(-1).contiguous()
 
     x = act_quant_fp8_roundtrip(x, 128)  # gate_up activation -> FP8 round-trip (no clone)
