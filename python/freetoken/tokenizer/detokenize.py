@@ -91,6 +91,20 @@ class DetokenizeManager:
         self.decode_map.pop(uid, None)
 
     def detokenize(self, msgs: List[DetokenizeMsg]) -> List[str]:
+        # A speculative round can commit several tokens per uid. Advance that
+        # uid's decode offsets before decoding its next token.
+        output = []
+        group = []
+        seen = set()
+        for msg in msgs:
+            if msg.uid in seen:
+                output.extend(self._detokenize_batch(group))
+                group, seen = [], set()
+            group.append(msg)
+            seen.add(msg.uid)
+        return output + self._detokenize_batch(group)
+
+    def _detokenize_batch(self, msgs: List[DetokenizeMsg]) -> List[str]:
         read_ids: List[List[int]] = []
         surr_ids: List[List[int]] = []
         for msg in msgs:

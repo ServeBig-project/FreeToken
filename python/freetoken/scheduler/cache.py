@@ -558,6 +558,12 @@ class CacheManager:
             )
             offset += length
 
+    def release_speculative(self, req: Req, allocated_len: int) -> None:
+        """Return whole provisional pages beyond the committed target KV."""
+        start = div_ceil(req.cached_len, self.page_size) * self.page_size
+        end = div_ceil(allocated_len, self.page_size) * self.page_size
+        self._free(self.page_table[req.table_idx, start:end])
+
     def _allocate_paged_rows(
         self,
         needed_pages: int,

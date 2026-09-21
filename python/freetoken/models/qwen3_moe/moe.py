@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from freetoken.layers import BaseOP, LinearReplicated, make_moe_layer
+from freetoken.core import get_global_ctx
+from freetoken.moe.fused import fused_topk
 
 if TYPE_CHECKING:
     import torch
@@ -23,6 +25,12 @@ class Qwen3MoeMLP(BaseOP):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         router_logits = self.gate.forward(hidden_states)
+        draft_experts = get_global_ctx().batch.draft_experts
+        if draft_experts is not None:
+            weights, ids = fused_topk(
+                hidden_states, router_logits, draft_experts, self.experts.renormalize
+            )
+            return self.experts.routed_forward(hidden_states, weights, ids)
         final_hidden_states = self.experts.forward(
             hidden_states=hidden_states,
             router_logits=router_logits,

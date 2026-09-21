@@ -34,6 +34,7 @@ class SchedulerConfig(EngineConfig):
     _unique_suffix: str = field(default_factory=_get_pid_suffix)
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if self.max_extend_tokens < 1:
             raise ValueError("max_extend_tokens must be >= 1")
         if self.prefill_layer_group_size < 1:

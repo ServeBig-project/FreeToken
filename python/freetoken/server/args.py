@@ -249,6 +249,19 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--speculative-num-steps",
+        type=int,
+        default=ServerArgs.speculative_num_steps,
+        help="Draft tokens per self-speculative round; 0 disables speculation (default).",
+    )
+    parser.add_argument(
+        "--speculative-draft-experts",
+        type=_positive_int,
+        default=ServerArgs.speculative_draft_experts,
+        help="Routed experts per draft token (Qwen3 MoE, single GPU, legacy scheduling).",
+    )
+
+    parser.add_argument(
         "--max-seq-len-override",
         type=int,
         default=ServerArgs.max_seq_len_override,

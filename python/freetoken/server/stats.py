@@ -37,6 +37,7 @@ class StatsTracker:
         self.swa_used_tokens = 0
         self.swa_total_tokens = 0
         self.vram_bytes = 0
+        self.speculative = {"draft_tokens": 0, "accepted_draft_tokens": 0, "verify_steps": 0}
 
     @property
     def active(self) -> int:
@@ -57,6 +58,8 @@ class StatsTracker:
 
     def observe(self, reply: Any, now: float | None = None) -> None:
         t = time.monotonic() if now is None else now
+        if getattr(reply, "speculative", None) is not None:
+            self.speculative.update(reply.speculative)
         if getattr(reply, "completion_tokens_delta", 0) > 0:
             self._decode.append((t, reply.completion_tokens_delta))
             self.completion_tokens_total += reply.completion_tokens_delta
@@ -161,6 +164,10 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
         "swa": swa,
         "vram_bytes": tr.vram_bytes,
         "gpus": list(getattr(state, "gpus", None) or []),
+        "speculative": {
+            "enabled": bool(getattr(config, "speculative_num_steps", 0)),
+            **tr.speculative,
+        },
         "throughput": {
             "decode_tps": round(tr.decode_tps(), 1),
             "prefill_tps": round(tr.prefill_tps(), 1),

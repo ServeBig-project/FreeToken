@@ -15,10 +15,21 @@ class BatchSamplingArgs:
     temperatures: torch.Tensor | None
     top_k: torch.Tensor | None = None
     top_p: torch.Tensor | None = None
+    greedy: torch.Tensor | None = None
 
 
 def make_device_tensor(data: List, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
     return torch.tensor(data, dtype=dtype, pin_memory=True).to(device, non_blocking=True)
+
+
+def _sampling_ops():
+    from freetoken.kernel.backend import is_flashinfer_installed
+
+    if is_flashinfer_installed():
+        import flashinfer.sampling as sampling
+    else:
+        import freetoken.kernel.triton.sampling as sampling
+    return sampling
 
 
 def sample_impl(
@@ -27,13 +38,7 @@ def sample_impl(
     top_k: torch.Tensor | int | None,
     top_p: torch.Tensor | float | None,
 ) -> torch.Tensor:
-    from freetoken.kernel.backend import is_flashinfer_installed
-
-    if is_flashinfer_installed():
-        import flashinfer.sampling as sampling
-    else:
-        import freetoken.kernel.triton.sampling as sampling
-
+    sampling = _sampling_ops()
     probs = sampling.softmax(logits, temperatures, enable_pdl=is_sm90_supported())
     if top_k is None and top_p is None:
         return sampling.sampling_from_probs(probs)
@@ -55,8 +60,10 @@ class Sampler:
     device: torch.device
     vocab_size: int
 
-    def prepare(self, batch: Batch) -> BatchSamplingArgs:
+    def prepare(self, batch: Batch, repeats: list[int] | None = None) -> BatchSamplingArgs:
         params = [r.sampling_params for r in batch.reqs]
+        if repeats is not None:
+            params = [p for p, n in zip(params, repeats, strict=True) for _ in range(n)]
         if all(p.is_greedy for p in params):
             return BatchSamplingArgs(temperatures=None)
 
@@ -70,11 +77,35 @@ class Sampler:
             top_k = make_device_tensor(top_ks, torch.int32, self.device)
         if any(p < 1.0 for p in top_ps):
             top_p = make_device_tensor(top_ps, torch.float32, self.device)
-        return BatchSamplingArgs(temperatures, top_k=top_k, top_p=top_p)
+        greedy = (
+            make_device_tensor([p.is_greedy for p in params], torch.bool, self.device)
+            if any(p.is_greedy for p in params) else None
+        )
+        return BatchSamplingArgs(temperatures, top_k=top_k, top_p=top_p, greedy=greedy)
+
+    def probabilities(self, logits: torch.Tensor, args: BatchSamplingArgs) -> torch.Tensor:
+        """The requested distribution, retained for speculative rejection sampling."""
+        if args.temperatures is None:
+            return torch.zeros_like(logits, dtype=torch.float32).scatter_(
+                1, logits.argmax(dim=-1, keepdim=True), 1.0
+            )
+        sampling = _sampling_ops()
+        probs = sampling.softmax(logits.float(), args.temperatures, enable_pdl=is_sm90_supported())
+        if args.top_k is not None:
+            probs = sampling.top_k_renorm_probs(probs, args.top_k)
+        if args.top_p is not None:
+            probs = sampling.top_p_renorm_probs(probs, args.top_p)
+        if args.greedy is not None:
+            greedy = torch.zeros_like(probs).scatter_(1, logits.argmax(-1, keepdim=True), 1.0)
+            probs = torch.where(args.greedy[:, None], greedy, probs)
+        return probs / probs.sum(dim=-1, keepdim=True)
 
     @nvtx_annotate("Sampler")
     def sample(self, logits: torch.Tensor, args: BatchSamplingArgs) -> torch.Tensor:
         with torch.cuda.nvtx.range("Sampler"):
             if args.temperatures is None:  # greedy sampling
                 return torch.argmax(logits, dim=-1)
-            return sample_impl(logits.float(), args.temperatures, args.top_k, args.top_p)
+            tokens = sample_impl(logits.float(), args.temperatures, args.top_k, args.top_p)
+            if args.greedy is not None:
+                tokens = torch.where(args.greedy, logits.argmax(dim=-1), tokens)
+            return tokens

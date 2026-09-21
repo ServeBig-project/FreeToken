@@ -19,6 +19,8 @@ class EngineConfig:
     tp_info: DistributedInfo
     dtype: torch.dtype
     max_running_req: int = 4
+    speculative_num_steps: int = 0
+    speculative_draft_experts: int = 3
     attention_backend: str = "auto"
     moe_backend: str = "auto"
     # NVFP4 routed-expert GEMM backend (--nvfp4-backend): auto|marlin|flashinfer|triton.
@@ -86,6 +88,30 @@ class EngineConfig:
     # KV capacity in tokens; resolved into num_page_override by _adjust_config once page_size
     # is final. Mutually exclusive with num_page_override.
     num_token_override: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.speculative_num_steps < 0:
+            raise ValueError("speculative_num_steps must be >= 0")
+        if self.speculative_draft_experts < 1:
+            raise ValueError("speculative_draft_experts must be >= 1")
+        if not self.speculative_num_steps:
+            return
+        if self.tp_info.size != 1:
+            raise ValueError("self-speculative decoding requires a single GPU (tp_size=1)")
+        if getattr(self, "batching_policy", "legacy") != "legacy":
+            raise ValueError("self-speculative decoding requires --batching-policy legacy")
+        if self.hf_config.architectures[0] != "Qwen3MoeForCausalLM":
+            raise ValueError("self-speculative decoding currently supports only Qwen3 MoE")
+        if self.speculative_draft_experts > self.model_config.num_experts_per_tok:
+            raise ValueError(
+                "speculative_draft_experts must not exceed the target's experts per token "
+                f"({self.model_config.num_experts_per_tok})"
+            )
+        if self.moe_backend in ("cpu", "hybrid") or self.moe_cpu_layers:
+            raise ValueError(
+                "self-speculative decoding requires GPU expert execution; use "
+                "--moe-backend offload or fused without --moe-cpu-layers"
+            )
 
     @cached_property
     def hf_config(self):

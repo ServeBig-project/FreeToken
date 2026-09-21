@@ -51,6 +51,7 @@ from .prefill import ChunkedReq, PrefillManager
 from .resident_decode import StableDecodeInput, prepare_stable_decode
 from .resident_wave import ResidentExecutor, request_output_view
 from .status import SchedulerStatusReporter
+from .speculative import SpeculativeDecoder
 from .table import TableManager
 
 if TYPE_CHECKING:
@@ -207,6 +208,10 @@ class Scheduler(SchedulerIOMixin):
             )
         self.token_pool = self.table_manager.token_pool
         self.config = config
+        self.speculative = (
+            SpeculativeDecoder(self.engine, self.cache_manager, self.table_manager, self._build_forward_input)
+            if config.speculative_num_steps else None
+        )
         self._refresh_prefill_budget("startup")
         self.status_reporter = SchedulerStatusReporter(
             log=logger.info_rank0,
@@ -919,7 +924,7 @@ class Scheduler(SchedulerIOMixin):
             assert torch.cuda.current_stream() == self.stream
             while True:
                 self.resident_loop()
-        elif ENV.DISABLE_OVERLAP_SCHEDULING:
+        elif ENV.DISABLE_OVERLAP_SCHEDULING or self.speculative is not None:
             with self.engine_stream_ctx:
                 self.engine.stream.wait_stream(self.stream)
                 while True:
@@ -972,8 +977,9 @@ class Scheduler(SchedulerIOMixin):
         if suppressed_finished_reqs is None:
             suppressed_finished_reqs = self.finished_reqs
 
-        batch, (_, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
-        copy_done.synchronize()
+        batch, output = last_data[0].batch, last_data[1]
+        next_tokens_cpu = output.next_tokens_cpu
+        output.copy_done_event.synchronize()
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
         with self.cache_manager.lazy_free_region():
@@ -1003,43 +1009,50 @@ class Scheduler(SchedulerIOMixin):
                     # are freed below/already; shipping this token would append past the
                     # client's terminal reply.
                     continue
-                next_token = next_tokens_cpu[i]
-                req.append_host(next_token.unsqueeze(0))
-                next_token = int(next_token.item())
-                # ``can_decode`` tracks launched forwards; overlap may already have advanced it
-                # for the ongoing batch. Length is reached only when this drained token fills
-                # the host-visible output budget. EOS and stop strings still win over length.
-                hit_length = req.input_ids.numel() == req.max_device_len
-                hit_eos = (
-                    not req.sampling_params.ignore_eos and next_token in self.eos_token_ids
-                )
-                matched_stop = (
-                    self._match_stop_str(req)
-                    if not hit_eos and req.sampling_params.stop_strs
-                    else None
-                )
-                finished = hit_length or hit_eos or matched_stop is not None
-                finish_reason = (
-                    ("stop" if (hit_eos or matched_stop is not None) else "length")
-                    if finished
-                    else None
-                )
-                if (
-                    next_token == self.toolcall_anchor_id
-                    and req.toolcall_anchor_len is None
-                    and not finished
-                ):
-                    req.toolcall_anchor_len = req.input_ids.numel()
-                reply.append(
-                    DetokenizeMsg(
-                        uid=req.uid,
-                        next_token=next_token,
-                        finished=finished,
-                        finish_reason=finish_reason,
-                        matched_stop=matched_stop,
-                        stop_strs=req.sampling_params.stop_strs or None,
+                tokens = next_tokens_cpu[i].reshape(-1)
+                if output.speculative_ends is not None:
+                    tokens = tokens[tokens >= 0]
+                for j, next_token in enumerate(tokens):
+                    if output.speculative_ends is not None:
+                        req.complete_one()
+                    req.append_host(next_token.unsqueeze(0))
+                    next_token = int(next_token.item())
+                    # Only the host-visible, committed prefix determines termination.
+                    hit_length = req.input_ids.numel() == req.max_device_len
+                    hit_eos = (
+                        not req.sampling_params.ignore_eos and next_token in self.eos_token_ids
                     )
-                )
+                    matched_stop = (
+                        self._match_stop_str(req)
+                        if not hit_eos and req.sampling_params.stop_strs
+                        else None
+                    )
+                    finished = hit_length or hit_eos or matched_stop is not None
+                    finish_reason = (
+                        ("stop" if (hit_eos or matched_stop is not None) else "length")
+                        if finished else None
+                    )
+                    if (
+                        next_token == self.toolcall_anchor_id
+                        and req.toolcall_anchor_len is None
+                        and not finished
+                    ):
+                        req.toolcall_anchor_len = req.input_ids.numel()
+                    reply.append(
+                        DetokenizeMsg(
+                            uid=req.uid,
+                            next_token=next_token,
+                            finished=finished,
+                            finish_reason=finish_reason,
+                            matched_stop=matched_stop,
+                            stop_strs=req.sampling_params.stop_strs or None,
+                        )
+                    )
+                    if finished:
+                        break
+                if output.speculative_ends is not None:
+                    self.cache_manager.release_speculative(req, output.speculative_ends[i])
+                    self.speculative.accepted_draft_tokens += min(j + 1, len(tokens) - 1)
 
                 # NOTE: overlap scheduling may make the request freed twice, skip second free
                 if finished and req not in suppressed_finished_reqs:
@@ -1065,6 +1078,8 @@ class Scheduler(SchedulerIOMixin):
         mamba_slots = self._mamba_slot_usage()
         swa_tokens = self._swa_token_usage()
         if reply:
+            if output.speculative_ends is not None:
+                reply[-1].speculative = self.speculative.snapshot()
             mem = self._gpu_mem_bytes()
             mamba_used, mamba_total = mamba_slots or (0, 0)
             swa_used, swa_total = swa_tokens or (0, 0)
@@ -1085,6 +1100,7 @@ class Scheduler(SchedulerIOMixin):
             page_size=self.config.page_size,
             mamba_slots=mamba_slots,
             swa_tokens=swa_tokens,
+            generated_decode_tokens=(len(reply) if output.speculative_ends is not None else None),
         )
         self.send_result(reply)
         return new_finished_reqs
@@ -1588,6 +1604,9 @@ class Scheduler(SchedulerIOMixin):
         batch = self.batch_composer.schedule_next_batch(self.prefill_budget)
         if batch is None:
             return None
+        if self.speculative is not None and batch.is_decode_only:
+            reqs, _ = self.speculative.selector.select(batch, self.config.max_forward_len)
+            batch = Batch(reqs, decode_size=len(reqs))
         forward_input = self._prepare_batch(batch)
         self._report_prompt_admissions(batch)
         return forward_input
@@ -1620,8 +1639,13 @@ class Scheduler(SchedulerIOMixin):
         batch.input_ids = self.token_pool[input_mapping]
         if self.toolcall_anchor_id is not None and batch.has_decode:
             self.cache_manager.snapshot_toolcall_anchor(batch.decode_reqs)
-        forward_output = self.engine.forward_batch(batch, sample_args)
-        self.token_pool[output_mapping] = forward_output.next_tokens_gpu
+        forward_output = (
+            self.speculative.forward(forward_input)
+            if self.speculative is not None and batch.is_decode_only
+            else self.engine.forward_batch(batch, sample_args)
+        )
+        if forward_output.speculative_ends is None:
+            self.token_pool[output_mapping] = forward_output.next_tokens_gpu
         self.decode_manager.filter_reqs(forward_input.batch.reqs)
         return forward_output
 

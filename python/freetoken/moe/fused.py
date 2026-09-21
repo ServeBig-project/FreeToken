@@ -19,7 +19,7 @@ def _torch_fused_topk(
     renormalize: bool,
     num_token_non_padded: torch.Tensor | None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Pure-torch softmax router matching triton_kernels.topk (Windows fallback).
+    """Pure-torch softmax router for expert counts/platforms unsupported by Triton.
 
     Softmax over all experts, select the top-k, and (when ``renormalize``) rescale the
     selected weights to sum to 1 -- the standard fused-MoE routing convention.
@@ -43,6 +43,10 @@ def fused_topk(
     num_token_non_padded: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
+
+    # triton_kernels uses arange(0, topk), which requires a power-of-two count.
+    if topk & (topk - 1):
+        return _torch_fused_topk(gating_output, topk, renormalize, num_token_non_padded)
 
     from freetoken.kernel.backend import is_triton_kernels_installed
 

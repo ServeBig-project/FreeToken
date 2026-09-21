@@ -288,6 +288,7 @@ class ForwardOutput(NamedTuple):
     next_tokens_gpu: torch.Tensor
     next_tokens_cpu: torch.Tensor
     copy_done_event: torch.cuda.Event
+    speculative_ends: list[int] | None = None
 
 
 class Engine:
@@ -947,7 +948,7 @@ class Engine:
             layered_execution_adapter=self._layered_execution_adapter,
         )
 
-    def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
+    def compute_logits(self, batch: Batch) -> torch.Tensor:
         assert torch.cuda.current_stream() == self.stream
         with self.ctx.forward_batch(batch):
             if self.graph_runner.can_use_cuda_graph(batch):
@@ -958,7 +959,10 @@ class Engine:
             # One pinned read: surfaces a fired flag-handshake watchdog (dead coordinator
             # -> stale expert outputs) as a loud error instead of silent corruption.
             self.cpu_moe_executor.raise_if_unhealthy()
+        return logits
 
+    def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
+        logits = self.compute_logits(batch)
         for req in batch.reqs:
             req.complete_one()
 
@@ -1437,6 +1441,16 @@ def _adjust_config(config: EngineConfig):
         object.__setattr__(model_config, "expert_quant", "nowag")
         object.__setattr__(model_config, "nowag_expert_path", nowag_expert_path)
     expert_quant = getattr(model_config, "expert_quant", "none")
+
+    if config.speculative_num_steps:
+        # A draft uses different routing from a captured target decode; verification
+        # has ragged query lengths. Keep this initial implementation eager.
+        override("cuda_graph_bs", [])
+        override("cuda_graph_max_bs", 0)
+        if config.moe_backend == "auto":
+            override("moe_backend", "offload")
+            if not config.moe_cache_size and config.moe_cache_rate is None:
+                override("moe_cache_auto", True)
 
     if not is_moe:
         # A dense model has no routed experts: the MoE knobs are inert, and the offload family

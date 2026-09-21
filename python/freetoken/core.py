@@ -117,6 +117,8 @@ class Batch:
     # whole forward. A batch containing any prefill rows uses the ragged extend path;
     # only a decode-only batch is eligible for the specialized decode/CUDA-graph path.
     decode_size: int = 0
+    draft_experts: int | None = None
+    is_speculative_verify: bool = False
     # these fields should be set by scheduler
     input_ids: torch.Tensor = field(init=False)
     positions: torch.Tensor = field(init=False)
