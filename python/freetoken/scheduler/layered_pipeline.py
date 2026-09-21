@@ -4,7 +4,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import torch
 from freetoken.core import Batch, Req
+from freetoken.engine.prefill_memory import PrefillMemoryBudget
 from freetoken.utils import init_logger
 
 from .batch_composition import compose_mixed_batch
@@ -50,7 +52,7 @@ class _LayeredPipelineWave:
 
 
 class LayeredPipelineExecutor:
-    """Advance one complete ragged prefill wave by one layer group per iteration."""
+    """Advance a memory-bounded ragged prefill wave one layer group per iteration."""
 
     def __init__(
         self,
@@ -79,6 +81,7 @@ class LayeredPipelineExecutor:
         self._report_prompt_admissions = report_prompt_admissions
         self._free_req_resources = free_req_resources
         self._execution = engine.layered_execution_adapter
+        self._memory = PrefillMemoryBudget(engine.device)
         self._wave: _LayeredPipelineWave | None = None
         self._staged_admission: ResidentWaveAdmission | None = None
         self._decode_input: ForwardInput | None = None
@@ -96,9 +99,23 @@ class LayeredPipelineExecutor:
 
         admission = ResidentWaveAdmission(self._max_wave_chunks, token_budget)
         admission.refresh_members(self._prefill_manager)
-        prefill_batch = self._prefill_manager.schedule_full_prefill_batch(
-            admission.uids,
+        if not admission.members:
+            self._staged_admission = None
+            return compose_mixed_batch(decode_reqs, None)
+        wave_budget = self._memory.token_budget(
+            token_budget, self._max_wave_chunks * token_budget
+        )
+        if self._engine.config.tp_info.size > 1:
+            budget = torch.tensor([wave_budget], dtype=torch.int64, device="cpu")
+            torch.distributed.all_reduce(
+                budget, op=torch.distributed.ReduceOp.MIN, group=self._engine.tp_cpu_group
+            )
+            wave_budget = int(budget.item())
+        prefill_batch = self._prefill_manager.schedule_next_batch(
+            wave_budget,
+            allowed_uids=admission.uids,
             max_reqs=len(admission.members),
+            incremental_window_prefill=True,
         )
         if prefill_batch is None:
             self._staged_admission = None
@@ -259,6 +276,9 @@ class LayeredPipelineExecutor:
         if group_input is None or prefill_input is None:
             raise RuntimeError("layered pipeline iteration was not prepared")
 
+        rows = sum(req.extend_len for req in prefill_input.batch.prefill_reqs)
+        first_stage = wave.current_stage == 0
+        memory_before = self._memory.start()
         stage = wave.cache_session.begin(
             wave.current_stage,
             has_decode=self._decode_input is not None,
@@ -312,6 +332,7 @@ class LayeredPipelineExecutor:
             result.decode_state,
             stage.end_layer,
         )
+        self._memory.record(memory_before, rows, first_stage=first_stage)
         self._decode_input = None
         self._group_input = None
         self._current_prefill_input = None

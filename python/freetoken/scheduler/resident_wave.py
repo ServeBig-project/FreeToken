@@ -62,8 +62,8 @@ class ResidentWaveAdmission:
     """FIFO membership and complete-request accounting for one resident wave.
 
     ``soft_chunk_cap`` applies to the sum of complete requests admitted after
-    the first member.  A first request larger than the cap remains intact and
-    makes the wave exclusive.
+    the first member. A first request larger than the cap makes membership
+    exclusive; layered-pipeline separately bounds its materialized token range.
     """
 
     soft_chunk_cap: int
