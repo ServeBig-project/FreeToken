@@ -30,10 +30,6 @@ _SMALL_BANK_FEAT_BYTES = 256 * 1024
 # converts the complete working set back to a finite tie-break epoch.
 _RESIDENT_PINNED_USAGE = (1 << 63) - 1
 
-# flashlib lru_ensure builds a Q x Q deduplication matrix; Triton's maximum
-# tensor numel of 2^20 therefore limits each query to Q <= 1024.
-_LRU_ENSURE_MAX_QUERY = 1024
-
 from freetoken.utils import init_logger
 
 logger = init_logger(__name__)
@@ -2032,15 +2028,7 @@ class OffloadMoeCache:
             ids = expert_ids.reshape(-1).long()
             self.decode_freq[layer_id].scatter_add_(0, ids, torch.ones_like(ids))
         self._pending_src_layer = layer_id
-        if expert_ids.numel() <= _LRU_ENSURE_MAX_QUERY:
-            ensure_experts(self, layer_id, expert_ids)
-            return
-
-        flat_expert_ids = expert_ids.view(-1)
-        for start in range(0, flat_expert_ids.numel(), _LRU_ENSURE_MAX_QUERY):
-            chunk = flat_expert_ids[start : start + _LRU_ENSURE_MAX_QUERY]
-            ensure_experts(self, layer_id, chunk)
-            self.copy_missing()
+        ensure_experts(self, layer_id, expert_ids)
 
     def ensure_decode_experts(
         self, layer_id: int, expert_ids: torch.Tensor
@@ -2053,13 +2041,13 @@ class OffloadMoeCache:
             self.ensure_experts(layer_id, expert_ids)
             return
 
-        from freetoken.moe.offload_kernels import ensure_decode_experts
+        from freetoken.moe.offload_kernels import ensure_experts
 
         if self.collect_decode_freq:
             ids = expert_ids.reshape(-1).long()
             self.decode_freq[layer_id].scatter_add_(0, ids, torch.ones_like(ids))
         self._pending_src_layer = layer_id
-        ensure_decode_experts(self, layer_id, expert_ids)
+        ensure_experts(self, layer_id, expert_ids, layer_distance=True)
 
     def ensure_experts_hybrid(self, layer_id: int, expert_ids: torch.Tensor) -> None:
         """Capped-fetch LRU for the hybrid backend.
