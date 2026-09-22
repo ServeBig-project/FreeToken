@@ -83,7 +83,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("base_url")
     parser.add_argument("output", type=Path)
-    parser.add_argument("--part", choices=("evaluate", "calibrate"), default="evaluate")
+    parser.add_argument("--part", choices=("evaluate", "calibrate", "draft-ablation"), default="evaluate")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     report = {"part": args.part, "base_url": args.base_url, "batches": [], "quality": []}
@@ -96,6 +96,8 @@ def main():
 
         def batch(label, bodies):
             before = observer.idle()
+            if args.part == "draft-ablation":
+                (args.output / "phase.txt").write_text(label)
             start = time.monotonic()
             with ThreadPoolExecutor(max_workers=len(bodies)) as pool:
                 rows = list(pool.map(lambda body: stream(client, model, body), bodies))
@@ -105,8 +107,17 @@ def main():
             record = {"label": label, "seconds": elapsed, "completion_tokens": tokens,
                       "completion_tps": tokens / elapsed, "responses": rows,
                       "stats_before": before, "stats_after": after, "stats_delta": stats_delta(before, after)}
+            if args.part == "draft-ablation":
+                speculative = record["stats_delta"].get("speculative", {})
+                drafted = speculative.get("draft_tokens", 0)
+                record["scored"] = label != "warmup"
+                record["draft_acceptance_rate"] = (speculative["accepted_draft_tokens"] / drafted
+                                                     if drafted else None)
             report["batches"].append(record)
             (args.output / "http.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
+            if args.part == "draft-ablation":
+                assert all(row["usage"]["completion_tokens"] == 64 and row["finish_reason"] == "length"
+                           for row in rows), "Incomplete fixed-length workload; see saved HTTP evidence"
             print(json.dumps({"label": label, "seconds": elapsed, "completion_tokens": tokens}), flush=True)
             return rows
 
@@ -115,17 +126,19 @@ def main():
                 batch(f"calibration-{index}", [request(prompt)])
         else:
             batch("warmup", [request(PERFORMANCE[0][1], 64)] * 4)
+            limit = 64 if args.part == "draft-ablation" else 256
             for repeat in range(2):
                 for name, prompt in PERFORMANCE:
                     for concurrency in (1, 4):
-                        batch(f"performance-{repeat}-{name}-c{concurrency}", [request(prompt)] * concurrency)
-            for offset in range(0, len(TASKS), 4):
-                tasks = TASKS[offset:offset + 4]
-                responses = batch(f"quality-{offset // 4}", [request(coding_prompt(task), ignore_eos=False) for task in tasks])
-                for task, response in zip(tasks, responses):
-                    report["quality"].append({"task": task["name"], **judge(task, response, args.output)})
-            report["quality_passed"] = sum(row["passed"] for row in report["quality"])
-            report["quality_total"] = len(TASKS)
+                        batch(f"performance-{repeat}-{name}-c{concurrency}", [request(prompt, limit)] * concurrency)
+            if args.part == "evaluate":
+                for offset in range(0, len(TASKS), 4):
+                    tasks = TASKS[offset:offset + 4]
+                    responses = batch(f"quality-{offset // 4}", [request(coding_prompt(task), ignore_eos=False) for task in tasks])
+                    for task, response in zip(tasks, responses):
+                        report["quality"].append({"task": task["name"], **judge(task, response, args.output)})
+                report["quality_passed"] = sum(row["passed"] for row in report["quality"])
+                report["quality_total"] = len(TASKS)
     (args.output / "http.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
     print(json.dumps({"output": str(args.output), "quality_passed": report.get("quality_passed")}), flush=True)
 

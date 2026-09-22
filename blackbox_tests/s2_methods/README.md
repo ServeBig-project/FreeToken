@@ -174,3 +174,36 @@ For the unfixed control, set `FT_SD_CANDIDATE` to
 regression reproduction fails `necessary_execution_only` with otherwise valid
 requests and counters; startup/input/snapshot failures do not establish it.
 CPU compilation and collection do not establish GPU acceptance.
+
+## Draft expert-count ablation
+
+Use the same HTTP runner with `--part draft-ablation` on each ready ordinary or
+SD server. The frozen prompts are `PERFORMANCE` in `corpus.py`: an explanation
+of blue-sky scattering and a stable Python merge-sort implementation. Each run
+has one separate 4x64-token warmup, followed by both prompts at concurrency 1
+and 4, in two fixed rounds: 20 measured requests and 1,280 output tokens. All
+requests use temperature 0 and `ignore_eos=true`; incomplete 64-token responses
+fail after their public evidence is saved. No coding-quality judging is run.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /home/nengneng/miniconda3/envs/freetoken-dev/bin/python \
+  blackbox_tests/s2_methods/evaluate_http.py http://127.0.0.1:60387 \
+  /data2/servebig-envs/draft_k_ablation_20260922/k1 --part draft-ablation
+```
+
+The coordinator starts all services with the same model, 1,536 dynamic expert
+slots, context/KV/prefill budgets, cache policy and input history. Disable
+adaptive drafting, verification-route reuse and permanent residency. SD uses
+maximum 4 draft steps and separately sets draft experts to 1, 2 or 3; ordinary
+generation uses SD disabled. Save each service command and output directory.
+
+Before sending each batch, its label is written to the output's `phase.txt` for
+the coordinator's separate observations. `http.json` keeps every repetition and
+marks warmup `scored=false`. It records
+text, usage, TTFT, request/batch completion time and full public stats/deltas,
+including draft, accepted-draft and verification counts. Acceptance rate is the
+observed accepted/drafted ratio, or null when no drafts occurred. Compare the
+two-round mean for each prompt/concurrency and total tokens/total time, excluding
+warmup. No expert count is assumed faster. Execution-route differences between
+configurations must be reported separately; this workload cannot isolate their
+cost from the effect of expert count. Fusion and new quality tasks are excluded.
