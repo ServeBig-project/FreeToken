@@ -109,6 +109,11 @@ set stays valid for the whole round. Ordinary generation, prefill and target
 verification keep their previous routing/loading behavior. The modes compose
 with cost-based expansion and the separate approximate verification-reuse option.
 
+With approximate verification reuse enabled, drafts depend on cache contents, so
+repeated requests can produce different outputs after different cache histories.
+With reuse disabled, the original target contract still applies; the approximate
+combination is not lossless.
+
 `/v1/stats.speculative` adds `draft_residency` and `residency_stops`, the number of
 request-rounds refused drafting because of that shared shortage. With existing
 `--moe-collect-stats` enabled, `draft_expert_loads` counts actual expert-row loads
