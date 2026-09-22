@@ -42,6 +42,7 @@ def test_stop_before_unaffordable_draft(checkpoint, artifacts):
                   for limit in (8, 17, 33, 64)])]
     with serve(name, CANDIDATE, artifacts, steps=16, experts=3, cache="naive",
                extra_args=["--speculative-adaptive-profile", str(profile), "--moe-collect-stats",
+                           "--moe-cache-size", "128", "--disable-moe-prefill-overlap",
                            "--cuda-graph-max-bs", "0"]) as server:
         for label, requests in phases:
             before = server.idle()
