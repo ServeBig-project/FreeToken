@@ -4,6 +4,7 @@ from contextlib import suppress
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -61,25 +62,25 @@ def test_expert_selection_bounds(tmp_path, count):
 
 COST = {"target_token_ms": 45.0, "draft_step_ms": 27.0, "expert_bandwidth_gib_s": 24.419}
 STARTUP_CASES = [
-    (["--moe-resident-experts", "INPUT"], {"gpu_experts": [[0, 0], [0, 0]]}),
-    (["--moe-resident-experts", "INPUT"], {"gpu_experts": [[48, 0]]}),
-    (["--moe-resident-experts", "INPUT"], {"gpu_experts": [[0, 128]]}),
+    (["--moe-resident-experts", "INPUT"], {"gpu_experts": [[0, 0], [0, 0]]}, r"resident|duplicate|unique"),
+    (["--moe-resident-experts", "INPUT"], {"gpu_experts": [[48, 0]]}, r"resident|layer|range"),
+    (["--moe-resident-experts", "INPUT"], {"gpu_experts": [[0, 128]]}, r"resident|expert|range"),
     (["--moe-resident-experts", "INPUT", "--moe-cache-size", "1279"],
-     {"gpu_experts": [[layer, expert] for layer in range(8) for expert in range(128)]}),
-    (["--moe-resident-experts", "INPUT", "--moe-backend", "fused"], {"gpu_experts": [[0, 0]]}),
-    (["--moe-resident-experts", "INPUT", "--batching-policy", "mixed"], {"gpu_experts": [[0, 0]]}),
-    (["--moe-expert-profile", "INPUT", "--speculative-num-steps", "4"], {}),
-    (["--speculative-adaptive-profile", "INPUT"], COST),
-    *[(["--speculative-num-steps", "16", "--speculative-adaptive-profile", "INPUT"], {**COST, key: value})
+     {"gpu_experts": [[layer, expert] for layer in range(8) for expert in range(128)]}, r"resident|cache|slot|prefill"),
+    (["--moe-resident-experts", "INPUT", "--moe-backend", "fused"], {"gpu_experts": [[0, 0]]}, r"resident|fused|offload"),
+    (["--moe-resident-experts", "INPUT", "--batching-policy", "mixed"], {"gpu_experts": [[0, 0]]}, r"legacy|batching-policy"),
+    (["--moe-expert-profile", "INPUT", "--speculative-num-steps", "4"], {}, r"profile|profiling|ordinary|speculative"),
+    (["--speculative-adaptive-profile", "INPUT"], COST, r"adaptive|speculative"),
+    *[(["--speculative-num-steps", "16", "--speculative-adaptive-profile", "INPUT"], {**COST, key: value}, rf"{key}|positive|finite|adaptive|profile")
       for key, value in [("target_token_ms", 0), ("draft_step_ms", -1), ("expert_bandwidth_gib_s", float("inf"))]],
-    (["--speculative-reuse-expert-cap", "14"], {}),
-    (["--speculative-num-steps", "16", "--speculative-reuse-expert-cap", "7"], {}),
-    (["--speculative-num-steps", "16", "--speculative-reuse-expert-cap", "129"], {}),
+    (["--speculative-reuse-expert-cap", "14"], {}, r"reuse|speculative"),
+    (["--speculative-num-steps", "16", "--speculative-reuse-expert-cap", "7"], {}, r"reuse|cap|range|experts"),
+    (["--speculative-num-steps", "16", "--speculative-reuse-expert-cap", "129"], {}, r"reuse|cap|range|experts"),
 ]
 
 
-@pytest.mark.parametrize("options,payload", STARTUP_CASES)
-def test_startup_rejection(tmp_path, options, payload):
+@pytest.mark.parametrize("options,payload,reason", STARTUP_CASES)
+def test_startup_rejection(tmp_path, options, payload, reason):
     """Malformed controls must reject clearly before serving requests."""
     gpu = os.environ.get("FT_SD_GPU")
     if not gpu:
@@ -91,4 +92,4 @@ def test_startup_rejection(tmp_path, options, payload):
                            "--moe-backend", "offload", "--batching-policy", "legacy",
                            "--moe-cache-size", "1536", "--num-tokens", "4096", *options])
     assert code != 0, options
-    assert any(word in output.lower() for word in ("resident", "profile", "adaptive", "reuse")), output
+    assert re.search(reason, output, re.I), output
