@@ -23,6 +23,7 @@ class EngineConfig:
     speculative_draft_experts: int = 3
     moe_resident_experts: str | None = None
     moe_expert_profile: str | None = None
+    speculative_adaptive_profile: str | None = None
     attention_backend: str = "auto"
     moe_backend: str = "auto"
     # NVFP4 routed-expert GEMM backend (--nvfp4-backend): auto|marlin|flashinfer|triton.
@@ -96,6 +97,10 @@ class EngineConfig:
             raise ValueError("speculative_num_steps must be >= 0")
         if self.speculative_draft_experts < 1:
             raise ValueError("speculative_draft_experts must be >= 1")
+        if self.speculative_adaptive_profile:
+            if not self.speculative_num_steps:
+                raise ValueError("--speculative-adaptive-profile requires SD enabled")
+            self.draft_cost
         if not (self.speculative_num_steps or self.moe_resident_experts or self.moe_expert_profile):
             return
         if self.tp_info.size != 1:
@@ -120,6 +125,13 @@ class EngineConfig:
             if self.moe_backend == "fused":
                 raise ValueError("fused experts are already resident; omit --moe-resident-experts")
             self.resident_experts  # validate the list before allocating GPU memory
+
+    @cached_property
+    def draft_cost(self) -> dict[str, float] | None:
+        if self.speculative_adaptive_profile is None:
+            return None
+        from .speculative_policy import load_draft_cost
+        return load_draft_cost(self.speculative_adaptive_profile)
 
     @cached_property
     def resident_experts(self) -> tuple[tuple[int, int], ...]:

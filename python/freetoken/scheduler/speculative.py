@@ -7,6 +7,7 @@ import torch
 
 from freetoken.core import Batch
 from freetoken.engine import ForwardOutput
+from freetoken.engine.speculative_policy import DraftExpansion
 from freetoken.utils import div_ceil
 
 from .batch_composition import DecodeBatchSelector
@@ -40,12 +41,14 @@ class SpeculativeDecoder:
         self.draft_tokens = 0
         self.accepted_draft_tokens = 0
         self.verify_steps = 0
+        self.adaptive_stops = 0
 
     def snapshot(self) -> dict[str, int]:
         return {
             "draft_tokens": self.draft_tokens,
             "accepted_draft_tokens": self.accepted_draft_tokens,
             "verify_steps": self.verify_steps,
+            "adaptive_stops": self.adaptive_stops,
         }
 
     def _draft_lengths(self, batch: Batch) -> list[int]:
@@ -76,6 +79,7 @@ class SpeculativeDecoder:
             return self.engine.forward_batch(batch, forward_input.sample_args)
 
         engine, sampler = self.engine, self.engine.sampler
+        expansion = DraftExpansion(engine, batch.size) if engine.config.draft_cost else None
         starts = [req.device_len for req in batch.reqs]
         ends = [start + length for start, length in zip(starts, lengths, strict=True)]
         views = [copy(req) for req in batch.reqs]
@@ -92,6 +96,8 @@ class SpeculativeDecoder:
         proposals = torch.zeros(batch.size, steps + 1, dtype=torch.int32, device=engine.device)
         for step in range(steps):
             active = [i for i, length in enumerate(lengths) if length > step]
+            if not active:
+                break
             draft_reqs = [views[i] for i in active]
             for i in active:
                 views[i].cached_len = starts[i] + step - 1
@@ -100,21 +106,40 @@ class SpeculativeDecoder:
                 draft_reqs, decode_size=len(draft_reqs),
                 draft_experts=engine.config.speculative_draft_experts,
             )
-            probs = sampler.probabilities(self._logits(draft), sampler.prepare(draft))
+            if expansion is not None:
+                draft.draft_routes = torch.empty(
+                    engine.config.model_config.num_moe_layers, len(active), draft.draft_experts,
+                    dtype=torch.int32, device=engine.device,
+                )
+            logits = self._logits(draft)
+            if expansion is not None:
+                allowed = expansion.allows(active, draft.draft_routes, first=step == 0)
+                for i, keep in zip(active, allowed, strict=True):
+                    if not keep:
+                        lengths[i] = step
+                        self.adaptive_stops += 1
+                active = [i for i, keep in zip(active, allowed, strict=True) if keep]
+                if not active:
+                    break
+                logits = logits[allowed]
+                draft = Batch([views[i] for i in active], decode_size=len(active))
+            probs = sampler.probabilities(logits, sampler.prepare(draft))
             tokens = torch.multinomial(
                 probs, 1, generator=self.generator
             ).flatten().to(torch.int32)
+            if expansion is not None:
+                expansion.record(active, logits, tokens)
             draft_probs[active, step] = probs
             proposals[active, step] = tokens
-            rows = [req.table_idx for req in draft_reqs]
+            rows = [views[i].table_idx for i in active]
             positions = [starts[i] + step for i in active]
             self.table.token_pool[rows, positions] = tokens
         self.draft_tokens += sum(lengths)
 
         # Target attention overwrites every provisional query, layer by layer,
         # while retaining only the already verified prefix before the round.
-        for req, start, end in zip(views, starts, ends, strict=True):
-            req.cached_len, req.device_len = start - 1, end
+        for req, start, length in zip(views, starts, lengths, strict=True):
+            req.cached_len, req.device_len = start - 1, start + length
         verify = Batch(views, is_speculative_verify=True)
         logits = self._logits(verify)
         target_probs = sampler.probabilities(
@@ -140,7 +165,7 @@ class SpeculativeDecoder:
             out.masked_fill_(torch.arange(length + 1, device=engine.device) > accepted, -1)
             output[i, : length + 1] = out
             req = batch.reqs[i]
-            self.table.token_pool[req.table_idx, starts[i] : ends[i] + 1] = out
+            self.table.token_pool[req.table_idx, starts[i] : starts[i] + length + 1] = out
             offset += length + 1
 
         host = output.to("cpu", non_blocking=True)

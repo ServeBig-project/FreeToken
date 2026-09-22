@@ -262,6 +262,10 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--speculative-adaptive-profile", default=ServerArgs.speculative_adaptive_profile,
+        help="JSON with measured target/draft milliseconds and expert bandwidth GiB/s; enables cost-aware expansion.",
+    )
+    parser.add_argument(
         "--moe-resident-experts", default=ServerArgs.moe_resident_experts,
         help="JSON gpu_experts list kept resident inside the total offload cache budget.",
     )

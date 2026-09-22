@@ -118,6 +118,7 @@ class Batch:
     # only a decode-only batch is eligible for the specialized decode/CUDA-graph path.
     decode_size: int = 0
     draft_experts: int | None = None
+    draft_routes: torch.Tensor | None = None
     is_speculative_verify: bool = False
     # these fields should be set by scheduler
     input_ids: torch.Tensor = field(init=False)

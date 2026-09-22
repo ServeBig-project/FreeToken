@@ -32,6 +32,8 @@ class Qwen3MoeMLP(BaseOP):
             weights, ids = fused_topk(
                 hidden_states, router_logits, draft_experts or self.experts.top_k, self.experts.renormalize
             )
+            if ctx.batch.draft_routes is not None:
+                ctx.batch.draft_routes[self.layer_id].copy_(ids)
             if ctx.expert_counts is not None:
                 import torch
                 ctx.expert_counts[self.layer_id].scatter_add_(

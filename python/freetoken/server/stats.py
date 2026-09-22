@@ -37,7 +37,8 @@ class StatsTracker:
         self.swa_used_tokens = 0
         self.swa_total_tokens = 0
         self.vram_bytes = 0
-        self.speculative = {"draft_tokens": 0, "accepted_draft_tokens": 0, "verify_steps": 0}
+        self.speculative = {"draft_tokens": 0, "accepted_draft_tokens": 0, "verify_steps": 0,
+                            "adaptive_stops": 0}
 
     @property
     def active(self) -> int:
@@ -169,6 +170,7 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
         "gpus": list(getattr(state, "gpus", None) or []),
         "speculative": {
             "enabled": bool(getattr(config, "speculative_num_steps", 0)),
+            "adaptive_enabled": bool(config.speculative_adaptive_profile),
             **tr.speculative,
         },
         "moe_residency": {
