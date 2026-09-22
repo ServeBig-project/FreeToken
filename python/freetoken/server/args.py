@@ -262,6 +262,10 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--speculative-reuse-expert-cap", type=int, default=ServerArgs.speculative_reuse_expert_cap,
+        help="Preferred experts per request/layer during verification; 0 disables approximate routing reuse.",
+    )
+    parser.add_argument(
         "--speculative-adaptive-profile", default=ServerArgs.speculative_adaptive_profile,
         help="JSON with measured target/draft milliseconds and expert bandwidth GiB/s; enables cost-aware expansion.",
     )

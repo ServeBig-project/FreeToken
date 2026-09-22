@@ -203,6 +203,8 @@ class Context:
     moe_backend: BaseMoeBackend = field(init=False)
     moe_offload_cache: OffloadMoeCache | None = None
     expert_counts: torch.Tensor | None = None
+    reuse_expert_cap: int = 0
+    reuse_changed_routes: torch.Tensor | None = None
     kv_cache: BaseKVCachePool = field(init=False)
     # Per-request recurrent state for GatedDeltaNet layers; set by the engine for
     # hybrid linear-attention models, otherwise None.

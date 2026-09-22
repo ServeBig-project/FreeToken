@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from freetoken.layers import BaseOP, LinearReplicated, make_moe_layer
 from freetoken.core import get_global_ctx
 from freetoken.moe.fused import fused_topk
+from freetoken.engine.speculative_policy import reuse_routing
 
 if TYPE_CHECKING:
     import torch
@@ -28,12 +29,19 @@ class Qwen3MoeMLP(BaseOP):
         router_logits = self.gate.forward(hidden_states)
         ctx = get_global_ctx()
         draft_experts = ctx.batch.draft_experts
-        if draft_experts is not None or ctx.expert_counts is not None:
+        reuse = ctx.reuse_expert_cap and ctx.batch.is_speculative_verify
+        if draft_experts is not None or ctx.expert_counts is not None or reuse:
             weights, ids = fused_topk(
                 hidden_states, router_logits, draft_experts or self.experts.top_k, self.experts.renormalize
             )
             if ctx.batch.draft_routes is not None:
                 ctx.batch.draft_routes[self.layer_id].copy_(ids)
+            if reuse:
+                weights, ids, changed = reuse_routing(
+                    router_logits, weights, ids, [req.extend_len for req in ctx.batch.reqs],
+                    ctx.reuse_expert_cap, self.experts.renormalize,
+                )
+                ctx.reuse_changed_routes += changed
             if ctx.expert_counts is not None:
                 import torch
                 ctx.expert_counts[self.layer_id].scatter_add_(

@@ -24,6 +24,7 @@ class EngineConfig:
     moe_resident_experts: str | None = None
     moe_expert_profile: str | None = None
     speculative_adaptive_profile: str | None = None
+    speculative_reuse_expert_cap: int = 0
     attention_backend: str = "auto"
     moe_backend: str = "auto"
     # NVFP4 routed-expert GEMM backend (--nvfp4-backend): auto|marlin|flashinfer|triton.
@@ -97,6 +98,14 @@ class EngineConfig:
             raise ValueError("speculative_num_steps must be >= 0")
         if self.speculative_draft_experts < 1:
             raise ValueError("speculative_draft_experts must be >= 1")
+        if self.speculative_reuse_expert_cap < 0:
+            raise ValueError("speculative_reuse_expert_cap must be >= 0")
+        if self.speculative_reuse_expert_cap:
+            if not self.speculative_num_steps:
+                raise ValueError("--speculative-reuse-expert-cap requires SD enabled")
+            model = self.model_config
+            if not model.num_experts_per_tok <= self.speculative_reuse_expert_cap <= model.num_experts:
+                raise ValueError("reuse expert cap must be between target top-k and experts per layer")
         if self.speculative_adaptive_profile:
             if not self.speculative_num_steps:
                 raise ValueError("--speculative-adaptive-profile requires SD enabled")

@@ -33,6 +33,7 @@ class SpeculativeDecoder:
         self.cache = cache
         self.table = table
         self.prepare = prepare
+        self.expansion = DraftExpansion(engine) if engine.config.draft_cost else None
         # FlashInfer uses its updated default-generator offset for the current draw.
         # A separate seed keeps subsequent Torch draws from reusing that random stream.
         self.generator = torch.Generator(device=engine.device)
@@ -49,6 +50,10 @@ class SpeculativeDecoder:
             "accepted_draft_tokens": self.accepted_draft_tokens,
             "verify_steps": self.verify_steps,
             "adaptive_stops": self.adaptive_stops,
+            "reuse_changed_routes": (
+                int(self.engine.ctx.reuse_changed_routes.item())
+                if self.engine.ctx.reuse_changed_routes is not None else 0
+            ),
         }
 
     def _draft_lengths(self, batch: Batch) -> list[int]:
@@ -79,7 +84,9 @@ class SpeculativeDecoder:
             return self.engine.forward_batch(batch, forward_input.sample_args)
 
         engine, sampler = self.engine, self.engine.sampler
-        expansion = DraftExpansion(engine, batch.size) if engine.config.draft_cost else None
+        expansion = self.expansion
+        if expansion is not None:
+            expansion.start(batch.size)
         starts = [req.device_len for req in batch.reqs]
         ends = [start + length for start, length in zip(starts, lengths, strict=True)]
         views = [copy(req) for req in batch.reqs]

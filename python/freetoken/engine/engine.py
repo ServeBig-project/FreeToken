@@ -311,6 +311,9 @@ class Engine:
         # (num_pages sizing, --moe-cache-auto); the instance owns rebuild/validation after.
         self._pool_cls = resolve_pool_class(config.model_config)
         self.ctx = Context(config.page_size)
+        self.ctx.reuse_expert_cap = config.speculative_reuse_expert_cap
+        if self.ctx.reuse_expert_cap:
+            self.ctx.reuse_changed_routes = torch.zeros((), dtype=torch.int64, device=self.device)
         if config.moe_expert_profile:
             self.ctx.expert_counts = torch.zeros(
                 config.model_config.num_moe_layers, config.model_config.num_experts,
