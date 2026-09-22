@@ -66,6 +66,9 @@ Resource and output boundaries may shorten a round or require ordinary decoding.
 
 The policy uses the existing draft prefix's cumulative confidence, newly observed
 non-resident experts and measured draft cost before drawing the next proposal.
+After the first candidate, if prefix confidence times `target_token_ms` is less
+than `draft_step_ms`, that request stops before the next draft model forward.
+Other requests continue, with the routing-cost decision applied when still needed.
 It never removes a sampled candidate merely because its cost looks poor. At least
 the first candidate is kept when resources permit. With verification reuse off,
 the original target's sampling contract remains in force.

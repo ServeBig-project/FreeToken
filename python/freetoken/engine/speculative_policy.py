@@ -42,11 +42,14 @@ class DraftExpansion:
         )
         self.confidence = torch.ones(batch_size, device=self.resident.device)
 
-    def allows(self, active: list[int], routes: torch.Tensor, *, first: bool) -> list[bool]:
-        seen = self.seen[active]
-        routed = torch.zeros_like(seen).scatter_(2, routes.transpose(0, 1).long(), True)
-        new_cold = (routed & ~seen & ~self.resident).sum(dim=(1, 2))
-        self.seen[active] = seen | routed
+    def allows(self, active: list[int], routes: torch.Tensor | None = None, *, first: bool = False) -> list[bool]:
+        # Without routing, zero transfer is a lower bound on the next step's cost.
+        new_cold = 0
+        if routes is not None:
+            seen = self.seen[active]
+            routed = torch.zeros_like(seen).scatter_(2, routes.transpose(0, 1).long(), True)
+            new_cold = (routed & ~seen & ~self.resident).sum(dim=(1, 2))
+            self.seen[active] = seen | routed
         if first:
             return [True] * len(active)
         benefit = self.confidence[active] * self.cost["target_token_ms"]

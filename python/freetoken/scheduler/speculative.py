@@ -78,6 +78,16 @@ class SpeculativeDecoder:
         batch.input_ids = self.table.token_pool[forward_input.input_tuple]
         return self.engine.compute_logits(batch)
 
+    def _filter_drafts(self, active, allowed, lengths, step) -> list[int]:
+        continuing = []
+        for i, keep in zip(active, allowed, strict=True):
+            if keep:
+                continuing.append(i)
+            else:
+                lengths[i] = step
+                self.adaptive_stops += 1
+        return continuing
+
     def forward(self, forward_input: ForwardInput) -> ForwardOutput:
         batch = forward_input.batch
         lengths = self._draft_lengths(batch)
@@ -104,6 +114,8 @@ class SpeculativeDecoder:
         proposals = torch.zeros(batch.size, steps + 1, dtype=torch.int32, device=engine.device)
         for step in range(steps):
             active = [i for i, length in enumerate(lengths) if length > step]
+            if active and expansion is not None and step > 0:
+                active = self._filter_drafts(active, expansion.allows(active), lengths, step)
             if not active:
                 break
             draft_reqs = [views[i] for i in active]
@@ -122,11 +134,7 @@ class SpeculativeDecoder:
             logits = self._logits(draft)
             if expansion is not None:
                 allowed = expansion.allows(active, draft.draft_routes, first=step == 0)
-                for i, keep in zip(active, allowed, strict=True):
-                    if not keep:
-                        lengths[i] = step
-                        self.adaptive_stops += 1
-                active = [i for i, keep in zip(active, allowed, strict=True) if keep]
+                active = self._filter_drafts(active, allowed, lengths, step)
                 if not active:
                     break
                 logits = logits[allowed]
