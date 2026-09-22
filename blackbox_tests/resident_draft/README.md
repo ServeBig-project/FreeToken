@@ -104,6 +104,16 @@ SD-disabled errors; fix the CLI if those fail after implementation is complete.
 PYTHONPATH=python "$TEST_PYTHON" blackbox_tests/resident_draft/check_cli.py
 ```
 
+## Stream/history diagnosis
+
+On two separately started services with identical settings, run:
+`python blackbox_tests/resident_draft/diagnose_stream.py --url URL --first plain --output plain.json`,
+then use `--first stream --output stream.json` on the second fresh service.
+The script retains responses, complete stream events and before/after statistics.
+Only cold first requests have identical initial conditions; later calls include
+sampled history and reveal whether repeated plain requests also change with
+cache history. This records evidence without changing acceptance assertions.
+
 ## Evidence boundaries
 
 This matrix covers the real BF16 offload checkpoint. It does not claim fused or
