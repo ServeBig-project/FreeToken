@@ -262,6 +262,11 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--speculative-draft-residency", choices=["off", "router", "affinity"],
+        default=ServerArgs.speculative_draft_residency,
+        help="Restrict drafting to current GPU experts by router score or full-weight L2 affinity.",
+    )
+    parser.add_argument(
         "--speculative-reuse-expert-cap", type=int, default=ServerArgs.speculative_reuse_expert_cap,
         help="Preferred experts per request/layer during verification; 0 disables approximate routing reuse.",
     )

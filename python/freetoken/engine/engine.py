@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import math
 import os
+import time
 from datetime import timedelta
 from typing import Any, Dict, Iterable, NamedTuple, Sequence, Tuple
 
@@ -311,6 +312,7 @@ class Engine:
         # (num_pages sizing, --moe-cache-auto); the instance owns rebuild/validation after.
         self._pool_cls = resolve_pool_class(config.model_config)
         self.ctx = Context(config.page_size)
+        self.ctx.draft_residency = config.speculative_draft_residency
         self.ctx.reuse_expert_cap = config.speculative_reuse_expert_cap
         if self.ctx.reuse_expert_cap:
             self.ctx.reuse_changed_routes = torch.zeros((), dtype=torch.int64, device=self.device)
@@ -368,6 +370,11 @@ class Engine:
         self.cpu_moe_executor = None
         if is_offload_moe_backend(config.moe_backend):
             self._init_offload_moe_cache(config)
+            if config.speculative_draft_residency == "affinity":
+                from freetoken.moe.resident_draft import build_expert_affinity
+                started = time.perf_counter()
+                self.ctx.draft_affinity = build_expert_affinity(self.moe_offload_cache)
+                logger.info_rank0(f"Full-weight expert L2 affinity built in {time.perf_counter() - started:.2f}s")
         if hasattr(self.model, "prepare_for_runtime"):
             self.model.prepare_for_runtime()
 

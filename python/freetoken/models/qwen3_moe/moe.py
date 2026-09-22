@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from freetoken.layers import BaseOP, LinearReplicated, make_moe_layer
 from freetoken.core import get_global_ctx
 from freetoken.moe.fused import fused_topk
+from freetoken.moe.resident_draft import cached_draft_routing
 from freetoken.kernel.triton.moe_reuse import reuse_routing
 
 if TYPE_CHECKING:
@@ -31,9 +32,18 @@ class Qwen3MoeMLP(BaseOP):
         draft_experts = ctx.batch.draft_experts
         reuse = ctx.reuse_expert_cap and ctx.batch.is_speculative_verify
         if draft_experts is not None or ctx.expert_counts is not None or reuse:
-            weights, ids = fused_topk(
-                hidden_states, router_logits, draft_experts or self.experts.top_k, self.experts.renormalize
-            )
+            if ctx.batch.draft_available_experts is not None:
+                weights, ids, missing = cached_draft_routing(
+                    hidden_states, router_logits, draft_experts, self.experts.renormalize,
+                    ctx.batch.draft_available_experts[self.layer_id],
+                    ctx.draft_affinity[self.layer_id] if ctx.draft_residency == "affinity" else None,
+                )
+                if ctx.batch.draft_replacement_masks is not None and missing is not None:
+                    ctx.batch.draft_replacement_masks.append(missing)
+            else:
+                weights, ids = fused_topk(
+                    hidden_states, router_logits, draft_experts or self.experts.top_k, self.experts.renormalize
+                )
             if ctx.batch.draft_routes is not None:
                 ctx.batch.draft_routes[self.layer_id].copy_(ids)
             if reuse:

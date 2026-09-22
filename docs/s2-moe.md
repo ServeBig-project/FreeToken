@@ -77,6 +77,47 @@ The `speculative` stats object adds `adaptive_enabled` and `adaptive_stops`.
 The latter counts request-rounds stopped by the cost decision, not rounds ended
 by token/context/cache limits.
 
+## Drafting with already-cached experts
+
+`--speculative-draft-residency {off,router,affinity}` defaults to `off`.
+The other modes require SD and use the existing `--speculative-draft-experts K`:
+
+- `router` chooses K distinct experts by original router score among experts
+  currently present in the GPU cache. Their original router probabilities supply
+  the mixture weights, with the checkpoint's usual normalization.
+- `affinity` starts with the original router's K experts and preserves cached
+  selections. Missing selections, processed in descending original router-score
+  order, are replaced by the closest cached expert not already selected or
+  reserved for an original cached selection. Distance ties use the smaller expert
+  ID. Replacements keep the original selections' mixture weights.
+
+Affinity uses full gate/up/down weight L2 distances, following the affinity idea
+in [SpecMoE §III-B](https://arxiv.org/html/2604.10152v1#S3.SS2), with FreeToken's
+existing shared cache. The full squared distances are computed on the CPU in
+FP32 at startup without sampling dimensions or normalizing expert weights. This
+mode requires unquantized floating-point offload experts; packed/quantized banks
+fail clearly. Its one-time build duration is logged separately from generation.
+For `fused`, all experts are already resident: both modes retain ordinary draft
+routing and no affinity table is computed.
+
+Before each draft round, every layer must have at least K valid cached experts.
+Otherwise all requests that could still draft in that batch use ordinary target
+generation for that round. This is a shared-cache condition, not a per-request
+cache shortage. No experts are reserved or loaded to make the check pass.
+Drafting performs zero expert loads and cannot evict experts, so its available
+set stays valid for the whole round. Ordinary generation, prefill and target
+verification keep their previous routing/loading behavior. The modes compose
+with cost-based expansion and the separate approximate verification-reuse option.
+
+`/v1/stats.speculative` adds `draft_residency` and `residency_stops`, the number of
+request-rounds refused drafting because of that shared shortage. With existing
+`--moe-collect-stats` enabled, `draft_expert_loads` counts actual expert-row loads
+during draft execution, including the `off` mode as a control, and
+`draft_expert_replacements` counts affinity substitutions across layer/token
+routes. Router/off modes do not substitute experts and report zero replacements.
+Both measurement fields are `null` when collection is disabled. Repeated loads
+of the same expert count again; duplicate routes sharing one load do not.
+
 ## Reuse-aware verification routing
 
 `--speculative-reuse-expert-cap M` enables verification routing reuse; zero is

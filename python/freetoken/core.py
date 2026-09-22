@@ -119,6 +119,8 @@ class Batch:
     decode_size: int = 0
     draft_experts: int | None = None
     draft_routes: torch.Tensor | None = None
+    draft_available_experts: torch.Tensor | None = None
+    draft_replacement_masks: list[torch.Tensor] | None = None
     is_speculative_verify: bool = False
     reuse_offsets: torch.Tensor | None = None
     # these fields should be set by scheduler
@@ -204,6 +206,8 @@ class Context:
     moe_backend: BaseMoeBackend = field(init=False)
     moe_offload_cache: OffloadMoeCache | None = None
     expert_counts: torch.Tensor | None = None
+    draft_residency: str = "off"
+    draft_affinity: torch.Tensor | None = None
     reuse_expert_cap: int = 0
     reuse_changed_routes: torch.Tensor | None = None
     kv_cache: BaseKVCachePool = field(init=False)

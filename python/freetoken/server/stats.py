@@ -38,7 +38,8 @@ class StatsTracker:
         self.swa_total_tokens = 0
         self.vram_bytes = 0
         self.speculative = {"draft_tokens": 0, "accepted_draft_tokens": 0, "verify_steps": 0,
-                            "adaptive_stops": 0, "reuse_changed_routes": 0}
+                            "adaptive_stops": 0, "reuse_changed_routes": 0, "residency_stops": 0,
+                            "draft_expert_loads": 0, "draft_expert_replacements": 0}
 
     @property
     def active(self) -> int:
@@ -173,6 +174,9 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
             "adaptive_enabled": bool(config.speculative_adaptive_profile),
             "reuse_enabled": bool(config.speculative_reuse_expert_cap),
             **tr.speculative,
+            "draft_residency": config.speculative_draft_residency,
+            "draft_expert_loads": tr.speculative["draft_expert_loads"] if config.moe_collect_stats else None,
+            "draft_expert_replacements": tr.speculative["draft_expert_replacements"] if config.moe_collect_stats else None,
         },
         "moe_residency": {
             "resident_experts": resident_count,

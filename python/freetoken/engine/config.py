@@ -22,6 +22,7 @@ class EngineConfig:
     max_running_req: int = 4
     speculative_num_steps: int = 0
     speculative_draft_experts: int = 3
+    speculative_draft_residency: str = "off"
     moe_resident_experts: str | None = None
     moe_expert_profile: str | None = None
     speculative_adaptive_profile: str | None = None
@@ -95,6 +96,10 @@ class EngineConfig:
     num_token_override: int | None = None
 
     def __post_init__(self) -> None:
+        if self.speculative_draft_residency not in ("off", "router", "affinity"):
+            raise ValueError("speculative_draft_residency must be off, router, or affinity")
+        if self.speculative_draft_residency != "off" and self.speculative_num_steps <= 0:
+            raise ValueError("--speculative-draft-residency requires SD enabled")
         if self.speculative_num_steps < 0:
             raise ValueError("speculative_num_steps must be >= 0")
         if self.speculative_draft_experts < 1:
@@ -131,6 +136,11 @@ class EngineConfig:
             )
         if self.moe_expert_profile and self.speculative_num_steps:
             raise ValueError("--moe-expert-profile requires ordinary target serving (SD disabled)")
+        if self.speculative_draft_residency == "affinity" and self.moe_backend != "fused":
+            model = self.model_config
+            if (self.nowag_expert_path or model.expert_quant != "none"
+                    or model.moe_weight_format not in (None, "bf16")):
+                raise ValueError("affinity draft residency requires unquantized floating-point expert weights")
         if self.moe_resident_experts:
             if self.moe_backend == "fused":
                 raise ValueError("fused experts are already resident; omit --moe-resident-experts")

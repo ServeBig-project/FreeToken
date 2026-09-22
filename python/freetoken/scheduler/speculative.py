@@ -5,6 +5,7 @@ from itertools import accumulate
 from typing import TYPE_CHECKING, Callable
 
 import torch
+from flashlib.kernels.slot_cache import Stat
 
 from freetoken.core import Batch
 from freetoken.engine import ForwardOutput
@@ -44,18 +45,28 @@ class SpeculativeDecoder:
         self.accepted_draft_tokens = 0
         self.verify_steps = 0
         self.adaptive_stops = 0
+        self.residency_stops = 0
+        self.draft_stats = (
+            torch.zeros(2, dtype=torch.int64, device=engine.device)
+            if engine.config.moe_collect_stats else None
+        )
 
     def snapshot(self) -> dict[str, int]:
-        return {
+        result = {
             "draft_tokens": self.draft_tokens,
             "accepted_draft_tokens": self.accepted_draft_tokens,
             "verify_steps": self.verify_steps,
             "adaptive_stops": self.adaptive_stops,
+            "residency_stops": self.residency_stops,
             "reuse_changed_routes": (
                 int(self.engine.ctx.reuse_changed_routes.item())
                 if self.engine.ctx.reuse_changed_routes is not None else 0
             ),
         }
+        if self.draft_stats is not None:
+            loads, replacements = self.draft_stats.tolist()
+            result.update(draft_expert_loads=loads, draft_expert_replacements=replacements)
+        return result
 
     def _draft_lengths(self, batch: Batch) -> list[int]:
         config = self.engine.config
@@ -95,6 +106,20 @@ class SpeculativeDecoder:
             return self.engine.forward_batch(batch, forward_input.sample_args)
 
         engine, sampler = self.engine, self.engine.sampler
+        expert_cache = engine.moe_offload_cache
+        available = None
+        if engine.config.speculative_draft_residency != "off" and expert_cache is not None:
+            # Draft hits cannot evict or load experts, and legacy SD never interleaves
+            # target work into this loop, so this set is stable for the whole round.
+            available = expert_cache.slot_for_id >= 0
+            if not bool((available.sum(dim=1) >= engine.config.speculative_draft_experts).all().item()):
+                self.residency_stops += sum(length > 0 for length in lengths)
+                return engine.forward_batch(batch, forward_input.sample_args)
+        loads_before = (
+            expert_cache.lru_stats[:, Stat.MISS].sum()
+            if self.draft_stats is not None and expert_cache is not None else None
+        )
+        replacement_masks = [] if self.draft_stats is not None and engine.ctx.draft_affinity is not None else None
         expansion = self.expansion
         if expansion is not None:
             expansion.start(batch.size)
@@ -125,6 +150,8 @@ class SpeculativeDecoder:
             draft = Batch(
                 draft_reqs, decode_size=len(draft_reqs),
                 draft_experts=engine.config.speculative_draft_experts,
+                draft_available_experts=available,
+                draft_replacement_masks=replacement_masks,
             )
             if expansion is not None:
                 draft.draft_routes = torch.empty(
@@ -151,6 +178,10 @@ class SpeculativeDecoder:
             positions = [starts[i] + step for i in active]
             self.table.token_pool[rows, positions] = tokens
         self.draft_tokens += sum(lengths)
+        if loads_before is not None:
+            self.draft_stats[0] += expert_cache.lru_stats[:, Stat.MISS].sum() - loads_before
+        if replacement_masks:
+            self.draft_stats[1] += torch.cat([mask.flatten() for mask in replacement_masks]).sum()
 
         # Target attention overwrites every provisional query, layer by layer,
         # while retaining only the already verified prefix before the round.

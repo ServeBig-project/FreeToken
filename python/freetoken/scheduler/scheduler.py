@@ -1081,7 +1081,7 @@ class Scheduler(SchedulerIOMixin):
         mamba_slots = self._mamba_slot_usage()
         swa_tokens = self._swa_token_usage()
         if reply:
-            if output.speculative_ends is not None:
+            if self.speculative is not None and batch.has_decode:
                 reply[-1].speculative = self.speculative.snapshot()
             mem = self._gpu_mem_bytes()
             mamba_used, mamba_total = mamba_slots or (0, 0)
