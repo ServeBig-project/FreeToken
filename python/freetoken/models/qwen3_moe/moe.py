@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from freetoken.layers import BaseOP, LinearReplicated, make_moe_layer
 from freetoken.core import get_global_ctx
 from freetoken.moe.fused import fused_topk
-from freetoken.engine.speculative_policy import reuse_routing
+from freetoken.kernel.triton.moe_reuse import reuse_routing
 
 if TYPE_CHECKING:
     import torch
@@ -37,11 +37,10 @@ class Qwen3MoeMLP(BaseOP):
             if ctx.batch.draft_routes is not None:
                 ctx.batch.draft_routes[self.layer_id].copy_(ids)
             if reuse:
-                weights, ids, changed = reuse_routing(
-                    router_logits, weights, ids, [req.extend_len for req in ctx.batch.reqs],
-                    ctx.reuse_expert_cap, self.experts.renormalize,
+                weights, ids = reuse_routing(
+                    router_logits, weights, ids, ctx.batch.reuse_offsets,
+                    ctx.reuse_expert_cap, self.experts.renormalize, ctx.reuse_changed_routes,
                 )
-                ctx.reuse_changed_routes += changed
             if ctx.expert_counts is not None:
                 import torch
                 ctx.expert_counts[self.layer_id].scatter_add_(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import copy
+from itertools import accumulate
 from typing import TYPE_CHECKING, Callable
 
 import torch
@@ -148,6 +149,11 @@ class SpeculativeDecoder:
         for req, start, length in zip(views, starts, lengths, strict=True):
             req.cached_len, req.device_len = start - 1, start + length
         verify = Batch(views, is_speculative_verify=True)
+        if engine.ctx.reuse_expert_cap:
+            verify.reuse_offsets = torch.tensor(
+                [0, *accumulate(length + 1 for length in lengths)],
+                dtype=torch.int32, device=engine.device,
+            )
         logits = self._logits(verify)
         target_probs = sampler.probabilities(
             logits, sampler.prepare(verify, repeats=[length + 1 for length in lengths])

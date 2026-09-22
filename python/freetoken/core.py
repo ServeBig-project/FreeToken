@@ -120,6 +120,7 @@ class Batch:
     draft_experts: int | None = None
     draft_routes: torch.Tensor | None = None
     is_speculative_verify: bool = False
+    reuse_offsets: torch.Tensor | None = None
     # these fields should be set by scheduler
     input_ids: torch.Tensor = field(init=False)
     positions: torch.Tensor = field(init=False)

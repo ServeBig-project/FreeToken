@@ -7,8 +7,10 @@ Reference: official `4090` branch at `3fbeb17`; paper §4.1–4.3.
 Paper §4.1 defines benefit as prefix confidence times measured autoregressive
 token latency. Cost is newly introduced expert-verification latency plus draft
 expansion latency. In the official `speculative.cpp`, the denominator is
-`delta_c + eps`: `eps` occupies the draft-cost term, not merely a tiny numerical
-epsilon. FreeToken's `draft_step_ms` supplies that measured term. Cold-expert
+`delta_c + eps`, and the CLI calls `eps` a cost-denominator epsilon. The source
+does not establish how the published example's fixed value was calibrated.
+This port follows the paper's explicit draft-cost term and supplies the locally
+measured `draft_step_ms` as that fixed term. Cold-expert
 latency is bytes per expert divided by calibrated bandwidth; experts on the
 explicit permanent resident list and experts already observed in this request's
 round are excluded. A fused model has zero expert-transfer cost.
@@ -38,7 +40,10 @@ It adds that bias only to selection scores. Expert mixture weights still come
 from the original logits, with the checkpoint's existing normalization rule.
 
 FreeToken applies this computation independently to each request's verification
-span at each layer. It preserves the original route/weights when the selected
+span at each layer in one fused Triton program per request. Request offsets are
+prepared once per verification batch, shared across all layers. The kernel
+streams token rows so its working storage does not grow with draft length.
+It preserves the original route/weights when the selected
 set is unchanged. A one-token span, zero confidence/margin, or selection of all
 experts is a no-op. The paper describes confidence weighting more generally;
 this port follows the concrete public 4090 implementation above.
