@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 class Qwen3MoeMLP(BaseOP):
     def __init__(self, config: ModelConfig, layer_id: int | None = None):
+        self.layer_id = layer_id
         self.experts = make_moe_layer(config, layer_id=layer_id)
         self.gate = LinearReplicated(
             config.hidden_size,
@@ -25,11 +26,17 @@ class Qwen3MoeMLP(BaseOP):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         router_logits = self.gate.forward(hidden_states)
-        draft_experts = get_global_ctx().batch.draft_experts
-        if draft_experts is not None:
+        ctx = get_global_ctx()
+        draft_experts = ctx.batch.draft_experts
+        if draft_experts is not None or ctx.expert_counts is not None:
             weights, ids = fused_topk(
-                hidden_states, router_logits, draft_experts, self.experts.renormalize
+                hidden_states, router_logits, draft_experts or self.experts.top_k, self.experts.renormalize
             )
+            if ctx.expert_counts is not None:
+                import torch
+                ctx.expert_counts[self.layer_id].scatter_add_(
+                    0, ids.flatten().long(), torch.ones_like(ids.flatten(), dtype=torch.int64)
+                )
             return self.experts.routed_forward(hidden_states, weights, ids)
         final_hidden_states = self.experts.forward(
             hidden_states=hidden_states,

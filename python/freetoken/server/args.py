@@ -262,6 +262,14 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--moe-resident-experts", default=ServerArgs.moe_resident_experts,
+        help="JSON gpu_experts list kept resident inside the total offload cache budget.",
+    )
+    parser.add_argument(
+        "--moe-expert-profile", default=ServerArgs.moe_expert_profile,
+        help="Write ordinary target expert-use counts to JSON at idle (SD disabled, eager execution).",
+    )
+    parser.add_argument(
         "--max-seq-len-override",
         type=int,
         default=ServerArgs.max_seq_len_override,

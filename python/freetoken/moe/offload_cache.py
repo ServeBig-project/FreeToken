@@ -277,6 +277,7 @@ class OffloadMoeCache:
     cache_size: int
     device: torch.device
     cache_policy: str = "lru"
+    resident_experts: tuple[tuple[int, int], ...] = ()
     prefill_overlap: bool = False
     # Layered batching keeps full-layer prefill buffers outside the decode slot
     # cache while preserving ``cache_size`` as the total HBM expert-row budget.
@@ -790,6 +791,12 @@ class OffloadMoeCache:
         or above the marlin slot cap. Called by :meth:`rebuild` and by the engine's
         pre-teardown check, so an invalid target rejects with the old cache intact.
         """
+        if self.resident_experts:
+            required = len(self.resident_experts) + self.num_experts * (2 if self.prefill_overlap else 1)
+            if cache_size < required:
+                raise ValueError(
+                    f"resident experts and prefill temporary slots require moe_cache_size >= {required}"
+                )
         partition = plan_expert_cache_partition(
             cache_size,
             self.num_experts,
@@ -910,6 +917,18 @@ class OffloadMoeCache:
             self.prefill_overlap = False
         if self.prefill_overlap:
             self._init_prefill_overlap_buffers()
+
+        self.restore_resident_experts()
+
+    def restore_resident_experts(self) -> None:
+        """Keep permanent experts beyond the prefix used by prefill's temporary buffers."""
+        start = self.decode_cache_size - len(self.resident_experts)
+        for slot, (layer, expert) in enumerate(self.resident_experts, start):
+            for sources, cache in self.banks:
+                cache[slot].copy_(sources[layer][expert], non_blocking=True)
+            self.slot_for_id[layer, expert] = slot
+            self.id_of_slot[slot] = layer * self.num_experts + expert
+            self.usage[slot] = _RESIDENT_PINNED_USAGE
 
     def set_alphas(
         self, gate_up_alpha: torch.Tensor | None, down_alpha: torch.Tensor | None
@@ -2047,8 +2066,9 @@ class OffloadMoeCache:
     ) -> None:
         """Admit ordinary decode routes using causal layer-distance eviction."""
         if (
-            not expert_ids.is_cuda
-            or expert_ids.numel() * self.num_layers <= self.decode_cache_size
+            not self.resident_experts
+            and (not expert_ids.is_cuda
+                 or expert_ids.numel() * self.num_layers <= self.decode_cache_size)
         ):
             self.ensure_experts(layer_id, expert_ids)
             return
@@ -2091,6 +2111,7 @@ class OffloadMoeCache:
         from freetoken.moe.offload_kernels import reset_cache
 
         reset_cache(self)
+        self.restore_resident_experts()
         self._prefill_group_active = False
         self._prefill_group_target_layer = None
         self._resident_group_range = None

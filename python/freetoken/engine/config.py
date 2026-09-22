@@ -21,6 +21,8 @@ class EngineConfig:
     max_running_req: int = 4
     speculative_num_steps: int = 0
     speculative_draft_experts: int = 3
+    moe_resident_experts: str | None = None
+    moe_expert_profile: str | None = None
     attention_backend: str = "auto"
     moe_backend: str = "auto"
     # NVFP4 routed-expert GEMM backend (--nvfp4-backend): auto|marlin|flashinfer|triton.
@@ -94,7 +96,7 @@ class EngineConfig:
             raise ValueError("speculative_num_steps must be >= 0")
         if self.speculative_draft_experts < 1:
             raise ValueError("speculative_draft_experts must be >= 1")
-        if not self.speculative_num_steps:
+        if not (self.speculative_num_steps or self.moe_resident_experts or self.moe_expert_profile):
             return
         if self.tp_info.size != 1:
             raise ValueError("self-speculative decoding requires a single GPU (tp_size=1)")
@@ -102,7 +104,7 @@ class EngineConfig:
             raise ValueError("self-speculative decoding requires --batching-policy legacy")
         if self.hf_config.architectures[0] != "Qwen3MoeForCausalLM":
             raise ValueError("self-speculative decoding currently supports only Qwen3 MoE")
-        if self.speculative_draft_experts > self.model_config.num_experts_per_tok:
+        if self.speculative_num_steps and self.speculative_draft_experts > self.model_config.num_experts_per_tok:
             raise ValueError(
                 "speculative_draft_experts must not exceed the target's experts per token "
                 f"({self.model_config.num_experts_per_tok})"
@@ -112,6 +114,21 @@ class EngineConfig:
                 "self-speculative decoding requires GPU expert execution; use "
                 "--moe-backend offload or fused without --moe-cpu-layers"
             )
+        if self.moe_expert_profile and self.speculative_num_steps:
+            raise ValueError("--moe-expert-profile requires ordinary target serving (SD disabled)")
+        if self.moe_resident_experts:
+            if self.moe_backend == "fused":
+                raise ValueError("fused experts are already resident; omit --moe-resident-experts")
+            self.resident_experts  # validate the list before allocating GPU memory
+
+    @cached_property
+    def resident_experts(self) -> tuple[tuple[int, int], ...]:
+        if self.moe_resident_experts is None:
+            return ()
+        from freetoken.moe.profile import load_resident_experts
+        return load_resident_experts(
+            self.moe_resident_experts, self.model_config.num_moe_layers, self.model_config.num_experts
+        )
 
     @cached_property
     def hf_config(self):

@@ -138,6 +138,9 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
     metadata arrives."""
     tr: StatsTracker = state.stats
     config = state.config
+    from .api_server import cache_geometry
+    cache_slots = cache_geometry(state)["moe_cache_size"]
+    resident_count = len(config.resident_experts)
     ready_at = getattr(state, "ready_at", None)
     uptime_s = max(0, int(time.monotonic() - ready_at)) if ready_at is not None else 0
     kv = (
@@ -167,6 +170,11 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
         "speculative": {
             "enabled": bool(getattr(config, "speculative_num_steps", 0)),
             **tr.speculative,
+        },
+        "moe_residency": {
+            "resident_experts": resident_count,
+            "cache_slots": cache_slots,
+            "temporary_slots": max(0, cache_slots - resident_count),
         },
         "throughput": {
             "decode_tps": round(tr.decode_tps(), 1),

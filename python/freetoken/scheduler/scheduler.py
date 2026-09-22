@@ -225,6 +225,9 @@ class Scheduler(SchedulerIOMixin):
         """Called when the scheduler is idle to perform background tasks."""
         logger.info_rank0("Scheduler is idle, waiting for new reqs...")
         self.cache_manager.check_integrity()
+        if self.config.moe_expert_profile:
+            from freetoken.moe.profile import write_profile
+            write_profile(self.config.moe_expert_profile, self.engine.ctx.expert_counts)
         moe_cache = self.engine.moe_offload_cache
         if moe_cache is not None and moe_cache.collect_stats:
             stats = moe_cache.cumulative_stats_snapshot()

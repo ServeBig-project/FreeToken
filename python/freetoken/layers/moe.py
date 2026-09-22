@@ -400,6 +400,14 @@ class OffloadMoELayer(MoELayer):
         """
         cache = self.offload_cache
         assert cache is not None
+        if cache.resident_experts and not cache.prefill_overlap:
+            cache.ensure_decode_experts(self.layer_id, topk_ids)
+            cache.copy_missing()
+            return self._expert_gemm(
+                cache, hidden_states, topk_weights, topk_ids,
+                views=cache.bank_views(), n=cache.decode_cache_size,
+                alphas=cache.alphas_for_slots(self.layer_id), is_prefill=True,
+            )
         if cache.has_resident_prefill_layer(self.layer_id):
             cache.map_prefill_experts(self.layer_id, topk_ids)
             return self._expert_gemm(

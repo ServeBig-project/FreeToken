@@ -311,6 +311,11 @@ class Engine:
         # (num_pages sizing, --moe-cache-auto); the instance owns rebuild/validation after.
         self._pool_cls = resolve_pool_class(config.model_config)
         self.ctx = Context(config.page_size)
+        if config.moe_expert_profile:
+            self.ctx.expert_counts = torch.zeros(
+                config.model_config.num_moe_layers, config.model_config.num_experts,
+                dtype=torch.int64, device=self.device,
+            )
         set_global_ctx(self.ctx)
 
         self.tp_cpu_group = self._init_communication(config)
@@ -449,6 +454,8 @@ class Engine:
         if config.attention_backend.split(",")[0] == "triton":
             # Prefill runs on the first comma part; warm its autotune cache.
             self._warmup_prefill()
+        if self.ctx.expert_counts is not None:
+            self.ctx.expert_counts.zero_()
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
         if config.tp_info.size == 1 or config.use_pynccl:
@@ -629,8 +636,10 @@ class Engine:
                 quant_format=banks.quant_format,
                 decode_target=decode_target,
                 hybrid_max_fetch=config.moe_hybrid_max_fetch,
+                resident_experts=config.resident_experts,
             )
             cache.set_bank_sources(banks.sources, layer_residency=banks.layer_residency)
+            cache.restore_resident_experts()
             cache.set_alphas(banks.gate_up_alpha, banks.down_alpha)
             cache.set_codebook(banks.codebook)
             if getattr(config, "batching_policy", "legacy") == "joint":
@@ -1442,7 +1451,7 @@ def _adjust_config(config: EngineConfig):
         object.__setattr__(model_config, "nowag_expert_path", nowag_expert_path)
     expert_quant = getattr(model_config, "expert_quant", "none")
 
-    if config.speculative_num_steps:
+    if config.speculative_num_steps or config.moe_expert_profile:
         # A draft uses different routing from a captured target decode; verification
         # has ragged query lengths. Keep this initial implementation eager.
         override("cuda_graph_bs", [])
@@ -1451,6 +1460,10 @@ def _adjust_config(config: EngineConfig):
             override("moe_backend", "offload")
             if not config.moe_cache_size and config.moe_cache_rate is None:
                 override("moe_cache_auto", True)
+    if config.moe_resident_experts and config.moe_backend == "auto":
+        override("moe_backend", "offload")
+        if not config.moe_cache_size and config.moe_cache_rate is None:
+            override("moe_cache_auto", True)
 
     if not is_moe:
         # A dense model has no routed experts: the MoE knobs are inert, and the offload family
