@@ -47,8 +47,9 @@ def complete(url, body, chat=False):
 
 
 def stream(url, body, abort=False):
-    pieces, finish, done = [], None, False
-    with connect(url, "/v1/completions", dict(body, stream=True)) as response:
+    pieces, finish, done, usage = [], None, False, None
+    request = dict(body, stream=True, stream_options={"include_usage": True})
+    with connect(url, "/v1/completions", request) as response:
         for line in response:
             if not line.startswith(b"data:"):
                 continue
@@ -58,6 +59,7 @@ def stream(url, body, abort=False):
                 break
             event = json.loads(data)
             require("error" not in event, f"stream error: {event}")
+            usage = event.get("usage") or usage
             for choice in event.get("choices", []):
                 pieces.append(choice.get("text", ""))
                 finish = choice.get("finish_reason") or finish
@@ -66,7 +68,9 @@ def stream(url, body, abort=False):
                 return
     require(done and finish is not None, "stream did not terminate cleanly")
     require(not abort, "cancellation fixture emitted no text before completion")
-    return {"text": "".join(pieces), "finish_reason": finish}
+    require(isinstance(usage, dict), "include_usage stream omitted committed token usage")
+    return validate({"choices": [{"text": "".join(pieces), "finish_reason": finish}],
+                     "usage": usage}, body["max_tokens"])
 
 
 def run(args):
@@ -105,12 +109,15 @@ def run(args):
     with ThreadPoolExecutor(max_workers=4) as pool:
         concurrent = list(pool.map(lambda body: complete(url, body), sampled))
 
+    lifecycle = {}
     if args.scenario in ("baseline", "active"):
         streamed = stream(url, cases[0])
-        require(streamed == {key: greedy[0][key] for key in streamed},
-                "stream emitted different committed text or termination")
+        if not args.reuse:
+            require(streamed == greedy[0],
+                    f"stream differs: expected {greedy[0]}, got {streamed}")
         require(bool(greedy[0]["text"]), "stop fixture needs nonempty output")
-        stop = greedy[0]["text"][:max(1, len(greedy[0]["text"]) // 2)]
+        stop_length = 1 if args.reuse else max(1, len(greedy[0]["text"]) // 2)
+        stop = greedy[0]["text"][:stop_length]
         stopped = complete(url, dict(cases[0], stop=[stop]))
         require(stopped["text"] == "" and stopped["finish_reason"] == "stop",
                 f"stop prefix escaped into output: {stopped}")
@@ -118,8 +125,11 @@ def run(args):
                            messages=[{"role": "user", "content": "Say hello briefly."}],
                            max_tokens=2), chat=True)
         stream(url, dict(cases[0], max_tokens=256), abort=True)
-        require(complete(url, cases[0]) == greedy[0],
-                "a request after cancellation changed its greedy result")
+        recovered = complete(url, cases[0])
+        if not args.reuse:
+            require(recovered == greedy[0],
+                    f"after cancellation expected {greedy[0]}, got {recovered}")
+        lifecycle = {"stream": streamed, "stop": stopped, "after_cancellation": recovered}
 
     after = api(url, "/v1/stats")["speculative"]
     keys = ("draft_tokens", "accepted_draft_tokens", "verify_steps", "residency_stops")
@@ -159,7 +169,7 @@ def run(args):
                 "affinity replacement coverage/count differs from the scenario")
     report = {"model": model, "mode": args.mode, "scenario": args.scenario,
               "cases": cases, "greedy": greedy, "sampled": concurrent, "delta": delta,
-              "moe_residency": initial_stats["moe_residency"]}
+              "moe_residency": initial_stats["moe_residency"], "lifecycle": lifecycle}
     if args.scenario in ("baseline", "ordinary-reference"):
         args.reference.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     return report

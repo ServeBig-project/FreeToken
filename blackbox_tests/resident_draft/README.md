@@ -87,8 +87,12 @@ An explicitly `off` service can use `--scenario active --mode off` against the
 default-off reference to check compatibility. To cover combinations, rerun an
 active configuration with the existing measured adaptive profile and/or reuse
 cap, passing `--adaptive` and/or `--reuse` to the checker. Reuse changes target
-routing, so that run checks local streaming/recovery consistency and skips exact
-comparison with the original target. A service without `--moe-collect-stats`
+routing, and cached experts can change between requests. That run checks stream
+termination/committed-token accounting, stopping at the first output character,
+and valid completion after cancellation; it does not compare texts from different
+cache histories. Original-target text equality remains required when reuse is off.
+Use the fresh-service diagnostic below to compare stream text under equal initial
+conditions. A service without `--moe-collect-stats`
 requires `--collect-stats off`; both optional counters must be null. Such a run
 does not replace either zero-transfer acceptance run.
 
