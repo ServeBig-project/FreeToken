@@ -90,6 +90,14 @@ greedy equality and exact original-target sampling are therefore not promised
 with this option enabled. Output accounting, request isolation, stopping,
 streaming and cancellation remain required. Quality must be measured separately.
 
+With verification reuse enabled, only the original prompt's KV may enter the
+shared prefix cache, subject to its usual page alignment and eviction rules.
+Generated KV remains private to the running request and is released on completion
+or cancellation. A later prompt containing the previous response recomputes that
+generated portion with ordinary target prefill; it cannot reuse the previous
+request's approximate generated KV. With reuse disabled, existing prefix-cache
+behavior is unchanged.
+
 The `speculative` stats object adds `reuse_enabled` and `reuse_changed_routes`.
 The counter sums verification (layer, token) positions whose selected expert
 set differs from the unmodified router. It is not a count of changed output

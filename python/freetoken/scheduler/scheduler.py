@@ -1318,7 +1318,14 @@ class Scheduler(SchedulerIOMixin):
         # Polymorphic free: the DSV4 manager returns the request's window pages + cmp/idx blocks
         # to their tier free-lists; the generic manager frees its KV pages (it reads
         # page_table[req.table_idx], so free the table entry after).
-        self.cache_manager.cache_req(req, finished=True)
+        # Approximate verification KV belongs to this request's draft grouping,
+        # so only its ordinary prompt KV may become shared history.
+        if self.config.speculative_reuse_expert_cap:
+            self.cache_manager.cache_req(
+                req, finished=True, max_prefix_len=req.max_device_len - req.output_len
+            )
+        else:
+            self.cache_manager.cache_req(req, finished=True)
         self.table_manager.free(req.table_idx)
         req.table_idx = -1
 
