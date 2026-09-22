@@ -37,6 +37,11 @@ The active configurations add `--speculative-draft-residency router` or
 at least one layer must have fewer than K cached experts; the single-layer prefill
 area still fits because overlap is disabled. Restart only between configurations.
 
+Shortage needs a separate ordinary-target reference with the same cache budget:
+use cache `128`, no resident list, `--speculative-num-steps 0`, residency `off`,
+and `--cuda-graph-max-bs 0`. Keep the other model, sampling, concurrency and eager
+execution settings identical. The cache512 reference is only for active cases.
+
 ## Matrix and HTTP commands
 
 The baseline must actually draft, verify and load draft experts. Every active
@@ -55,7 +60,17 @@ result; missing draft/replacement/load coverage is a failure, not a passing zero
   --url http://127.0.0.1:30000 --scenario active --mode router \
   --reference /tmp/resident-draft-reference.json > /tmp/resident-draft-router.json
 
-# Repeat for affinity, then for shortage/router and shortage/affinity.
+# Repeat active for affinity. After starting the cache128 ordinary target:
+"$TEST_PYTHON" blackbox_tests/resident_draft/check_http.py \
+  --url http://127.0.0.1:30000 --scenario ordinary-reference --mode off \
+  --reference /tmp/resident-draft-ordinary128.json > /tmp/resident-draft-ordinary128-result.json
+
+# After restarting cache128 with router and SD enabled:
+"$TEST_PYTHON" blackbox_tests/resident_draft/check_http.py \
+  --url http://127.0.0.1:30000 --scenario shortage --mode router \
+  --reference /tmp/resident-draft-ordinary128.json > /tmp/resident-draft-shortage-router.json
+
+# Repeat shortage for affinity against the same ordinary128 reference.
 ```
 
 Each run checks greedy text and committed usage at output limits 1, 2, 4 and 8,
@@ -63,7 +78,10 @@ then four concurrent sampled requests with different prompts, limits 1/2/3/5,
 temperature, top-k and top-p. Active/baseline runs also check streaming equality,
 a stop string spanning the output prefix, chat output accounting, disconnect
 during streaming, and successful identical greedy completion after disconnect.
-Shortage runs omit those repeated lifecycle checks.
+Shortage and ordinary-reference runs omit those repeated lifecycle checks. The
+ordinary reference requires SD disabled and zero draft/accept/verify/load/
+replacement/stop counters. Shortage requires exact text/usage equality and
+matching public cache-slot/residency statistics with that ordinary reference.
 
 An explicitly `off` service can use `--scenario active --mode off` against the
 default-off reference to check compatibility. To cover combinations, rerun an

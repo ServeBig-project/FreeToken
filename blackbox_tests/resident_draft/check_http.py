@@ -71,9 +71,11 @@ def stream(url, body, abort=False):
 
 def run(args):
     url = args.url.rstrip("/")
-    before = api(url, "/v1/stats")["speculative"]
+    initial_stats = api(url, "/v1/stats")
+    before = initial_stats["speculative"]
+    ordinary = args.scenario == "ordinary-reference"
     require(before["draft_residency"] == args.mode, "server residency mode differs")
-    require(before["enabled"], "this matrix requires SD to be enabled")
+    require(before["enabled"] == (not ordinary), "unexpected SD enabled setting")
     require(before["adaptive_enabled"] == args.adaptive, "unexpected adaptive setting")
     require(before["reuse_enabled"] == args.reuse, "unexpected reuse setting")
     model = api(url, "/v1/models")["data"][0]["id"]
@@ -85,10 +87,15 @@ def run(args):
         dict(common, prompt="The capital of Japan is", max_tokens=4),
     ]
     greedy = [complete(url, case) for case in cases]
-    if args.scenario != "baseline" and not args.reuse:
+    if args.scenario not in ("baseline", "ordinary-reference") and not args.reuse:
         reference = json.loads(args.reference.read_text())
         require(reference["model"] == model, "reference model differs")
         require(reference["cases"] == cases, "reference input contract differs")
+        if args.scenario == "shortage":
+            require(reference["scenario"] == "ordinary-reference",
+                    "shortage needs an independent ordinary target reference")
+            require(reference["moe_residency"] == initial_stats["moe_residency"],
+                    "shortage and ordinary reference cache budgets/residency differ")
         require(greedy == reference["greedy"],
                 f"greedy target differs: expected {reference['greedy']}, got {greedy}")
 
@@ -98,7 +105,7 @@ def run(args):
     with ThreadPoolExecutor(max_workers=4) as pool:
         concurrent = list(pool.map(lambda body: complete(url, body), sampled))
 
-    if args.scenario != "shortage":
+    if args.scenario in ("baseline", "active"):
         streamed = stream(url, cases[0])
         require(streamed == {key: greedy[0][key] for key in streamed},
                 "stream emitted different committed text or termination")
@@ -129,7 +136,10 @@ def run(args):
                     f"{key} must be a collected count")
             delta[key] = after[key] - before[key]
             require(delta[key] >= 0, f"{key} regressed")
-    if args.scenario == "shortage":
+    if ordinary:
+        ordinary_counts = keys + ("draft_expert_loads", "draft_expert_replacements")
+        require(all(after[key] == 0 for key in ordinary_counts), "ordinary service has SD activity")
+    elif args.scenario == "shortage":
         require(delta["residency_stops"] > 0, "insufficient-cache fallback was not exercised")
         require(delta["draft_tokens"] == 0 and delta["verify_steps"] == 0,
                 "insufficient cache still executed drafting or verification")
@@ -138,7 +148,7 @@ def run(args):
                 "coverage failure: workload never drafted and verified")
         require(delta["residency_stops"] == 0, "pinned expert fixture unexpectedly fell back")
     if args.collect_stats == "on":
-        if args.mode == "off":
+        if args.mode == "off" and not ordinary:
             require(delta["draft_expert_loads"] > 0,
                     "coverage failure: off control never loaded a draft expert")
         else:
@@ -148,8 +158,9 @@ def run(args):
                 else delta["draft_expert_replacements"] == 0,
                 "affinity replacement coverage/count differs from the scenario")
     report = {"model": model, "mode": args.mode, "scenario": args.scenario,
-              "cases": cases, "greedy": greedy, "sampled": concurrent, "delta": delta}
-    if args.scenario == "baseline":
+              "cases": cases, "greedy": greedy, "sampled": concurrent, "delta": delta,
+              "moe_residency": initial_stats["moe_residency"]}
+    if args.scenario in ("baseline", "ordinary-reference"):
         args.reference.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     return report
 
@@ -157,15 +168,18 @@ def run(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", required=True)
-    parser.add_argument("--scenario", choices=("baseline", "active", "shortage"), required=True)
+    parser.add_argument("--scenario", required=True,
+                        choices=("baseline", "ordinary-reference", "active", "shortage"))
     parser.add_argument("--mode", choices=("off", "router", "affinity"), required=True)
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--collect-stats", choices=("on", "off"), default="on")
     parser.add_argument("--adaptive", action="store_true")
     parser.add_argument("--reuse", action="store_true")
     args = parser.parse_args()
-    if args.scenario == "baseline" and (args.mode != "off" or args.reuse):
-        parser.error("baseline requires mode=off without reuse")
+    if args.scenario in ("baseline", "ordinary-reference") and (args.mode != "off" or args.reuse):
+        parser.error("reference capture requires mode=off without reuse")
+    if args.scenario == "ordinary-reference" and (args.adaptive or args.collect_stats == "off"):
+        parser.error("ordinary reference requires SD controls off and statistics on")
     if args.scenario == "shortage" and args.mode == "off":
         parser.error("shortage requires router or affinity")
     started = time.monotonic()
