@@ -139,3 +139,38 @@ fresh service/cache history; the default does not rebuild an old live version
 being diagnosed. For a same-instance repeat, `--rebuild-first` invokes the public
 cache rebuild before these requests. Keep old and repaired evidence in separate
 output directories. No existing scoring input or assertion is changed.
+
+## Stop before an unaffordable draft
+
+`test_early_draft_stop.py` starts one N16/K3 adaptive server, with reuse disabled,
+naive cache, and `--moe-collect-stats`. Its legal cost profile has target cost
+1 ms and draft cost 2 ms: every request must retain its first candidate, but no
+prefix can justify executing the next draft. One 64-token request and one batch
+with 8/17/33/64-token limits check complete outputs, sampling, verification,
+retained drafts, adaptive stops, and return to idle.
+
+For each idle-to-idle phase, the public service-log `decode_layer_calls` delta
+must be at most `48 * (2 * verify_steps + request_count)`: one draft and one
+verification forward per round, plus at most one ordinary tail decode per
+request. Prefill is excluded by the public counter contract. This detects wasted
+model execution without using wall-clock thresholds or exact text comparisons.
+Both phases and their raw public counters are saved even if that bound fails.
+
+Run only after the coordinator assigns an empty GPU:
+
+```bash
+FT_SD_GPU="$GPU_UUID" \
+FT_SD_CANDIDATE="$PWD/python" \
+FT_SD_ARTIFACTS=/data2/servebig-envs/sd_early_stop_20260922/after \
+PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  /home/nengneng/miniconda3/envs/freetoken-dev/bin/python -m pytest -c /dev/null \
+  -p no:cacheprovider --confcutdir=blackbox_tests/s2_methods -q -s \
+  blackbox_tests/s2_methods/test_early_draft_stop.py
+```
+
+For the unfixed control, set `FT_SD_CANDIDATE` to
+`/data2/servebig-envs/s2_methods_20260921/candidate/python` and use the separate
+`/data2/servebig-envs/sd_early_stop_20260922/before` evidence directory. A useful
+regression reproduction fails `necessary_execution_only` with otherwise valid
+requests and counters; startup/input/snapshot failures do not establish it.
+CPU compilation and collection do not establish GPU acceptance.
