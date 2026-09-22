@@ -119,3 +119,23 @@ verify and retain drafts; scored adaptive requests must increment adaptive_stops
 Preserve all data, including failed/incomplete coverage. Do not change the fixed
 counts, substitute old samples, or repeat until passing. This finite projection
 cannot prove exact equality for every input or freedom from all sampling bias.
+
+## Generated-KV cache isolation with verification reuse
+
+Run `cache_isolation_http.py URL OUTPUT_DIRECTORY` on an idle reuse-enabled
+server with radix prefix caching and `--enable-cache-report`. It sends one new
+natural-language prompt ending in a colon, generates 64 tokens, then sends
+prompt+generated-text+continuation and repeats that extended prompt. It verifies
+the tokenizer prefix before interpreting cache counts. The first continuation
+may cache at most the original prompt length; the repeat must cache beyond that
+length, proving normal prompt prefill remains reusable. Responses are recorded
+without textual-equality comparisons. Omitted zero-hit cache details mean zero;
+the repeat still requires a reported positive hit beyond the original prompt.
+Both boundary outcomes are retained even if
+the first one fails, in `cache-isolation.json`.
+
+The fixed prompt is outside the evaluation/calibration/lifecycle inputs. Use a
+fresh service/cache history; the default does not rebuild an old live version
+being diagnosed. For a same-instance repeat, `--rebuild-first` invokes the public
+cache rebuild before these requests. Keep old and repaired evidence in separate
+output directories. No existing scoring input or assertion is changed.
