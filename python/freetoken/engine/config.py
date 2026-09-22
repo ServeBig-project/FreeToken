@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
+from math import ceil
 from typing import TYPE_CHECKING, List
 
 import torch
@@ -133,7 +134,15 @@ class EngineConfig:
         if self.moe_resident_experts:
             if self.moe_backend == "fused":
                 raise ValueError("fused experts are already resident; omit --moe-resident-experts")
-            self.resident_experts  # validate the list before allocating GPU memory
+            from freetoken.moe.profile import validate_resident_capacity
+            count = len(self.resident_experts)
+            model = self.model_config
+            if not self.moe_cache_auto:
+                size = self.moe_cache_size
+                if self.moe_cache_rate is not None:
+                    size = ceil(model.num_moe_layers * model.num_experts * self.moe_cache_rate)
+                if size or self.moe_cache_rate is not None:
+                    validate_resident_capacity(size, model.num_experts, count, self.moe_prefill_overlap)
 
     @cached_property
     def draft_cost(self) -> dict[str, float] | None:

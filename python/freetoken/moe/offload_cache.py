@@ -35,6 +35,7 @@ _RESIDENT_PINNED_USAGE = (1 << 63) - 1
 _LRU_ENSURE_MAX_QUERY = 1024
 
 from freetoken.utils import init_logger
+from .profile import validate_resident_capacity
 
 logger = init_logger(__name__)
 
@@ -791,12 +792,9 @@ class OffloadMoeCache:
         or above the marlin slot cap. Called by :meth:`rebuild` and by the engine's
         pre-teardown check, so an invalid target rejects with the old cache intact.
         """
-        if self.resident_experts:
-            required = len(self.resident_experts) + self.num_experts * (2 if self.prefill_overlap else 1)
-            if cache_size < required:
-                raise ValueError(
-                    f"resident experts and prefill temporary slots require moe_cache_size >= {required}"
-                )
+        validate_resident_capacity(
+            cache_size, self.num_experts, len(self.resident_experts), self.prefill_overlap
+        )
         partition = plan_expert_cache_partition(
             cache_size,
             self.num_experts,

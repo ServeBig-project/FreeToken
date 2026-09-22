@@ -21,6 +21,15 @@ def load_resident_experts(path: str, num_layers: int, num_experts: int) -> tuple
     return result
 
 
+def validate_resident_capacity(cache_size: int, num_experts: int, resident_count: int,
+                               prefill_overlap: bool) -> None:
+    required = resident_count + num_experts * (2 if prefill_overlap else 1)
+    if resident_count and cache_size < required:
+        raise ValueError(
+            f"resident experts and prefill temporary slots require moe_cache_size >= {required}"
+        )
+
+
 def write_profile(path: str, counts) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
