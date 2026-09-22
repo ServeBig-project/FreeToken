@@ -29,7 +29,7 @@ import torch
 from freetoken.utils import align_down
 
 from .base import BaseCacheHandle
-from .radix_cache import RadixTreeNode, _get_key_fn
+from .radix_cache import RadixTreeNode, _get_key_fn, _group_root
 
 
 @dataclass(frozen=True)
@@ -76,6 +76,7 @@ class SWARadixCache:
         self.root = RadixTreeNode(self.key_fn)
         self.root.set_key_value(self.empty, self.empty)
         self.root.ref_count = 1  # root is always protected
+        self.roots = {"": self.root}
         self.full_evictable = 0
         self.full_protected = 0
         self.swa_evictable = 0   # tokens of live (non-tombstone), unlocked swa
@@ -85,17 +86,17 @@ class SWARadixCache:
         self._revives = 0        # observability: # of insert-side tombstone revives (Branches 1/2)
 
     # ---------------------------------------------------------------- match / insert
-    def match_prefix(self, input_ids: torch.Tensor) -> SWAMatch:
+    def match_prefix(self, input_ids: torch.Tensor, cache_group: str = "") -> SWAMatch:
         """Match the token prefix for the full layers, then truncate the reusable length to the
         windowed-reuse boundary for the swa layers: the deepest node whose run of contiguous live
         (non-tombstone) tokens back to the last tombstone is ``>= sliding_window_size`` (or the
         path is tombstone-free to root). Mirrors sglang ``_match_prefix_helper``."""
-        node = self.root
+        node = _group_root(self.roots, cache_group, self.key_fn, self.empty)
         value: List[torch.Tensor] = []
         # path connected to root without a tombstone is always reusable -> start at +inf.
         match_since_tomb = float("inf")
         best_value_len = 0       # number of leading entries of ``value`` that are windowed-safe
-        best_node = self.root
+        best_node = node
         prefix_pos, total = 0, len(input_ids)
 
         while prefix_pos < total:
@@ -135,7 +136,8 @@ class SWARadixCache:
         return SWAMatch(kv, int(kv.numel()), best_node)
 
     def insert(self, input_ids: torch.Tensor, kv_indices: torch.Tensor,
-               swa_evicted_seqlen: int = 0, update_kv_after_len: int = 0
+               swa_evicted_seqlen: int = 0, update_kv_after_len: int = 0,
+               cache_group: str = ""
                ) -> Tuple[int, torch.Tensor]:
         """Insert the committed full KV prefix. ``kv_indices`` are the request's full-pool page
         indices (the swa rides along via the full->swa mapping, live where the request allocated
@@ -158,7 +160,7 @@ class SWARadixCache:
         insert_len = align_down(len(input_ids), self.page_size)
         input_ids, kv_indices = input_ids[:insert_len], kv_indices[:insert_len]
         freed: List[torch.Tensor] = []
-        node = self.root
+        node = _group_root(self.roots, cache_group, self.key_fn, self.empty)
         total = 0
         while total < insert_len:
             child = node.children.get(self.key_fn(input_ids[total:]))
@@ -340,7 +342,8 @@ class SWARadixCache:
         return SWAEvictResult(torch.cat(kv) if kv else self.empty,
                               torch.cat(swa) if swa else self.empty)
 
-    def trim_head_swa(self, input_ids: torch.Tensor, keep_from: int) -> torch.Tensor:
+    def trim_head_swa(self, input_ids: torch.Tensor, keep_from: int,
+                      cache_group: str = "") -> torch.Tensor:
         """Tombstone the swa currency of the path strictly below ``keep_from`` (full KV stays),
         returning the freed swa-bearing full indices for the caller to release. Retention
         companion of the finish-time soft pin: only the trailing window ``[keep_from, P)``
@@ -349,9 +352,9 @@ class SWARadixCache:
         left untouched; ``keep_from`` must be page-aligned."""
         if keep_from <= 0:
             return self.empty
-        self.match_prefix(input_ids[:keep_from])  # ensure a node boundary at keep_from (splits)
+        self.match_prefix(input_ids[:keep_from], cache_group)
         freed: List[torch.Tensor] = []
-        node, pos = self.root, 0
+        node, pos = _group_root(self.roots, cache_group, self.key_fn, self.empty), 0
         while pos < keep_from:
             child = node.children.get(self.key_fn(input_ids[pos:]))
             if child is None or pos + child.length > keep_from:
@@ -423,7 +426,7 @@ class SWARadixCache:
         return self._clk * _EVENT_STRIDE
 
     def _leaves(self) -> List[RadixTreeNode]:
-        out, stack = [], [self.root]
+        out, stack = [], list(self.roots.values())
         while stack:
             n = stack.pop()
             if n.is_leaf():
@@ -434,7 +437,7 @@ class SWARadixCache:
         return out
 
     def _swa_nodes(self) -> List[RadixTreeNode]:
-        out, stack = [], [self.root]
+        out, stack = [], list(self.roots.values())
         while stack:
             n = stack.pop()
             if not n.is_root() and not n.swa_tombstone:
@@ -443,7 +446,7 @@ class SWARadixCache:
         return out
 
     def _all_nodes(self) -> List[RadixTreeNode]:
-        out, stack = [], [self.root]
+        out, stack = [], list(self.roots.values())
         while stack:
             n = stack.pop()
             if not n.is_root():

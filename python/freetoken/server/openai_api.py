@@ -80,6 +80,7 @@ def chat_request_to_genspec(
         chat_template_kwargs=ctk,
         template_tools=_tools_for_template(req),
         parser_tools=(_all_tool_dicts(req.tools) if _should_parse_tools(req) else None),
+        cache_group=req.cache_group,
     )
 
 
@@ -397,7 +398,8 @@ async def handle_completion(
             return create_error_response("Streaming completions only support a single text prompt")
         uid = state.new_user()
         await state.send_one(
-            TokenizeMsg(uid=uid, text=prompts[0], sampling_params=_resolve_sampling(req, model_sampling))
+            TokenizeMsg(uid=uid, text=prompts[0], sampling_params=_resolve_sampling(req, model_sampling),
+                        cache_group=req.cache_group)
         )
         chunks = stream_completion_chunks(uid, req, state)
         if request is not None:
@@ -410,7 +412,9 @@ async def handle_completion(
     cached_tokens = 0
     for index, prompt in enumerate(prompts):
         uid = state.new_user()
-        await state.send_one(TokenizeMsg(uid=uid, text=prompt, sampling_params=_resolve_sampling(req, model_sampling)))
+        await state.send_one(TokenizeMsg(uid=uid, text=prompt,
+                                        sampling_params=_resolve_sampling(req, model_sampling),
+                                        cache_group=req.cache_group))
         text = ""
         finish_reason = "stop"
         async for ack in state.wait_for_ack(uid):
