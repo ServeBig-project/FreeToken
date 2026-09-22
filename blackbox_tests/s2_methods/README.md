@@ -14,8 +14,9 @@ PYTHONDONTWRITEBYTECODE=1 /home/nengneng/miniconda3/envs/freetoken-dev/bin/pytho
   /data2/servebig-envs/s2_methods_20260921/ar-graph
 ```
 
-Apply the same command and input history to seven configurations: AR graph,
-AR eager/synchronous, basic SD N=4, basic SD N=16, residency with fixed N=16,
+Apply the same command and input history to eight configurations: AR graph,
+AR graph with the same 1,024 resident experts, AR eager/synchronous,
+basic SD N=4, basic SD N=16, residency with fixed N=16,
 residency with adaptive N<=16, and the latter with verification reuse cap 14.
 Each has its own ready URL and output directory. Fixed N=16 is the direct
 adaptive-drafting control; N=4 retains the existing practical baseline.
@@ -56,3 +57,65 @@ PYTHONDONTWRITEBYTECODE=1 /home/nengneng/miniconda3/envs/freetoken-dev/bin/pytho
 Keep calibration and evaluated requests separate when writing the public expert
 count profile. Lifecycle and new-feature contract checks are separate from these
 performance and coding-quality measurements.
+
+## Public contracts and lifecycle
+
+CPU-only help/offline selection checks (the profile is the published 2x4 example):
+
+```bash
+CUDA_VISIBLE_DEVICES= PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  /home/nengneng/miniconda3/envs/freetoken-dev/bin/python -m pytest -c /dev/null \
+  -p no:cacheprovider --confcutdir=blackbox_tests/s2_methods \
+  --basetemp=/data2/servebig-envs/s2_methods_20260921/cpu-contract \
+  -q blackbox_tests/s2_methods/test_cli_contract.py -k 'not startup'
+```
+
+The coordinator runs startup rejection cases separately with `FT_SD_GPU` set,
+when the GPU is not doing performance work. These cover malformed resident lists,
+the reachable cache minimum, incompatible controls, finite-positive costs, and
+reuse-cap bounds; no internal cost formula is used as an oracle.
+
+On a dedicated idle candidate server with the frozen geometry, run:
+
+```bash
+/home/nengneng/miniconda3/envs/freetoken-dev/bin/python \
+  blackbox_tests/s2_methods/lifecycle_http.py http://127.0.0.1:60387 \
+  /data2/servebig-envs/s2_methods_20260921/lifecycle-full \
+  --resident-count 1024 --adaptive --reuse
+```
+
+Omit flags for disabled mechanisms and use resident count zero without a list.
+This check assumes ordinary two-layer prefill overlap remains enabled. It checks
+configured counters, same-mode request isolation, streaming stops/output/context
+limits, cancellation, repeated capacity admission, and real rebuilds 1536->1408
+->rejected below-minimum->1536. It must not run alongside performance traffic.
+Routing reuse must produce changed routes. Greedy lifecycle requests need not
+trigger an adaptive stop; the separate stochastic check requires that coverage.
+
+## Fixed adaptive sampling confirmation
+
+Use two freshly started resident servers: fixed N=16 and adaptive maximum N=16,
+both with the same hot list, measured cost profile where applicable, and reuse
+off. Each arm performs eight fixed 224-token presampling requests, then exactly
+256 original eight-token A/B requests, all at concurrency four. Only the latter
+enter the histogram and counter deltas. There is no public seed/reseed API;
+this is a fixed request-history check, not a claim of independent new seeds.
+
+```bash
+/home/nengneng/miniconda3/envs/freetoken-dev/bin/python blackbox_tests/s2_methods/adaptive_sampling.py \
+  collect fixed http://127.0.0.1:60387 /data2/servebig-envs/s2_methods_20260921/sampling-fixed.json
+# After the coordinator starts the adaptive server:
+/home/nengneng/miniconda3/envs/freetoken-dev/bin/python blackbox_tests/s2_methods/adaptive_sampling.py \
+  collect adaptive http://127.0.0.1:60387 /data2/servebig-envs/s2_methods_20260921/sampling-adaptive.json
+/home/nengneng/miniconda3/envs/freetoken-dev/bin/python blackbox_tests/s2_methods/adaptive_sampling.py \
+  compare /data2/servebig-envs/s2_methods_20260921/sampling-fixed.json \
+  /data2/servebig-envs/s2_methods_20260921/sampling-adaptive.json \
+  /data2/servebig-envs/s2_methods_20260921/sampling-comparison.json
+```
+
+The predeclared rule is the full A-count/other histogram distance, exact
+conditional permutation probability, alpha 0.001. Both arms must actually draft,
+verify and retain drafts; scored adaptive requests must increment adaptive_stops.
+Preserve all data, including failed/incomplete coverage. Do not change the fixed
+counts, substitute old samples, or repeat until passing. This finite projection
+cannot prove exact equality for every input or freedom from all sampling bias.
