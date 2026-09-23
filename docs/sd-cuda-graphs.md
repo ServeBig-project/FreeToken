@@ -39,5 +39,9 @@ while capture time and reserved-byte measurements describe the latest graph set.
 Eager execution reports disabled graphs and zero replay counters. Unsupported SD
 combinations retain their existing eager behavior without claiming graph execution.
 
-FlashInfer graph/eager partitioning can produce different BF16 greedy outputs;
-strict text equality acceptance has not passed. See the [numerical investigation](/data2/servebig-envs/sd_graph_20260923/NUMERICS.md).
+FlashInfer graph/eager partitioning can produce different BF16 greedy outputs.
+The user accepts the quantified differences observed in this evaluation, with
+quality regression checks retained; cross-plan text equality is not a release
+requirement. Original strict-comparison results remain available. New unexplained
+differences or clear degradation still require investigation. See the
+[numerical investigation](/data2/servebig-envs/sd_graph_20260923/NUMERICS.md).
