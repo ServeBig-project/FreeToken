@@ -42,6 +42,10 @@ def fused_moe_decode_kernel(
     a_row = route_id if A_ROW_IS_ROUTE else token_id
 
     expert_id = tl.load(topk_ids_ptr + token_id * stride_tid_m + route_k * stride_tid_k)
+    c_ptrs = c_ptr + token_id * stride_cm + route_k * stride_ck + offs_n * stride_cn
+    if expert_id < 0:
+        tl.store(c_ptrs, 0.0, mask=offs_n < N)
+        return
     a_ptrs = a_ptr + a_row * stride_am + offs_k * stride_ak
     b_ptrs = (
         b_ptr
@@ -67,7 +71,6 @@ def fused_moe_decode_kernel(
         weight = tl.load(topk_weights_ptr + token_id * stride_tw_m + route_k * stride_tw_k)
         accumulator = accumulator * weight
 
-    c_ptrs = c_ptr + token_id * stride_cm + route_k * stride_ck + offs_n * stride_cn
     tl.store(
         c_ptrs,
         accumulator.to(compute_type),

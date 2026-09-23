@@ -122,6 +122,7 @@ class Batch:
     draft_available_experts: torch.Tensor | None = None
     draft_replacement_masks: list[torch.Tensor] | None = None
     is_speculative_verify: bool = False
+    num_token_non_padded: torch.Tensor | None = None
     reuse_offsets: torch.Tensor | None = None
     # these fields should be set by scheduler
     input_ids: torch.Tensor = field(init=False)

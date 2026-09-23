@@ -419,7 +419,7 @@ def _ensure_experts_layer_distance_kernel(
             owner_active = tl.zeros((BLOCK_C,), dtype=tl.int1)
             for i in tl.range(num_active):
                 expert = tl.load(expert_ids_ptr + i)
-                owner_active = owner_active | (owner == base + expert)
+                owner_active = owner_active | ((expert >= 0) & (owner == base + expert))
         protected = tl.zeros((BLOCK_C,), dtype=tl.int1)
         if PROTECT_ID_RANGE:
             protected = (owner >= protected_id_start) & (owner < protected_id_end)
@@ -479,7 +479,7 @@ def _ensure_experts_layer_distance_kernel(
     else:
         for i in tl.range(num_active):
             expert = tl.load(expert_ids_ptr + i)
-            resident_slot = tl.load(slot_for_id_ptr + base + expert)
+            resident_slot = tl.load(slot_for_id_ptr + base + expert, mask=expert >= 0, other=-1)
             tl.store(out_indices_ptr + i, resident_slot)
 
     if COLLECT_STATS:

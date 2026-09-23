@@ -18,6 +18,13 @@ class SpeculativeGraphs:
         kv = ctx.kv_cache
         usable_tokens = kv.k_cache(0).flatten(0, 1).shape[0] - 1
         max_tokens = min(runner.max_graph_bs * (config.speculative_num_steps + 1), usable_tokens)
+        self.max_tokens = max_tokens
+        self.query_width = config.speculative_num_steps + 1
+        # Below this bound padding could switch LRU admission to layer-distance eviction.
+        self.exact_bs = max(4, runner.moe_offload_cache.decode_cache_size // (
+            config.model_config.num_experts_per_tok * config.model_config.num_moe_layers))
+        self.real_tokens = torch.empty((), dtype=torch.int32, device=runner.device)
+        self.dummy_slot = ctx.page_table[runner.dummy_req.table_idx, 0]
         self.buffer = GraphCaptureBuffer.init(max_tokens, vocab_size, runner.device)
         self.available = (
             torch.ones(config.model_config.num_moe_layers, config.model_config.num_experts,
@@ -35,7 +42,9 @@ class SpeculativeGraphs:
                 wrapper = runner.attn_backend.create_verify_graph_wrapper(bs, max_seq_len)
                 self.verify_wrappers[bs] = wrapper
                 # The first plan sets FlashInfer's maximum total query-row bound.
-                for tokens in range(min(bs * (config.speculative_num_steps + 1), max_tokens), bs - 1, -1):
+                limit = min(bs * self.query_width, max_tokens)
+                counts = range(limit, bs - 1, -1) if bs <= self.exact_bs else [limit]
+                for tokens in counts:
                     remaining = tokens - bs
                     lengths = []
                     for _ in range(bs):
@@ -68,6 +77,9 @@ class SpeculativeGraphs:
                       draft_experts=self.top_k if phase == "draft" else None,
                       is_speculative_verify=phase == "verify",
                       draft_available_experts=self.available if phase == "draft" else None)
+        if phase == "verify" and bs > self.exact_bs:
+            self.real_tokens.fill_(tokens)
+            batch.num_token_non_padded = self.real_tokens
         batch.padded_reqs = reqs
         batch.input_ids = self.buffer.input_ids[:tokens]
         batch.positions = self.buffer.positions[:tokens]
@@ -82,7 +94,10 @@ class SpeculativeGraphs:
         self.graphs[(phase, bs, tokens)] = graph
 
     def _key(self, batch):
-        return ("verify" if batch.is_speculative_verify else "draft", batch.size, batch.positions.numel())
+        tokens = batch.positions.numel()
+        if batch.is_speculative_verify and batch.size > self.exact_bs:
+            tokens = min(batch.size * self.query_width, self.max_tokens)
+        return ("verify" if batch.is_speculative_verify else "draft", batch.size, tokens)
 
     def can_replay(self, batch) -> bool:
         if batch.draft_experts is not None and batch.draft_experts != self.top_k:
@@ -91,6 +106,13 @@ class SpeculativeGraphs:
 
     def replay(self, batch):
         key = self._key(batch)
+        real = batch.positions.numel()
+        if batch.is_speculative_verify and batch.size > self.exact_bs:
+            self.real_tokens.fill_(real)
+            if real < key[2]:
+                self.buffer.input_ids[real:key[2]].zero_()
+                self.buffer.positions[real:key[2]].zero_()
+                self.buffer.out_loc[real:key[2]] = self.dummy_slot
         self.buffer.copy_from(batch)
         if batch.draft_experts is not None and self.available is not None:
             self.available.copy_(batch.draft_available_experts)
@@ -98,4 +120,4 @@ class SpeculativeGraphs:
                    else self.runner.attn_backend.graph_wrappers[batch.size])
         self.runner.attn_backend.prepare_speculative_graph(batch, wrapper)
         self.graphs[key].replay()
-        return self.buffer.logits[:key[2]]
+        return self.buffer.logits[:real]

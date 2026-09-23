@@ -287,6 +287,10 @@ class FlashInferBackend(BaseAttnBackend):
 
         if metadata.decode is None:
             assert metadata.prefill is not None
+            if batch.num_token_non_padded is not None:
+                output = torch.zeros_like(q)
+                metadata.prefill.wrapper.run(q=q, paged_kv_cache=kv_cache, out=output)
+                return output
             return metadata.prefill.wrapper.run(q=q, paged_kv_cache=kv_cache)
         if metadata.prefill is None:
             return metadata.decode.wrapper.run(q=q, paged_kv_cache=kv_cache)

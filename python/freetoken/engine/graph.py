@@ -140,7 +140,7 @@ class GraphRunner:
         self.layer_range_batch_sizes: tuple[int, ...] = ()
         self._layer_range_state_inputs: object | None = None
         self._prepared_layer_range_batch: Batch | None = None
-        self.replay_counts: dict[tuple[str, int, int], int] = {}
+        self.replay_counts: dict[tuple[str, int, int, int], int] = {}
         self.speculative = None
         started = time.perf_counter()
         before = torch.cuda.memory_reserved(device)
@@ -364,14 +364,14 @@ class GraphRunner:
         if batch.draft_experts is not None or batch.is_speculative_verify:
             logits = self.speculative.replay(batch)
             phase = "verify" if batch.is_speculative_verify else "draft"
-            shape = (phase, batch.size, batch.positions.numel())
+            shape = (phase, batch.size, batch.positions.numel(), self.speculative._key(batch)[2])
             self.replay_counts[shape] = self.replay_counts.get(shape, 0) + 1
             return logits
         self.buffer.copy_from(batch)
         g = self.graph_map[batch.padded_size]
         self.attn_backend.prepare_for_replay(batch)
         g.replay()
-        shape = ("target_decode", batch.size, batch.size)
+        shape = ("target_decode", batch.size, batch.size, batch.padded_size)
         self.replay_counts[shape] = self.replay_counts.get(shape, 0) + 1
         return self.buffer.logits[: batch.size]
 
@@ -379,10 +379,11 @@ class GraphRunner:
         result = {"enabled": bool(self.max_graph_bs), "target_decode": 0, "draft": 0, "verify": 0,
                   "capture_seconds": self.capture_seconds, "extra_reserved_bytes": self.extra_reserved_bytes,
                   "replay_shapes": []}
-        for (phase, batch_size, query_tokens), count in sorted(self.replay_counts.items()):
+        for (phase, batch_size, query_tokens, physical_query_tokens), count in sorted(self.replay_counts.items()):
             result[phase] += count
             result["replay_shapes"].append(dict(phase=phase, batch_size=batch_size,
-                                                query_tokens=query_tokens, replays=count))
+                                                query_tokens=query_tokens, replays=count,
+                                                physical_query_tokens=physical_query_tokens))
         return result
 
     def has_layer_range_graphs_for(self, batch: Batch) -> bool:

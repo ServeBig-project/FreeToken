@@ -264,6 +264,7 @@ class OffloadMoELayer(MoELayer):
             gating_output=router_logits,
             topk=self.top_k,
             renormalize=self.renormalize,
+            num_token_non_padded=get_global_ctx().batch.num_token_non_padded,
         )
         return self._decode_routed(hidden_states, topk_weights, topk_ids)
 
