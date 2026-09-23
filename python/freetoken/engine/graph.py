@@ -178,6 +178,8 @@ class GraphRunner:
         logger.info_rank0(f"Free GPU memory before capturing CUDA graphs: {mem_GB(free_memory)}")
 
         self.buffer = GraphCaptureBuffer.init(self.max_graph_bs, vocab_size, self.device)
+        # MoE-only rebuild preserves real prefix KV, so capture must write the dummy slot.
+        self.buffer.out_loc[:] = get_global_ctx().page_table[self.dummy_req.table_idx, 0]
         self._reset_moe_offload_cache()
 
         pbar = tqdm(
