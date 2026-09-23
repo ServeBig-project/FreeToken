@@ -65,7 +65,12 @@ Points retain residency stops and explicitly label router's zero-draft fallback.
 Off SD performance/profile additionally requires actual draft and verify B>4
 at each higher C. Tail-only acceptance uses performance for this full-wave evidence.
 
-Full actual `(phase,B,Q,replays)` differences are retained. For verify, Q/B−1
+Full `(phase,B,Q,physical_query_tokens)` replay-count differences are retained,
+including distinct physical sizes for the same logical shape. Complete original
+stats remain saved before, at response exit and after idle. High-batch verify
+may pad only the physical query tail; Q continues to count logical positions.
+Padding must not change request lengths, KV budgets or introduce expert loads.
+For verify, logical Q/B−1
 is the batch's mean candidate count; it is exact per-request N only at B1.
 Mixed-batch shapes do not reveal individual N values, and eager provides no
 replay-derived N distribution. Draft/accepted/verify counters are retained;

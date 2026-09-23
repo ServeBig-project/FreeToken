@@ -14,11 +14,15 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "sd_graph"))
 from benchmark_http import FROZEN, TASKS, coding_prompt, idle, stats_delta, stream
-from collect_http import shape_counts
 from inputs import PROMPTS
 
 CONCURRENCIES = (4, 8, 16, 32)
 TAIL_LENGTHS = (1, 2, 3, 4, 5, 7, 17)
+
+
+def shape_counts(stats):
+    return {(row["phase"], row["batch_size"], row["query_tokens"], row["physical_query_tokens"]): row["replays"]
+            for row in stats["cuda_graph"]["replay_shapes"]}
 
 
 def percentile(values, fraction):
@@ -68,6 +72,7 @@ def main():
             after = idle(client)
             old, new = shape_counts(before), shape_counts(after)
             replays = [{"phase": key[0], "batch_size": key[1], "query_tokens": key[2],
+                        "physical_query_tokens": key[3],
                         "replays": value - old.get(key, 0)}
                        for key, value in sorted(new.items()) if value > old.get(key, 0)]
             for row in replays:
@@ -138,8 +143,8 @@ def main():
                 continue
             histogram = Counter()
             for batch in batches:
-                histogram.update({(r["phase"], r["batch_size"], r["query_tokens"]): r["replays"] for r in batch["replay_delta"]})
-            phase_batches = {phase: sorted({b for p, b, q in histogram if p == phase}) for phase in ("target_decode", "draft", "verify")}
+                histogram.update({(r["phase"], r["batch_size"], r["query_tokens"], r["physical_query_tokens"]): r["replays"] for r in batch["replay_delta"]})
+            phase_batches = {phase: sorted({b for p, b, q, physical in histogram if p == phase}) for phase in ("target_decode", "draft", "verify")}
             rows = [r for batch in batches for r in batch["responses"]]
             total_seconds = sum(b["seconds"] for b in batches)
             total_tokens = sum(b["completion_tokens"] for b in batches)
@@ -155,8 +160,9 @@ def main():
                      "speculative_delta": speculative,
                      "router_all_fallback": args.mode == "router" and speculative["draft_tokens"] == 0,
                      "full_concurrency_graph_observed": {phase: count in values for phase, values in phase_batches.items()},
-                     "verify_batch_mean_candidates": [{"batch_size": b, "query_tokens": q, "batch_mean_candidates": q / b - 1, "replays": n}
-                                                        for (p, b, q), n in sorted(histogram.items()) if p == "verify"]}
+                     "verify_batch_mean_candidates": [{"batch_size": b, "query_tokens": q, "physical_query_tokens": physical,
+                                                       "batch_mean_candidates": q / b - 1, "replays": n}
+                                                      for (p, b, q, physical), n in sorted(histogram.items()) if p == "verify"]}
             report["points"].append(point)
             if args.execution == "graph" and count > 4:
                 report["checks"][f"c{count}:actual_graph_B_over_4"] = any(b > 4 for values in phase_batches.values() for b in values)
