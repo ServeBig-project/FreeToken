@@ -49,6 +49,7 @@ class DetokenizeMsg(BaseTokenizerMsg):
     # Bytes this engine process holds on the GPU (torch reserved pool). 0 on CPU.
     gpu_mem_bytes: int = 0
     speculative: dict[str, int] | None = None
+    cuda_graph: dict | None = None
 
 
 @dataclass

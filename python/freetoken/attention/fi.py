@@ -558,3 +558,33 @@ class FlashInferBackend(BaseAttnBackend):
         assert self.capture is not None and bs in self.capture_bs
         metadata.decode.wrapper = self.graph_wrappers[bs]
         self._ensure_metadata_plans(metadata)
+
+    def create_verify_graph_wrapper(self, batch_size: int, max_seq_len: int):
+        from flashinfer import BatchPrefillWithPagedKVCacheWrapper
+        def zeros(size):
+            return torch.zeros(size, dtype=torch.int32, device=self.device)
+        wrapper = BatchPrefillWithPagedKVCacheWrapper(
+            self.float_workspace_buffer, kv_layout="NHD", backend="fa2", use_cuda_graph=True,
+            qo_indptr_buf=zeros(batch_size + 1), paged_kv_indptr_buf=zeros(batch_size + 1),
+            paged_kv_indices_buf=zeros(batch_size * max_seq_len),
+            paged_kv_last_page_len_buf=zeros(batch_size),
+        )
+        wrapper._int_workspace_buffer = self.int_workspace_buffer
+        return wrapper
+
+    def prepare_speculative_graph(self, batch: Batch, wrapper, page_table=None) -> None:
+        verify = batch.is_speculative_verify
+        if page_table is not None:
+            path = self._build_path_metadata(
+                batch.reqs, kind="prefill" if verify else "decode", wrapper=wrapper,
+                page_table=page_table,
+                cpu_kwargs={"dtype": torch.int32, "device": "cpu", "pin_memory": True},
+            )
+            batch.attn_metadata = FIMetadata(
+                query_indptr=path.cu_seqlens_q_cpu.to(self.device),
+                prefill=path if verify else None, decode=None if verify else path,
+            )
+        else:
+            path = batch.attn_metadata.prefill if verify else batch.attn_metadata.decode
+            path.wrapper = wrapper
+        self._ensure_metadata_plans(batch.attn_metadata)

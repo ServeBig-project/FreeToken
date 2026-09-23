@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List
 
@@ -66,7 +67,7 @@ class GraphCaptureBuffer:
         )
 
     def copy_from(self, batch: Batch) -> None:
-        _slice = slice(batch.padded_size)
+        _slice = slice(batch.positions.numel())
         self.input_ids[_slice] = batch.input_ids
         if batch.out_loc is not None:
             self.out_loc[_slice] = batch.out_loc
@@ -116,6 +117,7 @@ class GraphRunner:
         dummy_req: Req,
         moe_offload_cache: OffloadMoeCache | None = None,
         layered_execution_adapter: LayeredExecutionAdapter | None = None,
+        speculative_config=None,
     ) -> None:
         cuda_graph_bs = _determine_cuda_graph_bs(
             cuda_graph_bs=cuda_graph_bs,
@@ -138,7 +140,17 @@ class GraphRunner:
         self.layer_range_batch_sizes: tuple[int, ...] = ()
         self._layer_range_state_inputs: object | None = None
         self._prepared_layer_range_batch: Batch | None = None
+        self.replay_counts: dict[tuple[str, int, int], int] = {}
+        self.speculative = None
+        started = time.perf_counter()
+        before = torch.cuda.memory_reserved(device)
         self._capture_graphs(max_seq_len, vocab_size, model)
+        if self.max_graph_bs and speculative_config is not None:
+            from .speculative_graph import SpeculativeGraphs
+            self.speculative = SpeculativeGraphs(self, model, speculative_config, max_seq_len, vocab_size)
+        torch.cuda.synchronize(device)
+        self.capture_seconds = time.perf_counter() - started if self.max_graph_bs else 0.0
+        self.extra_reserved_bytes = max(0, torch.cuda.memory_reserved(device) - before) if self.max_graph_bs else 0
 
     def _reset_moe_offload_cache(self) -> None:
         if self.moe_offload_cache is not None:
@@ -199,6 +211,7 @@ class GraphRunner:
             self.graph_map[bs] = graph
 
         assert pool is not None
+        self.pool = pool
         self._capture_layer_range_graphs(model)
         self._reset_moe_offload_cache()
         free_memory = get_free_memory(self.device)
@@ -340,15 +353,35 @@ class GraphRunner:
         self.buffer.table_idx[:bs].fill_(self._dummy_state_slot())
 
     def can_use_cuda_graph(self, batch: Batch) -> bool:
+        if batch.draft_experts is not None or batch.is_speculative_verify:
+            return self.speculative is not None and self.speculative.can_replay(batch)
         return batch.is_decode_only and batch.size <= self.max_graph_bs
 
     def replay(self, batch: Batch) -> torch.Tensor:
         assert self.can_use_cuda_graph(batch)
+        if batch.draft_experts is not None or batch.is_speculative_verify:
+            logits = self.speculative.replay(batch)
+            phase = "verify" if batch.is_speculative_verify else "draft"
+            shape = (phase, batch.size, batch.positions.numel())
+            self.replay_counts[shape] = self.replay_counts.get(shape, 0) + 1
+            return logits
         self.buffer.copy_from(batch)
         g = self.graph_map[batch.padded_size]
         self.attn_backend.prepare_for_replay(batch)
         g.replay()
+        shape = ("target_decode", batch.padded_size, batch.positions.numel())
+        self.replay_counts[shape] = self.replay_counts.get(shape, 0) + 1
         return self.buffer.logits[: batch.size]
+
+    def stats_snapshot(self) -> dict:
+        result = {"enabled": bool(self.max_graph_bs), "target_decode": 0, "draft": 0, "verify": 0,
+                  "capture_seconds": self.capture_seconds, "extra_reserved_bytes": self.extra_reserved_bytes,
+                  "replay_shapes": []}
+        for (phase, batch_size, query_tokens), count in sorted(self.replay_counts.items()):
+            result[phase] += count
+            result["replay_shapes"].append(dict(phase=phase, batch_size=batch_size,
+                                                query_tokens=query_tokens, replays=count))
+        return result
 
     def has_layer_range_graphs_for(self, batch: Batch) -> bool:
         return (
@@ -434,6 +467,8 @@ class GraphRunner:
         # free-before-alloc cannot reclaim this GPU memory. empty_cache() is left to the
         # caller / next capture (GraphRunner._capture_graphs already runs it).
         self.graph_map = {}
+        self.speculative = None
+        self.pool = None
         self.layer_range_graph_map = {}
         self.layer_range_group_ends = {}
         self.layer_range_group_end_candidates = {}

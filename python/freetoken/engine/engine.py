@@ -460,6 +460,7 @@ class Engine:
             dummy_req=self.dummy_req,
             moe_offload_cache=self.moe_offload_cache,
             layered_execution_adapter=self._layered_execution_adapter,
+            speculative_config=config if config.speculative_graphs else None,
         )
         if config.attention_backend.split(",")[0] == "triton":
             # Prefill runs on the first comma part; warm its autotune cache.
@@ -921,6 +922,7 @@ class Engine:
         self.rebuild_teardown_started = True
         # 1. Tear down CUDA graphs + backend capture scratch (free-before-alloc).
         self.attn_backend.reset_capture()
+        prior_replays = self.graph_runner.replay_counts
         self.graph_runner.destroy_cuda_graphs()
         # 2. Resize caches in place (each frees its old GPU tensors before allocating).
         # Pin the new window first (validated above) so any KV-pool rebuild below sizes the window
@@ -965,7 +967,9 @@ class Engine:
             dummy_req=self.dummy_req,
             moe_offload_cache=self.moe_offload_cache,
             layered_execution_adapter=self._layered_execution_adapter,
+            speculative_config=config if config.speculative_graphs else None,
         )
+        self.graph_runner.replay_counts = prior_replays
 
     def compute_logits(self, batch: Batch) -> torch.Tensor:
         assert torch.cuda.current_stream() == self.stream
@@ -1462,10 +1466,6 @@ def _adjust_config(config: EngineConfig):
     expert_quant = getattr(model_config, "expert_quant", "none")
 
     if config.speculative_num_steps or config.moe_expert_profile:
-        # A draft uses different routing from a captured target decode; verification
-        # has ragged query lengths. Keep this initial implementation eager.
-        override("cuda_graph_bs", [])
-        override("cuda_graph_max_bs", 0)
         if config.moe_backend == "auto":
             override("moe_backend", "offload")
             if not config.moe_cache_size and config.moe_cache_rate is None:
@@ -1823,6 +1823,13 @@ def _adjust_config(config: EngineConfig):
     if is_moe:
         object.__setattr__(model_config, "moe_backend", config.moe_backend)
     object.__setattr__(model_config, "nvfp4_backend", config.nvfp4_backend)
+
+    if config.speculative_graphs:
+        limit = min(config.cuda_graph_max_bs, config.max_running_req, 4)
+        override("cuda_graph_bs", list(range(1, limit + 1)))
+    elif config.speculative_num_steps or config.moe_expert_profile:
+        override("cuda_graph_bs", [])
+        override("cuda_graph_max_bs", 0)
 
     # Must stay LAST: page_size is only final here (_adjust_dsv4_config sets P=128, the
     # TRTLLM block sets 64). Also covers the programmatic LLM(...) path that bypasses parse_args.

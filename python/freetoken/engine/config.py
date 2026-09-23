@@ -181,6 +181,22 @@ class EngineConfig:
         return parse_config(self.hf_config)
 
     @property
+    def speculative_graphs(self) -> bool:
+        return bool(
+            0 < self.speculative_num_steps <= 4 and self.speculative_draft_experts == 3
+            and self.speculative_draft_residency in ("off", "router")
+            and not self.speculative_adaptive_profile and not self.speculative_reuse_expert_cap
+            and not self.resident_experts and not self.moe_expert_profile
+            and self.dtype == torch.bfloat16 and self.model_config.model_type == "qwen3_moe"
+            and self.model_config.expert_quant == "none" and not self.nowag_expert_path
+            and self.model_config.moe_weight_format in (None, "bf16")
+            and self.attention_backend == "fi" and self.moe_backend == "offload"
+            and self.page_size == 1 and self.tp_info.size == 1
+            and getattr(self, "batching_policy", "legacy") == "legacy"
+            and self.cuda_graph_max_bs != 0 and self.cuda_graph_bs != []
+        )
+
+    @property
     def max_seq_len(self) -> int:
         if self.max_seq_len_override is not None:
             return self.max_seq_len_override
