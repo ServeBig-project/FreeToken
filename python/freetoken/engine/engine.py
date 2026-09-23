@@ -434,6 +434,9 @@ class Engine:
         if config.speculative_adaptive_cost or config.speculative_verify_prefetch:
             from .speculative_cost import SpeculativeCost
             self.ctx.speculative_cost = self.speculative_cost = SpeculativeCost(self)
+            if config.speculative_verify_prefetch:
+                from freetoken.moe.prefetch import VerifyPrefetch
+                self.speculative_cost.prefetch = VerifyPrefetch(self.speculative_cost)
 
         post_free_memory = self._sync_get_memory()[0]
         logger.info_rank0(f"Free memory after initialization: {mem_GB(post_free_memory)}")

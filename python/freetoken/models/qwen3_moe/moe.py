@@ -32,7 +32,7 @@ class Qwen3MoeMLP(BaseOP):
         draft_experts = ctx.batch.draft_experts
         if draft_experts is not None and ctx.speculative_cost is not None:
             _, predicted = fused_topk(hidden_states, router_logits, self.experts.top_k, self.experts.renormalize)
-            ctx.speculative_cost.record_prediction(self.layer_id, predicted)
+            ctx.speculative_cost.record_prediction(self.layer_id, predicted, router_logits)
         reuse = ctx.reuse_expert_cap and ctx.batch.is_speculative_verify
         if draft_experts is not None or ctx.expert_counts is not None or reuse:
             available = (ctx.batch.draft_available_experts[self.layer_id]

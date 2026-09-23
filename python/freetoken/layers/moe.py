@@ -329,6 +329,8 @@ class OffloadMoELayer(MoELayer):
         if cost is not None:
             phase = cost.phase(get_global_ctx().batch)
             cost.record_routes(phase, self.layer_id, topk_ids)
+            if cost.prefetch is not None:
+                cost.prefetch.before_layer(phase, self.layer_id)
         cache.ensure_decode_experts(self.layer_id, topk_ids)
         if cost is not None:
             cost.copy_rows[phase, self.layer_id].copy_(cache.num_indices[0])
@@ -336,6 +338,8 @@ class OffloadMoELayer(MoELayer):
         cache.copy_missing()
         if cost is not None:
             cost.copy_events[phase][self.layer_id][1].record()
+            if phase == 1 and cost.prefetch is not None:
+                cost.prefetch.launch(self.layer_id, topk_ids, get_global_ctx().batch)
             cost.gemm_events[phase][self.layer_id][0].record()
         output = self._expert_gemm(
             cache,

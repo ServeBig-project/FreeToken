@@ -50,6 +50,10 @@ class StatsTracker:
                             "cost_transfer_predictions": {
                                 phase: dict(predicted_experts=0.0, actual_experts=0, abs_error_experts=0.0)
                                 for phase in ("ar", "draft", "verify")}}
+        self.speculative.update(dict.fromkeys((
+            "prefetch_predicted_experts", "prefetch_loaded_experts", "prefetch_used_experts",
+            "prefetch_evicted_unused_experts", "prefetch_loaded_bytes", "prefetch_used_bytes",
+            "prefetch_evicted_unused_bytes"), 0))
 
     @property
     def active(self) -> int:

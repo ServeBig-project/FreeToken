@@ -87,3 +87,55 @@ Additional `/v1/stats.speculative` counters are cumulative:
 
 These measurements do not depend on `--moe-collect-stats`. The new controller
 cannot be combined with the older `--speculative-adaptive-profile` policy.
+
+## Predicted verification prefetch
+
+`--speculative-verify-prefetch` predicts target top-k experts from each draft
+layer's original router scores, while drafting still computes only its selected
+small k. Candidates form the current round's per-layer union; scores are cleared
+at the next round. All weights occupy the existing shared expert pool.
+
+A GPU plan deduplicates missing candidates and protects the current computation's
+slots, permanent pins, and unfinished copies. It admits only a cost-limited set:
+predicted saved target transfer is compared with exposed copy time and the
+expected reload cost of the victim. The copy window and per-expert transfer cost
+come from observed serving events. Until transfer cost is known, at most one
+expert copy per draft forward is permitted for calibration; this does not force
+an AR generation round.
+
+Admission and publication run on the main stream. A separate stream copies the
+reserved rows concurrently with draft MoE computation and following attention.
+The mapping remains unavailable until completion. Before another admission, the
+main stream joins that copy and publishes its rows. The final copy is joined
+before model forward returns, including inside CUDA Graphs. This is an overlap
+attempt, not a guarantee of hidden latency or speedup; copy kernels consume GPU
+resources too. Measured copy and exposed-wait times remain visible in the cost
+statistics.
+
+With strict `router` residency and load-missing disabled, prefetch protects the
+entire round's original allowed expert set. A full pool can therefore yield zero
+prefetches. It cannot silently load extra draft experts or invalidate the frozen
+allowed set. With residency `off`, or load-missing enabled, the original allowed
+set is not pinned by this rule.
+
+Prefetch counters in `/v1/stats.speculative` are independent of
+`--moe-collect-stats`:
+
+- `prefetch_predicted_experts`: sum of per-layer candidate-union sizes at each
+  draft step. Requests/positions within each set are deduplicated; this is not a
+  lifetime count of unique expert IDs.
+- `prefetch_loaded_experts`: actual completed expert copies. A later reload after
+  eviction is another copy. `draft_expert_loads` continues to count demand copies
+  only, so these two counters do not double-count prefetch.
+- `prefetch_used_experts`: first subsequent target decode/verify use of each
+  completed prefetch while still cached. Draft use and repeated target hits do
+  not increment it.
+- `prefetch_evicted_unused_experts`: completed prefetches evicted before that
+  first target use, including invalidation by cache rebuild.
+- `prefetch_loaded_bytes`, `prefetch_used_bytes`, and
+  `prefetch_evicted_unused_bytes`: the corresponding actual expert-row bytes.
+
+Rebuild recaptures against the new cache geometry, retains cumulative counters,
+and invalidates old prefetched mappings. Capture warmups do not count as serving
+prefetches. The switches may be enabled separately or together; prefetch-only
+mode uses cost estimation without enabling adaptive stopping.

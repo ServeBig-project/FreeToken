@@ -330,6 +330,27 @@ def _reset_cache_kernel(
         tl.store(num_indices_ptr, 0)
 
 
+@triton.jit
+def _select_layer_victim(owner, usage, eligible, off_c, next_layer,
+                         num_layers: tl.constexpr, num_experts: tl.constexpr,
+                         ZERO_FULL: tl.constexpr):
+    usage_max: tl.constexpr = 9223372036854775807
+    empty = eligible & (owner < 0)
+    has_empty = tl.sum(empty.to(tl.int32)) > 0
+    distance = owner // num_experts - next_layer
+    if ZERO_FULL:
+        distance = tl.where(distance <= 0, distance + num_layers, distance)
+    else:
+        distance = tl.where(distance < 0, distance + num_layers, distance)
+    farthest = tl.max(tl.where(eligible & (owner >= 0), distance, -1), axis=0)
+    primary = tl.where(has_empty, empty, eligible & (owner >= 0) & (distance == farthest))
+    candidate_usage = tl.where(primary, tl.where(has_empty, 0, usage), usage_max)
+    oldest = tl.min(candidate_usage, axis=0)
+    slot_key = tl.where(primary & (candidate_usage == oldest), off_c, off_c.shape[0])
+    victim = tl.argmin(slot_key, axis=0).to(tl.int32)
+    return victim, tl.sum(tl.where(off_c == victim, owner, 0))
+
+
 @triton.jit(
     do_not_specialize=[
         "layer_id",
@@ -428,35 +449,10 @@ def _ensure_experts_layer_distance_kernel(
         )
 
         for rank in tl.range(num_missing):
-            empty = eligible & (owner < 0)
-            has_empty = tl.sum(empty.to(tl.int32)) > 0
-
-            owner_layer = owner // num_experts
-            distance = owner_layer - next_layer
-            if ZERO_DISTANCE_IS_FULL_CYCLE:
-                distance = tl.where(
-                    distance <= 0, distance + num_layers, distance
-                )
-            else:
-                distance = tl.where(distance < 0, distance + num_layers, distance)
-            filled_distance = tl.where(
-                eligible & (owner >= 0), distance, -1
+            victim, old_id = _select_layer_victim(
+                owner, usage, eligible, off_c, next_layer,
+                num_layers, num_experts, ZERO_DISTANCE_IS_FULL_CYCLE,
             )
-            farthest = tl.max(filled_distance, axis=0)
-            farthest_filled = eligible & (owner >= 0) & (distance == farthest)
-            primary = tl.where(has_empty, empty, farthest_filled)
-
-            # Empty slots tie only by physical slot. Filled pages tie by oldest
-            # usage and then physical slot.
-            candidate_usage = tl.where(
-                primary, tl.where(has_empty, 0, usage), usage_max
-            )
-            oldest = tl.min(candidate_usage, axis=0)
-            slot_key = tl.where(
-                primary & (candidate_usage == oldest), off_c, BLOCK_C
-            )
-            victim = tl.argmin(slot_key, axis=0).to(tl.int32)
-            old_id = tl.sum(tl.where(off_c == victim, owner, 0))
             if old_id >= 0:
                 tl.store(slot_for_id_ptr + old_id, -1)
 

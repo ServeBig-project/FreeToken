@@ -1082,7 +1082,7 @@ class Scheduler(SchedulerIOMixin):
         swa_tokens = self._swa_token_usage()
         if reply:
             reply[-1].cuda_graph = self.engine.graph_runner.stats_snapshot()
-            if self.speculative is not None and batch.has_decode:
+            if self.speculative is not None and (batch.has_decode or self.speculative.cost is not None):
                 reply[-1].speculative = self.speculative.snapshot()
             mem = self._gpu_mem_bytes()
             mamba_used, mamba_total = mamba_slots or (0, 0)

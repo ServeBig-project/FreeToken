@@ -72,8 +72,11 @@ class SpeculativeCost:
         valid_rows = (ids[:, 0] >= 0).sum().clamp_min(1)
         self.use[0 if phase == 1 else 1, layer].lerp_(row.float() / valid_rows, 0.1)
 
-    def record_prediction(self, layer, ids):
-        self.predicted[layer].scatter_(0, ids.flatten().long(), True)
+    def record_prediction(self, layer, ids, logits):
+        if self.prefetch is None:
+            self.predicted[layer].scatter_(0, ids.flatten().long(), True)
+        else:
+            self.prefetch.predict(layer, ids, logits)
         if layer == 0:
             self.predicted_positions.add_(ids.shape[0])
 
@@ -82,6 +85,8 @@ class SpeculativeCost:
         if phase is None:
             return
         self.forward_events[phase][0].record()
+        if phase == 1 and self.prefetch is not None:
+            self.prefetch.start_step()
         self.predicted_misses[phase].copy_(self._expected_misses(phase, batch.size, batch.positions.numel()))
 
     def end_model(self, batch):
@@ -95,7 +100,7 @@ class SpeculativeCost:
             physical = (graphs.speculative._key(batch)[2] if phase else batch.padded_size)
         self.pending[phase] = (batch.size, physical, batch.positions.numel())
 
-    def _collect(self, phase, rows, predicted):
+    def _collect(self, phase, rows, predicted, prefetch_rows=None):
         pending = self.pending.pop(phase, None)
         if pending is None:
             return
@@ -104,9 +109,9 @@ class SpeculativeCost:
         copy = sum(start.elapsed_time(end) for count, (start, end) in
                    zip(rows, self.copy_events[phase], strict=True) if count)
         gemm = [start.elapsed_time(end) for start, end in self.gemm_events[phase]]
-        prefetch_copy = prefetch_rows = wait = 0.0
+        prefetch_copy = copied_prefetch_rows = wait = 0.0
         if phase == 1 and self.prefetch is not None:
-            prefetch_copy, prefetch_rows, wait = self.prefetch.collect_times()
+            prefetch_copy, copied_prefetch_rows, wait = self.prefetch.collect_times(batch_size, prefetch_rows)
         misses = sum(rows)
         value = [max(0.0, total - copy - wait - sum(gemm)) / physical, sum(gemm) / logical, wait]
         key = (phase, batch_size)
@@ -115,7 +120,7 @@ class SpeculativeCost:
         self.mean_cpu[key] = mean
         self.means[phase, batch_size] = torch.tensor(mean, device=self.engine.device)
         self.samples[phase][batch_size] += 1
-        copied = misses + prefetch_rows
+        copied = misses + copied_prefetch_rows
         if copied:
             unit = (copy + prefetch_copy) / copied
             self.expert_ms_cpu = (0.8 * self.expert_ms_cpu + 0.2 * unit
@@ -137,9 +142,14 @@ class SpeculativeCost:
     def collect_ready(self):
         ready = [p for p in self.pending if self.forward_events[p][1].query()]
         if ready:
-            rows = torch.cat((self.copy_rows.float(), self.predicted_misses[:, None]), dim=1).cpu().tolist()
+            tensors = [self.copy_rows.flatten().float(), self.predicted_misses]
+            if self.prefetch is not None:
+                tensors.append(self.prefetch.rows.float())
+            data = torch.cat(tensors).cpu().tolist()
             for phase in ready:
-                self._collect(phase, rows[phase][:-1], rows[phase][-1])
+                start = phase * self.layers
+                self._collect(phase, data[start:start + self.layers],
+                              data[3 * self.layers + phase], data[3 * self.layers + 3:])
 
     def _mean(self, phase, batch_size):
         known = [b for b, count in enumerate(self.samples[phase]) if count]
@@ -196,6 +206,7 @@ class SpeculativeCost:
         self.predicted_positions.zero_()
         if self.prefetch is not None:
             self.prefetch.evicted.zero_()
+            self.prefetch.scores.zero_()
         bootstrap = self.adaptive and not self.samples[1][batch_size]
         if not self.adaptive:
             decision = torch.ones((), dtype=torch.bool, device=self.engine.device)
@@ -244,9 +255,11 @@ class SpeculativeCost:
             decision = draft + (next_verify - verify).clamp_min(0) < benefit
         # This is the single batch feedback for the next draft step. Timer reads
         # below are already complete and introduce no per-layer synchronization.
-        packet = torch.cat((decision.float().reshape(1), self.copy_rows[1].float(),
-                            self.predicted_misses[1:2])).cpu().tolist()
-        self._collect(1, packet[1:-1], packet[-1])
+        tensors = [decision.float().reshape(1), self.copy_rows[1].float(), self.predicted_misses[1:2]]
+        if self.prefetch is not None:
+            tensors.append(self.prefetch.rows.float())
+        packet = torch.cat(tensors).cpu().tolist()
+        self._collect(1, packet[1:1 + self.layers], packet[1 + self.layers], packet[2 + self.layers:])
         self.control_ms += (time.perf_counter() - started) * 1000
         if not packet[0]:
             self.stopped_requests += active
@@ -263,18 +276,25 @@ class SpeculativeCost:
         started = time.perf_counter()
         self.collect_ready()
         self.control_ms += (time.perf_counter() - started) * 1000
-        return {"cost_ar_requests": self.ar_requests, "cost_stopped_requests": self.stopped_requests,
+        result = {"cost_ar_requests": self.ar_requests, "cost_stopped_requests": self.stopped_requests,
                 "cost_probe_requests": self.probe_requests, "cost_control_ms": self.control_ms,
                 "cost_samples": {name: sum(self.samples[i]) for i, name in enumerate(self.phases)},
                 "cost_gpu_ms": dict(self.gpu_ms), "cost_transfer_predictions": self.transfer_predictions}
+        if self.prefetch is not None:
+            result.update(self.prefetch.snapshot())
+        return result
 
     def before_capture(self):
         self.collect_ready()
-        return self.use.clone()
+        prefetch = self.prefetch.before_capture() if self.prefetch is not None else None
+        return self.use.clone(), prefetch
 
-    def after_capture(self, use):
+    def after_capture(self, state):
+        use, prefetch = state
         self.use.copy_(use)
         self.routes.zero_()
         self.predicted.zero_()
         self.predicted_positions.zero_()
         self.copy_rows.zero_()
+        if self.prefetch is not None:
+            self.prefetch.after_capture(prefetch)
