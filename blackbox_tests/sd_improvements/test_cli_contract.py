@@ -54,6 +54,6 @@ def test_declared_startup_rejections(public_cli, tmp_path, case):
         profile.write_text(json.dumps({"target_token_ms": 45.0, "draft_step_ms": 27.0,
                                        "expert_bandwidth_gib_s": 24.419}))
         args += ["--speculative-adaptive-cost", "--speculative-adaptive-profile", str(profile)]
-        reason = r"mutual|exclusive|cannot.*(?:both|together|combin|with)|incompatible|conflict"
+        reason = r"mutual|exclusive|cannot.*(?:both|together|combin|with)|incompatible|conflict|new SD controls require legacy adaptive.*disabled"
     code, text = public_cli(args)
     assert code != 0 and re.search(reason, text, re.I), text
