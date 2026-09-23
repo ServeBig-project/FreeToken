@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, List, Tuple
 import torch
 
 if TYPE_CHECKING:
+    from freetoken.engine.speculative_cost import SpeculativeCost
     from freetoken.attention import BaseAttnBackend, BaseAttnMetadata
     from freetoken.attention.linear import FLAMetadata
     from freetoken.kvcache import BaseCacheHandle, BaseKVCachePool
@@ -209,6 +210,7 @@ class Context:
     expert_counts: torch.Tensor | None = None
     draft_residency: str = "off"
     draft_load_missing: bool = False
+    speculative_cost: SpeculativeCost | None = None
     draft_affinity: torch.Tensor | None = None
     reuse_expert_cap: int = 0
     reuse_changed_routes: torch.Tensor | None = None

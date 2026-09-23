@@ -325,9 +325,19 @@ class OffloadMoELayer(MoELayer):
             return executor.decode(self.layer_id, hidden_states, topk_weights, topk_ids)
         if cache.decode_target == "hybrid":
             return self._decode_hybrid(cache, hidden_states, topk_weights, topk_ids)
+        cost = get_global_ctx().speculative_cost
+        if cost is not None:
+            phase = cost.phase(get_global_ctx().batch)
+            cost.record_routes(phase, self.layer_id, topk_ids)
         cache.ensure_decode_experts(self.layer_id, topk_ids)
+        if cost is not None:
+            cost.copy_rows[phase, self.layer_id].copy_(cache.num_indices[0])
+            cost.copy_events[phase][self.layer_id][0].record()
         cache.copy_missing()
-        return self._expert_gemm(
+        if cost is not None:
+            cost.copy_events[phase][self.layer_id][1].record()
+            cost.gemm_events[phase][self.layer_id][0].record()
+        output = self._expert_gemm(
             cache,
             hidden_states,
             topk_weights,
@@ -337,6 +347,9 @@ class OffloadMoELayer(MoELayer):
             alphas=cache.alphas_for_slots(self.layer_id),
             is_prefill=False,
         )
+        if cost is not None:
+            cost.gemm_events[phase][self.layer_id][1].record()
+        return output
 
     def _decode_hybrid(
         self,

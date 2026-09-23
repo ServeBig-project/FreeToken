@@ -41,7 +41,15 @@ class StatsTracker:
                            "replay_shapes": [], "capture_seconds": 0.0, "extra_reserved_bytes": 0}
         self.speculative = {"draft_tokens": 0, "accepted_draft_tokens": 0, "verify_steps": 0,
                             "adaptive_stops": 0, "reuse_changed_routes": 0, "residency_stops": 0,
-                            "draft_expert_loads": 0, "draft_expert_replacements": 0}
+                            "draft_expert_loads": 0, "draft_expert_replacements": 0,
+                            "cost_ar_requests": 0, "cost_stopped_requests": 0,
+                            "cost_probe_requests": 0, "cost_control_ms": 0.0,
+                            "cost_samples": dict.fromkeys(("ar", "draft", "verify"), 0),
+                            "cost_gpu_ms": dict.fromkeys(("ar", "draft", "verify", "moe_compute",
+                                                          "demand_copy", "prefetch_copy", "prefetch_wait"), 0.0),
+                            "cost_transfer_predictions": {
+                                phase: dict(predicted_experts=0.0, actual_experts=0, abs_error_experts=0.0)
+                                for phase in ("ar", "draft", "verify")}}
 
     @property
     def active(self) -> int:

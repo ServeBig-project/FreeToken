@@ -35,6 +35,7 @@ class SpeculativeDecoder:
         self.cache = cache
         self.table = table
         self.prepare = prepare
+        self.cost = engine.speculative_cost
         self.expansion = DraftExpansion(engine) if engine.config.draft_cost else None
         # FlashInfer uses its updated default-generator offset for the current draw.
         # A separate seed keeps subsequent Torch draws from reusing that random stream.
@@ -68,6 +69,8 @@ class SpeculativeDecoder:
         if self.draft_stats is not None:
             loads, replacements = self.draft_stats.tolist()
             result.update(draft_expert_loads=loads, draft_expert_replacements=replacements)
+        if self.cost is not None:
+            result.update(self.cost.snapshot())
         return result
 
     def _record_lengths(self, lengths) -> None:
@@ -115,15 +118,25 @@ class SpeculativeDecoder:
         engine, sampler = self.engine, self.engine.sampler
         expert_cache = engine.moe_offload_cache
         available = None
+        resident_ok = torch.ones((), dtype=torch.bool, device=engine.device) if self.cost is not None else None
         if (engine.config.speculative_draft_residency != "off" and expert_cache is not None
                 and not engine.config.speculative_draft_load_missing):
             # Draft hits cannot evict or load experts, and legacy SD never interleaves
             # target work into this loop, so this set is stable for the whole round.
             available = expert_cache.slot_for_id >= 0
-            if not bool((available.sum(dim=1) >= engine.config.speculative_draft_experts).all().item()):
+            resident_ok = (available.sum(dim=1) >= engine.config.speculative_draft_experts).all()
+            if self.cost is None and not bool(resident_ok.item()):
                 self.residency_stops += sum(length > 0 for length in lengths)
                 self._record_lengths([0] * batch.size)
                 return engine.forward_batch(batch, forward_input.sample_args)
+        if self.cost is not None:
+            allowed, resident, limit = self.cost.admit(lengths, resident_ok)
+            if not allowed or not resident:
+                if allowed and not resident:
+                    self.residency_stops += sum(length > 0 for length in lengths)
+                self._record_lengths([0] * batch.size)
+                return engine.forward_batch(batch, forward_input.sample_args)
+            lengths = [min(length, limit) for length in lengths]
         loads_before = (
             expert_cache.lru_stats[:, Stat.MISS].sum()
             if self.draft_stats is not None and expert_cache is not None else None
@@ -186,6 +199,10 @@ class SpeculativeDecoder:
             rows = [views[i].table_idx for i in active]
             positions = [starts[i] + step for i in active]
             self.table.token_pool[rows, positions] = tokens
+            if self.cost is not None and step + 1 < steps:
+                if not self.cost.continue_draft(lengths, step + 1, batch.size):
+                    lengths = [min(length, step + 1) for length in lengths]
+                    break
         self.draft_tokens += sum(lengths)
         self._record_lengths(lengths)
         if loads_before is not None:
@@ -209,6 +226,7 @@ class SpeculativeDecoder:
         )
         self.verify_steps += 1
         output = torch.full_like(proposals, -1)
+        accepted_lengths = torch.empty(batch.size, dtype=torch.int64, device=engine.device) if self.cost is not None else None
         offset = 0
         for i, length in enumerate(lengths):
             p = target_probs[offset : offset + length + 1]
@@ -218,6 +236,8 @@ class SpeculativeDecoder:
             q_chosen = q[:length].gather(1, candidates[:, None]).flatten()
             uniform = torch.rand(length, device=engine.device, generator=self.generator)
             accepted = (uniform * q_chosen < p_chosen).to(torch.int32).cumprod(0).sum()
+            if accepted_lengths is not None:
+                accepted_lengths[i] = accepted
             # The zero q row after the last draft makes the all-accepted case
             # sample its bonus directly from p. Otherwise sample max(p-q, 0).
             correction = (p[accepted] - q[accepted]).clamp_min_(0)
@@ -229,6 +249,9 @@ class SpeculativeDecoder:
             req = batch.reqs[i]
             self.table.token_pool[req.table_idx, starts[i] : starts[i] + length + 1] = out
             offset += length + 1
+
+        if accepted_lengths is not None:
+            self.cost.observe_acceptance(lengths, accepted_lengths)
 
         host = output.to("cpu", non_blocking=True)
         ready = torch.cuda.Event()

@@ -430,6 +430,10 @@ class Engine:
 
         # ======================= Sampler initialization ========================
         self.sampler = Sampler(self.device, config.model_config.vocab_size)
+        self.speculative_cost = None
+        if config.speculative_adaptive_cost or config.speculative_verify_prefetch:
+            from .speculative_cost import SpeculativeCost
+            self.ctx.speculative_cost = self.speculative_cost = SpeculativeCost(self)
 
         post_free_memory = self._sync_get_memory()[0]
         logger.info_rank0(f"Free memory after initialization: {mem_GB(post_free_memory)}")
@@ -974,11 +978,15 @@ class Engine:
 
     def compute_logits(self, batch: Batch) -> torch.Tensor:
         assert torch.cuda.current_stream() == self.stream
+        if self.speculative_cost is not None:
+            self.speculative_cost.begin_model(batch)
         with self.ctx.forward_batch(batch):
             if self.graph_runner.can_use_cuda_graph(batch):
                 logits = self.graph_runner.replay(batch)
             else:
                 logits = self.model.forward()
+        if self.speculative_cost is not None:
+            self.speculative_cost.end_model(batch)
         if self.cpu_moe_executor is not None:
             # One pinned read: surfaces a fired flag-handshake watchdog (dead coordinator
             # -> stale expert outputs) as a loud error instead of silent corruption.

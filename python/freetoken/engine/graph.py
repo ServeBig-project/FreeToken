@@ -142,12 +142,16 @@ class GraphRunner:
         self._prepared_layer_range_batch: Batch | None = None
         self.replay_counts: dict[tuple[str, int, int, int], int] = {}
         self.speculative = None
+        cost = get_global_ctx().speculative_cost
+        cost_state = cost.before_capture() if cost is not None else None
         started = time.perf_counter()
         before = torch.cuda.memory_reserved(device)
         self._capture_graphs(max_seq_len, vocab_size, model)
         if self.max_graph_bs and speculative_config is not None:
             from .speculative_graph import SpeculativeGraphs
             self.speculative = SpeculativeGraphs(self, model, speculative_config, max_seq_len, vocab_size)
+        if cost is not None:
+            cost.after_capture(cost_state)
         torch.cuda.synchronize(device)
         self.capture_seconds = time.perf_counter() - started if self.max_graph_bs else 0.0
         self.extra_reserved_bytes = max(0, torch.cuda.memory_reserved(device) - before) if self.max_graph_bs else 0
