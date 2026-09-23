@@ -15,9 +15,21 @@ from sd_concurrency.evaluate_http import shape_counts
 from test_serving import SAMPLED, Server
 
 LENGTHS = (1, 2, 3, 7, 8, 9, 17)
-COUNTERS = ("cost_ar_requests", "cost_stopped_requests", "prefetch_predicted_experts",
+COUNTERS = ("cost_ar_requests", "cost_stopped_requests", "cost_probe_requests", "prefetch_predicted_experts",
             "prefetch_loaded_experts", "prefetch_used_experts", "prefetch_evicted_unused_experts",
             "prefetch_loaded_bytes", "prefetch_used_bytes", "prefetch_evicted_unused_bytes")
+
+
+def cumulative_fields(spec):
+    values = {key: spec[key] for key in (*COUNTERS, "draft_tokens", "accepted_draft_tokens", "verify_steps", "cost_control_ms")}
+    values.update({f"draft_length_histogram.{n}": count for n, count in enumerate(spec["draft_length_histogram"])})
+    for group, names in (("cost_samples", ("ar", "draft", "verify")),
+                         ("cost_gpu_ms", ("ar", "draft", "verify", "moe_compute", "demand_copy", "prefetch_copy", "prefetch_wait"))):
+        values.update({f"{group}.{name}": spec[group][name] for name in names})
+    for phase in ("ar", "draft", "verify"):
+        for key in ("predicted_experts", "actual_experts", "abs_error_experts"):
+            values[f"cost_transfer_predictions.{phase}.{key}"] = spec["cost_transfer_predictions"][phase][key]
+    return values
 
 
 def main():
@@ -31,8 +43,8 @@ def main():
     for flag in ("adaptive-cost", "draft-load-missing", "verify-prefetch"):
         parser.add_argument(f"--speculative-{flag}", action="store_true")
     args = parser.parse_args()
-    if args.part == "small-cache" and (not args.speculative_draft_load_missing or args.speculative_adaptive_cost):
-        parser.error("small-cache isolates load-missing with adaptive cost disabled")
+    if args.part == "small-cache" and not args.speculative_draft_load_missing:
+        parser.error("small-cache covers load-only or the all-on combination")
     args.output.mkdir(parents=True, exist_ok=True)
     expected = {"adaptive_cost_enabled": args.speculative_adaptive_cost,
                 "draft_load_missing_enabled": args.speculative_draft_load_missing,
@@ -142,12 +154,20 @@ def main():
             return rows
 
         def rebuild(capacity):
-            observer.idle()
+            nonlocal shrunk
+            before = observer.idle()
             response = client.post("/v1/cache/rebuild", json={"moe_cache_size": capacity, "mode": "if_idle", "timeout": 300.0})
-            result = {"capacity": capacity, "http_status": response.status_code, "body": response.json()}
+            result = {"capacity": capacity, "http_status": response.status_code, "body": response.json(), "stats_before": before}
             report["rebuilds"].append(result)
             save()
             assert response.status_code == 200 and result["body"]["status"] == "ok", result
+            shrunk = capacity != 1706
+            after = result["stats_after"] = observer.idle()
+            old, new = cumulative_fields(before["speculative"]), cumulative_fields(after["speculative"])
+            result["counters_did_not_reset"] = {key: new[key] >= value for key, value in old.items()}
+            save()
+            assert all(result["counters_did_not_reset"].values()), result
+            inspect(after, capacity)
 
         shrunk = False
         try:
@@ -171,12 +191,12 @@ def main():
                 run("after-cancel", [request(0), request(1)])
             else:
                 rebuild(256)
-                shrunk = True
                 run("load-small-cold", [request(0), request(1)], capacity=256)
                 run("load-small-repeat", [request(0), request(1)], capacity=256)
-                delta = report["stages"][-2]["counter_delta"]
-                assert delta["draft_tokens"] > 0 and delta["verify_steps"] > 0 and delta["draft_expert_loads"] > 0, "Load-missing path not exercised"
-                assert delta["residency_stops"] == 0, "Strict residency still stopped load-enabled drafting"
+                if not args.speculative_adaptive_cost:
+                    delta = report["stages"][-2]["counter_delta"]
+                    assert delta["draft_tokens"] > 0 and delta["verify_steps"] > 0 and delta["draft_expert_loads"] > 0, "Load-missing path not exercised"
+                    assert delta["residency_stops"] == 0, "Strict residency still stopped load-enabled drafting"
         except Exception as error:
             report["error"] = f"{type(error).__name__}: {error}"
             save()

@@ -88,10 +88,20 @@ The remaining parts provide focused additional coverage:
   sampling API behavior; it is not a statistical distribution proof.
 - `lifecycle`: stop in streamed/plain requests, cancellation while other
   requests remain active, survivor completion and subsequent admission.
-- `small-cache`: adaptive cost off and load-missing on; rebuild to256, two
+- `small-cache`: load-only or all three controls on; rebuild to256, two
   distinct17-token requests plus a repeated wave, then restore1706 and generate.
-  Actual drafting, verification and demand loads must occur without strict
-  residency stops. Rebuild is performed only at idle and uses the public API.
+  With adaptive cost off, actual drafting, verification and demand loads must
+  occur without strict residency stops. All-on may legally select ordinary
+  decoding at256; it still checks outputs, resources and actual Graph replay
+  after restoration. Missing prefetch activity remains uncovered. Rebuild is
+  performed only at idle and uses the public API.
+
+Both rebuilds preserve full before/after stats and require published process-
+lifetime counters not to decrease: draft/accepted/verify, every N histogram bin,
+cost AR/stopped/probe, control time, samples, GPU times, transfer predictions and
+errors, and prefetch events/bytes. Cache occupancy and old epoch counters may
+change normally. Cost estimates and strategy choices need not stay fixed;
+overlapping parent/child time fields are not summed into a fabricated total.
 
 Run detailed boundaries/lifecycle on the selected main eager/Graph controls,
 not on every flag combination. The old maximum4/default-off comparison retains
