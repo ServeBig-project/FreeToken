@@ -48,3 +48,17 @@ CPU preparation compiles this client and checks its entry point only. GPU
 correctness and performance remain pending coordinator execution. The bounded
 default workload has3024 total output tokens per server configuration; elapsed
 time depends on actual execution and cache behavior.
+
+## Public CLI contracts
+
+```bash
+FT_SD_PACKAGE=/ABSOLUTE/CANDIDATE/python \
+  /home/nengneng/miniconda3/envs/freetoken-dev/bin/python -m pytest -q \
+  blackbox_tests/sd_improvements/test_cli_contract.py
+```
+
+These three checks cover option discoverability, load-missing without router,
+and new adaptive cost combined with the old adaptive profile. Their outcomes
+change whether the advertised CLI is usable and invalid configurations reject
+for the stated reason. CUDA devices are hidden from these subprocesses;
+timeouts or unrelated CUDA errors do not count as correct rejection.
