@@ -2,7 +2,7 @@
 
 These clients read only public HTTP. The coordinator starts every GPU service.
 Use the real Qwen3-30B-A3B BF16 checkpoint, legacy scheduling, synchronous eager
-or Graph execution, context1024, KV4096, prefill512, maximum running requests4,
+or Graph execution, identical context/prefill limits, KV4096, maximum running requests4,
 cache1706, and permanent residency/adaptive/verification reuse disabled.
 SD uses maximum4 draft steps and3 draft experts, with residency off or router.
 The Graph switch is `--cuda-graph-max-bs 0` or `4`. Record the full command.
@@ -42,3 +42,37 @@ quality preservation.
 
 CPU preparation checks compilation and the client entry point only. It does
 not establish GPU correctness, replay coverage or performance.
+
+## Shape probes and strict paired comparison
+
+On each coordinator-owned service, after its fixed benchmark history:
+
+```bash
+/home/nengneng/miniconda3/envs/freetoken-dev/bin/python \
+  blackbox_tests/sd_graph/collect_http.py http://127.0.0.1:PORT OUTPUT \
+  --mode off --execution graph
+```
+
+Use mode `ar`, `off` or `router`, and execution `eager` or `graph`. The13 frozen
+stages exercise output limits1/2/3/4/5/7/17/64, concurrent2/3/4 distinct prompts,
+and mixed short/long tails. They retain each input, text, usage, finish reason
+and public stats. Actual replay differences must cover B1/2/3/4 for ordinary
+target decode or SD draft/verify, and SD B1 verify query lengths2/3/4/5.
+`query_tokens` counts total real query positions; padding is not counted.
+Each phase returns to idle before the next. Limit1 is a valid prefill-only case.
+
+After both matching official artifacts exist:
+
+```bash
+/home/nengneng/miniconda3/envs/freetoken-dev/bin/python \
+  blackbox_tests/sd_graph/compare_evidence.py EAGER/acceptance.json \
+  GRAPH/acceptance.json OUTPUT/comparison.json
+```
+
+This checks matching public configuration/inputs, disabled replay counters,
+actual Graph coverage and exact text/usage/finish equality. Every difference is
+saved with its public request and both responses; none receives a numerical or
+text tolerance. Different contexts or an incomplete collection are not a valid
+pair. The original ctx4096 debugging collection is separate from the official
+matrix. Stop, cancellation and cache-rebuild lifecycle probes are a separate
+supplement; the initial13 stages do not claim those paths were covered.
