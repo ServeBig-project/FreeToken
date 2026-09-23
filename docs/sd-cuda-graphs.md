@@ -1,14 +1,15 @@
-# Fixed-step speculative CUDA graphs
+# Speculative CUDA graphs
 
 The existing `--cuda-graph-max-bs` controls this path. `0` keeps eager execution;
 `32` captures every real batch size from 1 through 32 when
 `--max-running-requests 32` is set, including all intermediate tail batches.
 The capture limit is the smaller of these two settings and 32. Supported SD
 configurations are single-GPU Qwen3 MoE BF16 with the offload backend, FlashInfer attention,
-page size 1, legacy scheduling, K=3, and at most four proposed tokens. Draft
-residency may be `off` or `router`. Adaptive expansion, permanent resident lists,
+page size 1, legacy scheduling, K=3, and at most eight proposed tokens. Draft
+residency may be `off` or `router`. The older `--speculative-adaptive-profile`, permanent resident lists,
 approximate verification reuse, affinity and quantized experts keep their existing
-eager behavior in this phase.
+eager behavior. The three new [adaptive/loading/prefetch options](adaptive-loading.md)
+support Graph execution, including early stopping and shorter verification tails.
 
 Target decode, one-token drafting, and multi-query verification use separate
 model graphs. A full four-token draft replays the draft graph four times, then
@@ -22,8 +23,8 @@ and private graph memory are additional allocations; startup fails if those do
 not fit rather than silently reducing expert slots or KV pages. Graph capture
 does not publish output or modify reusable request KV.
 
-With 1706 expert slots, N4 and batch limit 32 capture 136 graphs across the three
-phases. B1–4 retain exact verification query shapes; higher batches reuse one
+With 1706 expert slots and batch limit 32, N4 captures 136 graphs and N8 captures
+176 across the three phases. B1–4 retain exact verification query shapes; higher batches reuse one
 full-width verification graph per B. Short tails append dummy queries after all
 real queries. Their attention output is initialized to zero, KV writes use the
 reserved dummy slot, and negative expert IDs skip expert admission and compute.
