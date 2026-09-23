@@ -369,7 +369,7 @@ class GraphRunner:
         g = self.graph_map[batch.padded_size]
         self.attn_backend.prepare_for_replay(batch)
         g.replay()
-        shape = ("target_decode", batch.padded_size, batch.positions.numel())
+        shape = ("target_decode", batch.size, batch.size)
         self.replay_counts[shape] = self.replay_counts.get(shape, 0) + 1
         return self.buffer.logits[: batch.size]
 
