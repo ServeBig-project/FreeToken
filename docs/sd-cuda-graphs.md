@@ -25,8 +25,10 @@ does not publish output or modify reusable request KV.
 - `enabled`: at least one graph is captured for the current engine.
 - `target_decode`, `draft`, `verify`: cumulative successful replay submissions.
 - `replay_shapes`: entries with `phase`, `batch_size`, `query_tokens`, and `replays`.
-  These describe the shapes actually replayed; verification query lengths within
-  a request group may differ while the batch size and total query count match.
+  `batch_size` counts real requests and `query_tokens` counts logical queries;
+  ordinary autoregressive padding (such as B3 executing a physical B4 graph) is
+  excluded. SD captures actual B/Q shapes; verification query lengths within a
+  request group may differ while the batch size and total query count match.
 - `capture_seconds`: elapsed time constructing the current graph set.
 - `extra_reserved_bytes`: net additional PyTorch GPU reservation during capture.
   This is a measured reservation increase, not a sum of logical tensor sizes.
@@ -36,3 +38,6 @@ not count; ordinary HTTP warmup requests do. Counters survive cache rebuilds,
 while capture time and reserved-byte measurements describe the latest graph set.
 Eager execution reports disabled graphs and zero replay counters. Unsupported SD
 combinations retain their existing eager behavior without claiming graph execution.
+
+FlashInfer graph/eager partitioning can produce different BF16 greedy outputs;
+strict text equality acceptance has not passed. See the [numerical investigation](/data2/servebig-envs/sd_graph_20260923/NUMERICS.md).
