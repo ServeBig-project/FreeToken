@@ -22,7 +22,14 @@ def build_expert_affinity(cache) -> torch.Tensor:
     return distances.to(cache.device)
 
 
-def cached_draft_routing(hidden, logits, top_k, renormalize, available, affinity):
+def cached_draft_routing(hidden, logits, top_k, renormalize, available, affinity, load_missing=False):
+    if load_missing:
+        scores = logits.float()
+        span = scores.amax(dim=-1, keepdim=True) - scores.amin(dim=-1, keepdim=True) + 1
+        _, ids = fused_topk(hidden, scores + available * span, top_k, renormalize)
+        weights = (scores.gather(1, ids.long()).softmax(dim=-1) if renormalize
+                   else scores.softmax(dim=-1).gather(1, ids.long()))
+        return weights, ids, None
     if affinity is None:
         weights, ids = fused_topk(hidden, logits.masked_fill(~available, -float("inf")),
                                   top_k, renormalize)

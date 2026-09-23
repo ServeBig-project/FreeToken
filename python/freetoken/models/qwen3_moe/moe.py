@@ -32,11 +32,16 @@ class Qwen3MoeMLP(BaseOP):
         draft_experts = ctx.batch.draft_experts
         reuse = ctx.reuse_expert_cap and ctx.batch.is_speculative_verify
         if draft_experts is not None or ctx.expert_counts is not None or reuse:
-            if ctx.batch.draft_available_experts is not None:
+            available = (ctx.batch.draft_available_experts[self.layer_id]
+                         if ctx.batch.draft_available_experts is not None else None)
+            if draft_experts is not None and ctx.draft_load_missing:
+                available = ctx.moe_offload_cache.slot_for_id[self.layer_id] >= 0
+            if available is not None:
                 weights, ids, missing = cached_draft_routing(
                     hidden_states, router_logits, draft_experts, self.experts.renormalize,
-                    ctx.batch.draft_available_experts[self.layer_id],
+                    available,
                     ctx.draft_affinity[self.layer_id] if ctx.draft_residency == "affinity" else None,
+                    load_missing=ctx.draft_load_missing,
                 )
                 if ctx.batch.draft_replacement_masks is not None and missing is not None:
                     ctx.batch.draft_replacement_masks.append(missing)

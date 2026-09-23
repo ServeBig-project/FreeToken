@@ -208,6 +208,7 @@ class Context:
     moe_offload_cache: OffloadMoeCache | None = None
     expert_counts: torch.Tensor | None = None
     draft_residency: str = "off"
+    draft_load_missing: bool = False
     draft_affinity: torch.Tensor | None = None
     reuse_expert_cap: int = 0
     reuse_changed_routes: torch.Tensor | None = None

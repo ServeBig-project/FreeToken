@@ -313,6 +313,7 @@ class Engine:
         self._pool_cls = resolve_pool_class(config.model_config)
         self.ctx = Context(config.page_size)
         self.ctx.draft_residency = config.speculative_draft_residency
+        self.ctx.draft_load_missing = config.speculative_draft_load_missing
         self.ctx.reuse_expert_cap = config.speculative_reuse_expert_cap
         if self.ctx.reuse_expert_cap:
             self.ctx.reuse_changed_routes = torch.zeros((), dtype=torch.int64, device=self.device)
@@ -1824,6 +1825,10 @@ def _adjust_config(config: EngineConfig):
         object.__setattr__(model_config, "moe_backend", config.moe_backend)
     object.__setattr__(model_config, "nvfp4_backend", config.nvfp4_backend)
 
+    if (config.speculative_adaptive_cost or config.speculative_draft_load_missing
+            or config.speculative_verify_prefetch):
+        if config.cuda_graph_max_bs and config.cuda_graph_bs != [] and not config.speculative_graphs:
+            raise ValueError("requested speculative CUDA Graph configuration is unsupported")
     if config.speculative_graphs:
         limit = min(config.cuda_graph_max_bs, config.max_running_req, 32)
         override("cuda_graph_bs", list(range(1, limit + 1)))

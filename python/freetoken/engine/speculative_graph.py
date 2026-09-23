@@ -11,7 +11,8 @@ class SpeculativeGraphs:
     def __init__(self, runner, model, config, max_seq_len: int, vocab_size: int):
         self.runner = runner
         self.top_k = config.speculative_draft_experts
-        self.router = config.speculative_draft_residency == "router"
+        self.router = (config.speculative_draft_residency == "router"
+                       and not config.speculative_draft_load_missing)
         self.graphs = {}
         self.verify_wrappers = {}
         ctx = get_global_ctx()

@@ -182,6 +182,7 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
             "verify_prefetch_enabled": config.speculative_verify_prefetch,
             "max_draft_steps": config.speculative_num_steps,
             "reuse_enabled": bool(config.speculative_reuse_expert_cap),
+            "draft_length_histogram": [0] * (config.speculative_num_steps + 1),
             **tr.speculative,
             "draft_residency": config.speculative_draft_residency,
             "draft_expert_loads": tr.speculative["draft_expert_loads"] if config.moe_collect_stats else None,

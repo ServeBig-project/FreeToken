@@ -46,18 +46,20 @@ class SpeculativeDecoder:
         self.verify_steps = 0
         self.adaptive_stops = 0
         self.residency_stops = 0
+        self.draft_length_histogram = [0] * (engine.config.speculative_num_steps + 1)
         self.draft_stats = (
             torch.zeros(2, dtype=torch.int64, device=engine.device)
             if engine.config.moe_collect_stats else None
         )
 
-    def snapshot(self) -> dict[str, int]:
+    def snapshot(self) -> dict:
         result = {
             "draft_tokens": self.draft_tokens,
             "accepted_draft_tokens": self.accepted_draft_tokens,
             "verify_steps": self.verify_steps,
             "adaptive_stops": self.adaptive_stops,
             "residency_stops": self.residency_stops,
+            "draft_length_histogram": list(self.draft_length_histogram),
             "reuse_changed_routes": (
                 int(self.engine.ctx.reuse_changed_routes.item())
                 if self.engine.ctx.reuse_changed_routes is not None else 0
@@ -67,6 +69,10 @@ class SpeculativeDecoder:
             loads, replacements = self.draft_stats.tolist()
             result.update(draft_expert_loads=loads, draft_expert_replacements=replacements)
         return result
+
+    def _record_lengths(self, lengths) -> None:
+        for length in lengths:
+            self.draft_length_histogram[length] += 1
 
     def _draft_lengths(self, batch: Batch) -> list[int]:
         config = self.engine.config
@@ -103,17 +109,20 @@ class SpeculativeDecoder:
         batch = forward_input.batch
         lengths = self._draft_lengths(batch)
         if not any(lengths):
+            self._record_lengths(lengths)
             return self.engine.forward_batch(batch, forward_input.sample_args)
 
         engine, sampler = self.engine, self.engine.sampler
         expert_cache = engine.moe_offload_cache
         available = None
-        if engine.config.speculative_draft_residency != "off" and expert_cache is not None:
+        if (engine.config.speculative_draft_residency != "off" and expert_cache is not None
+                and not engine.config.speculative_draft_load_missing):
             # Draft hits cannot evict or load experts, and legacy SD never interleaves
             # target work into this loop, so this set is stable for the whole round.
             available = expert_cache.slot_for_id >= 0
             if not bool((available.sum(dim=1) >= engine.config.speculative_draft_experts).all().item()):
                 self.residency_stops += sum(length > 0 for length in lengths)
+                self._record_lengths([0] * batch.size)
                 return engine.forward_batch(batch, forward_input.sample_args)
         loads_before = (
             expert_cache.lru_stats[:, Stat.MISS].sum()
@@ -178,6 +187,7 @@ class SpeculativeDecoder:
             positions = [starts[i] + step for i in active]
             self.table.token_pool[rows, positions] = tokens
         self.draft_tokens += sum(lengths)
+        self._record_lengths(lengths)
         if loads_before is not None:
             self.draft_stats[0] += expert_cache.lru_stats[:, Stat.MISS].sum() - loads_before
         if replacement_masks:

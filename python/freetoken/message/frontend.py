@@ -56,7 +56,7 @@ class UserReply(BaseFrontendMsg):
     finish_reason: str | None = None
     # The stop string that ended generation (Anthropic reports it as stop_reason='stop_sequence').
     matched_stop: str | None = None
-    speculative: dict[str, int] | None = None
+    speculative: dict | None = None
     cuda_graph: dict | None = None
 
 
