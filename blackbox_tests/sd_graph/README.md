@@ -7,6 +7,19 @@ cache1706, and permanent residency/adaptive/verification reuse disabled.
 SD uses maximum4 draft steps and3 draft experts, with residency off or router.
 The Graph switch is `--cuda-graph-max-bs 0` or `4`. Record the full command.
 
+## Current acceptance contract
+
+For this completed experiment, the user accepts its recorded and quantified
+BF16 numerical differences. API/resource correctness, concurrency and tail
+coverage, lifecycle/cache-rebuild correctness, and no new failures on the
+frozen quality tasks remain requirements. Future text changes or repeated-word
+degeneration require separate investigation; this is no general tolerance.
+
+The comparator remains exact and retains nonzero exits and `passed:false` for
+mismatches. The [independent report](/data2/servebig-envs/sd_graph_20260923_gpu2/acceptance/REPORT.md)
+applies the current decision without rewriting diagnostic results or tests;
+the numerical evidence is linked in the [public numerical report](/data2/servebig-envs/sd_graph_20260923/NUMERICS.md).
+
 ## Frozen performance and quality inputs
 
 Run from this worktree after `/health` reports `status=ok`:
