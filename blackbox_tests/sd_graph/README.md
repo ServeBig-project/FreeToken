@@ -76,3 +76,29 @@ text tolerance. Different contexts or an incomplete collection are not a valid
 pair. The original ctx4096 debugging collection is separate from the official
 matrix. Stop, cancellation and cache-rebuild lifecycle probes are a separate
 supplement; the initial13 stages do not claim those paths were covered.
+
+## Lifecycle and finite cache supplement
+
+After performance finishes, on each off/router eager/Graph service:
+
+```bash
+/home/nengneng/miniconda3/envs/freetoken-dev/bin/python \
+  blackbox_tests/sd_graph/lifecycle_http.py http://127.0.0.1:PORT OUTPUT \
+  --mode off --execution graph
+```
+
+Enable the public cache-usage report. This checks streaming/nonstreaming stop,
+actual prompt-prefix reuse, varied prompts, cancellation while another request
+is active and verification has advanced, survivor completion and subsequent
+admission. It rebuilds1706 slots to256, repeats a real prompt, then restores1706
+and generates again. Each stage must return to idle with unchanged KV4096;
+Graph stages must actually replay. A48-layer top8 target forward needs at least
+384 distinct expert blocks, so256 slots exercises a finite replacement pool.
+Router fallback at256 is valid; the separate1706 shape probes establish actual
+draft/verify replay. No undocumented eviction order is assumed.
+
+The same comparison entry accepts paired `lifecycle.json` files. Every complete
+response remains subject to exact text/usage/finish comparison. Cancellation
+must actually occur in both runs; its timing-dependent partial text is retained
+but not compared for identical length. All survivor responses remain strict.
+`lifecycle-*` phase labels separate these requests from performance accounting.

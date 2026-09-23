@@ -32,6 +32,7 @@ def main():
     checks["same_mode"] = eager["mode"] == graph["mode"]
     checks["same_configuration"] = configuration(eager) == configuration(graph)
     checks["both_completed"] = eager.get("probe_completed", False) and graph.get("probe_completed", False)
+    checks["local_checks"] = eager.get("passed", True) and graph.get("passed", True)
     checks["graph_coverage"] = not graph.get("missing_graph_coverage", ["not reported"])
     checks["execution_labels"] = eager["execution"] == "eager" and graph["execution"] == "graph"
     left = {stage["label"]: stage for stage in eager["stages"]}
@@ -49,6 +50,11 @@ def main():
             report["differences"].append({"stage": label, "reason": "inputs or response count differ"})
             continue
         for index, (expected, actual) in enumerate(zip(a.get("responses", []), b.get("responses", []))):
+            if expected.get("cancelled") or actual.get("cancelled"):
+                if not (expected.get("cancelled") and actual.get("cancelled")):
+                    report["differences"].append({"stage": label, "request_index": index,
+                                                   "reason": "only one execution actually cancelled"})
+                continue  # Cancellation time changes the delivered partial length; survivors remain strict.
             if semantic(expected) != semantic(actual):
                 offset = next((i for i, (x, y) in enumerate(zip(expected["text"], actual["text"])) if x != y),
                               min(len(expected["text"]), len(actual["text"])))
