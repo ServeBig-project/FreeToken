@@ -109,3 +109,47 @@ accounting, graph verification and idle recovery are checked separately.
 Coverage booleans state which paths actually ran. No prefetch load/use or no
 post-candidate cost stop means that path remains unobserved, even if the local
 API checks pass. No wall-clock threshold or private cost formula is used.
+
+## Frozen sampling confirmation and old-four comparison
+
+After the main functional/performance work, run one AR Graph versus all-on
+Graph pair on coordinator-owned services. Collection is separate from analysis:
+
+```bash
+python blackbox_tests/sd_improvements/sampling_http.py collect ar URL AR.json
+python blackbox_tests/sd_improvements/sampling_http.py collect all-on URL ALL.json
+python blackbox_tests/sd_improvements/sampling_http.py compare AR.json ALL.json RESULT.json
+```
+
+The original A/B prompt and temperature1.5/top_k2/top_p1/ignore-EOS parameters
+are fixed. Each arm first produces8 unscored224-token requests at C4, then256
+scored8-token requests at C4:3840 output tokens per arm,7680 total. For an output
+of exactly8 spaced A/B choices, score the A count in choices2–8; everything
+else is retained as `other`. Thus the A/B statistic excludes the first prefill
+choice. Real-tokenizer CPU calibration found each spaced A/B is one token and
+no vocabulary token can contain multiple complete spaced A/B choices.
+
+The full categorical L1 distance uses the existing exact permutation function:
+dynamic programming sums all category allocations with combination weights,
+with total mass checked against comb(512,256). This is not finite random
+permutation sampling. Alpha stays0.001. Keep this single round, raw responses,
+all categories and results; do not alter sample counts or repeat until passing.
+Fixed startup RNG and this finite workload limit what a passed check proves.
+
+Each scored C4 batch retains full stats, including logical/physical graph
+shapes. The all-on arm must actually draft, accept and verify after prefill;
+N0 rounds and batches with no SD are reported. Without actual SD participation,
+the distribution check cannot be labeled covered even if the histograms agree.
+Old AR versions do not need the new per-SD-round histogram or feature fields.
+
+For a fixed4-step baseline/candidate pair with new controls disabled, use:
+
+```bash
+python blackbox_tests/sd_improvements/compare_legacy.py BASELINE/http.json CANDIDATE/http.json comparison.json
+```
+
+Both inputs come from this same frozen performance client and execution mode.
+The comparator preserves exact request/text/usage/finish differences and returns
+failure for diagnostics; it does not silently grant new numerical exemptions.
+Only the candidate is required to expose new fields and show the three controls
+off. Absence of these new fields in baseline5cef96d is deliberately not an error.
