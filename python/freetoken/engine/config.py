@@ -23,6 +23,9 @@ class EngineConfig:
     speculative_num_steps: int = 0
     speculative_draft_experts: int = 3
     speculative_draft_residency: str = "off"
+    speculative_adaptive_cost: bool = False
+    speculative_draft_load_missing: bool = False
+    speculative_verify_prefetch: bool = False
     moe_resident_experts: str | None = None
     moe_expert_profile: str | None = None
     speculative_adaptive_profile: str | None = None
@@ -104,6 +107,25 @@ class EngineConfig:
             raise ValueError("speculative_num_steps must be >= 0")
         if self.speculative_draft_experts < 1:
             raise ValueError("speculative_draft_experts must be >= 1")
+        if (self.speculative_adaptive_cost or self.speculative_draft_load_missing
+                or self.speculative_verify_prefetch):
+            if not 1 <= self.speculative_num_steps <= 8:
+                raise ValueError("SD cost, missing-expert loading and prefetch require 1..8 draft steps")
+            if self.speculative_draft_load_missing and self.speculative_draft_residency != "router":
+                raise ValueError("--speculative-draft-load-missing requires --speculative-draft-residency router")
+            if self.speculative_adaptive_profile or self.speculative_reuse_expert_cap or self.moe_resident_experts:
+                raise ValueError("new SD controls require legacy adaptive, approximate verify and fixed residency disabled")
+            model = self.model_config
+            if (self.moe_backend not in ("auto", "offload") or self.dtype != torch.bfloat16
+                    or model.expert_quant != "none" or self.nowag_expert_path
+                    or model.moe_weight_format not in (None, "bf16")):
+                raise ValueError("new SD controls require BF16 experts with --moe-backend offload")
+            if self.speculative_draft_residency not in ("off", "router"):
+                raise ValueError("new SD controls support draft residency off or router")
+            if self.cuda_graph_max_bs != 0 and self.cuda_graph_bs != []:
+                if (self.speculative_draft_experts != 3 or self.attention_backend not in ("auto", "fi")
+                        or self.page_size != 1):
+                    raise ValueError("SD Graph requires draft k3, FlashInfer attention and page size 1; use eager otherwise")
         if self.speculative_reuse_expert_cap < 0:
             raise ValueError("speculative_reuse_expert_cap must be >= 0")
         if self.speculative_reuse_expert_cap:
@@ -183,7 +205,7 @@ class EngineConfig:
     @property
     def speculative_graphs(self) -> bool:
         return bool(
-            0 < self.speculative_num_steps <= 4 and self.speculative_draft_experts == 3
+            0 < self.speculative_num_steps <= 8 and self.speculative_draft_experts == 3
             and self.speculative_draft_residency in ("off", "router")
             and not self.speculative_adaptive_profile and not self.speculative_reuse_expert_cap
             and not self.resident_experts and not self.moe_expert_profile

@@ -275,6 +275,18 @@ def parse_args(
         help="JSON with measured target/draft milliseconds and expert bandwidth GiB/s; enables cost-aware expansion.",
     )
     parser.add_argument(
+        "--speculative-adaptive-cost", action="store_true",
+        help="Use measured costs and accepted prefixes to decide after each draft step whether to continue.",
+    )
+    parser.add_argument(
+        "--speculative-draft-load-missing", action="store_true",
+        help="Allow router-resident drafting to load missing experts when fewer than draft k are cached.",
+    )
+    parser.add_argument(
+        "--speculative-verify-prefetch", action="store_true",
+        help="Prefetch predicted verification experts into the shared cache while drafting.",
+    )
+    parser.add_argument(
         "--moe-resident-experts", default=ServerArgs.moe_resident_experts,
         help="JSON gpu_experts list kept resident inside the total offload cache budget.",
     )

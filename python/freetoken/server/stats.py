@@ -177,6 +177,10 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
         "speculative": {
             "enabled": bool(getattr(config, "speculative_num_steps", 0)),
             "adaptive_enabled": bool(config.speculative_adaptive_profile),
+            "adaptive_cost_enabled": config.speculative_adaptive_cost,
+            "draft_load_missing_enabled": config.speculative_draft_load_missing,
+            "verify_prefetch_enabled": config.speculative_verify_prefetch,
+            "max_draft_steps": config.speculative_num_steps,
             "reuse_enabled": bool(config.speculative_reuse_expert_cap),
             **tr.speculative,
             "draft_residency": config.speculative_draft_residency,
