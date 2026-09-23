@@ -75,10 +75,10 @@ class SpeculativeGraphs:
         runner.attn_backend.prepare_speculative_graph(batch, wrapper, table)
         graph = torch.cuda.CUDAGraph()
         with get_global_ctx().forward_batch(batch):
+            # Admission reads GPU state on replay, so warmups can retain expert residency.
             self.buffer.logits[:tokens] = model.forward()
             with torch.cuda.graph(graph, pool=runner.pool, stream=runner.stream):
                 self.buffer.logits[:tokens] = model.forward()
-        runner._reset_moe_offload_cache()
         self.graphs[(phase, bs, tokens)] = graph
 
     def _key(self, batch):

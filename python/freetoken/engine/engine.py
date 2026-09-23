@@ -1825,7 +1825,7 @@ def _adjust_config(config: EngineConfig):
     object.__setattr__(model_config, "nvfp4_backend", config.nvfp4_backend)
 
     if config.speculative_graphs:
-        limit = min(config.cuda_graph_max_bs, config.max_running_req, 4)
+        limit = min(config.cuda_graph_max_bs, config.max_running_req, 32)
         override("cuda_graph_bs", list(range(1, limit + 1)))
     elif config.speculative_num_steps or config.moe_expert_profile:
         override("cuda_graph_bs", [])

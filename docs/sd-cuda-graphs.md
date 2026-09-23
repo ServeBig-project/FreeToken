@@ -1,8 +1,10 @@
 # Fixed-step speculative CUDA graphs
 
 The existing `--cuda-graph-max-bs` controls this path. `0` keeps eager execution;
-`4` captures real batch sizes 1–4, including size 3. Supported SD configurations
-are single-GPU Qwen3 MoE BF16 with the offload backend, FlashInfer attention,
+`32` captures every real batch size from 1 through 32 when
+`--max-running-requests 32` is set, including all intermediate tail batches.
+The capture limit is the smaller of these two settings and 32. Supported SD
+configurations are single-GPU Qwen3 MoE BF16 with the offload backend, FlashInfer attention,
 page size 1, legacy scheduling, K=3, and at most four proposed tokens. Draft
 residency may be `off` or `router`. Adaptive expansion, permanent resident lists,
 approximate verification reuse, affinity and quantized experts keep their existing
@@ -19,6 +21,11 @@ Expert and usable KV budgets retain their configured capacities. Graph buffers
 and private graph memory are additional allocations; startup fails if those do
 not fit rather than silently reducing expert slots or KV pages. Graph capture
 does not publish output or modify reusable request KV.
+
+N4 with batch limit 32 captures 2,208 graphs across the three phases, including
+verification tail shapes. SD warmups retain expert residency between shapes
+and reset it before serving. Startup cost and additional reservation are reported
+by `capture_seconds` and `extra_reserved_bytes` below.
 
 `GET /v1/stats` adds `cuda_graph`:
 
