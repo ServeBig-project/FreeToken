@@ -62,3 +62,50 @@ and new adaptive cost combined with the old adaptive profile. Their outcomes
 change whether the advertised CLI is usable and invalid configurations reject
 for the stated reason. CUDA devices are hidden from these subprocesses;
 timeouts or unrelated CUDA errors do not count as correct rejection.
+
+## New-feature HTTP contracts
+
+On a coordinator-owned candidate service with `--moe-collect-stats`:
+
+```bash
+/home/nengneng/miniconda3/envs/freetoken-dev/bin/python \
+  blackbox_tests/sd_improvements/check_http.py URL OUTPUT \
+  --execution graph --part smoke --speculative-num-steps 8 \
+  --speculative-draft-residency router --speculative-adaptive-cost \
+  --speculative-draft-load-missing --speculative-verify-prefetch
+```
+
+The flag arguments describe expected server settings; this client does not
+change them. Use `smoke` for each of the eight flag combinations: two distinct
+17-token requests, one streamed and one plain. Also use prefetch alone with
+residency off. Strict router plus prefetch may legitimately load nothing when
+the pool is full; its coverage is then absent, not a claimed prefetch success.
+
+The remaining parts provide focused additional coverage:
+
+- `boundaries`: single-request limits1/2/3/7/8/9/17, then mixed tails at C8/C32,
+  followed by four requests using the frozen stochastic A/B input. This checks
+  sampling API behavior; it is not a statistical distribution proof.
+- `lifecycle`: stop in streamed/plain requests, cancellation while other
+  requests remain active, survivor completion and subsequent admission.
+- `small-cache`: adaptive cost off and load-missing on; rebuild to256, two
+  distinct17-token requests plus a repeated wave, then restore1706 and generate.
+  Actual drafting, verification and demand loads must occur without strict
+  residency stops. Rebuild is performed only at idle and uses the public API.
+
+Run detailed boundaries/lifecycle on the selected main eager/Graph controls,
+not on every flag combination. The old maximum4/default-off comparison retains
+the original baseline's missing new fields as version differences, not failures;
+this new-field checker is for the candidate. Performance/raw-response evidence
+can be collected with the same workload on both versions.
+
+Each stage records full requests/responses, stats, logical/physical replay
+shapes, request-round N histogram differences and per-feature path coverage.
+Without cancellation or stop, actual N-weighted round counts must equal
+completed draft tokens; Graph logical verify positions additionally confirm
+that all candidates entered verification. Physical dummy positions are excluded.
+Effective flags, maximum steps, budgets, prefetch first-use/unused-eviction
+accounting, graph verification and idle recovery are checked separately.
+Coverage booleans state which paths actually ran. No prefetch load/use or no
+post-candidate cost stop means that path remains unobserved, even if the local
+API checks pass. No wall-clock threshold or private cost formula is used.
