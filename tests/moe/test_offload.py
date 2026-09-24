@@ -87,11 +87,13 @@ def test_offload_moe_layer_prefill_forward_uses_single_layer_cache_view(monkeypa
         got_topk_ids,
         activation,
         apply_router_weight_on_input,
+        expert_map=None,
     ):
         calls["w1"] = w1
         calls["w2"] = w2
         calls["topk_weights"] = got_topk_weights
         calls["topk_ids"] = got_topk_ids.clone()
+        calls["expert_map"] = expert_map
         return hidden_states
 
     monkeypatch.setattr("freetoken.layers.moe.fused_experts_impl", fake_fused)
@@ -109,6 +111,7 @@ def test_offload_moe_layer_prefill_forward_uses_single_layer_cache_view(monkeypa
     assert calls["topk_ids"].dtype == torch.int32
     # slot == expert id after materialize, so the routing ids pass through unmapped
     assert calls["topk_ids"].tolist() == [[2, 1]]
+    assert calls["expert_map"] is None
 
 
 def test_offload_moe_layer_prefill_overlap_prefetches_layers_into_two_buffers(monkeypatch):
@@ -172,6 +175,7 @@ def test_offload_moe_layer_prefill_overlap_prefetches_layers_into_two_buffers(mo
         got_topk_ids,
         activation,
         apply_router_weight_on_input,
+        expert_map=None,
     ):
         layer_id = len(fused_calls)
         fused_calls.append(
@@ -182,6 +186,7 @@ def test_offload_moe_layer_prefill_overlap_prefetches_layers_into_two_buffers(mo
                 "w2": w2.clone(),
                 "topk_weights": got_topk_weights,
                 "topk_ids": got_topk_ids.clone(),
+                "expert_map": expert_map,
             }
         )
         return hidden_states + layer_id
@@ -196,6 +201,7 @@ def test_offload_moe_layer_prefill_overlap_prefetches_layers_into_two_buffers(mo
     for layer_id in range(num_layers):
         assert fused_calls[layer_id]["topk_weights"] is topk_weights
         assert fused_calls[layer_id]["topk_ids"].tolist() == [[2, 1]]
+        assert fused_calls[layer_id]["expert_map"] is None
         assert torch.equal(fused_calls[layer_id]["w1"], gate_up_source[layer_id])
         assert torch.equal(fused_calls[layer_id]["w2"], down_source[layer_id])
 
