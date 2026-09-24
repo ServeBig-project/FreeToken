@@ -119,8 +119,8 @@ class EngineConfig:
             raise ValueError("self-speculative decoding requires a single GPU (tp_size=1)")
         if getattr(self, "batching_policy", "legacy") != "legacy":
             raise ValueError("self-speculative decoding requires --batching-policy legacy")
-        if self.hf_config.architectures[0] != "Qwen3MoeForCausalLM":
-            raise ValueError("self-speculative decoding currently supports only Qwen3 MoE")
+        if self.hf_config.architectures[0] not in ("Qwen3MoeForCausalLM", "Qwen3_5MoeForConditionalGeneration"):
+            raise ValueError("self-speculative decoding supports only Qwen3 MoE and Qwen3.5 MoE")
         if self.speculative_draft_experts > self.model_config.num_experts_per_tok:
             raise ValueError(
                 "speculative_draft_experts must not exceed the target's experts per token "

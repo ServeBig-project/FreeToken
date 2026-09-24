@@ -122,6 +122,9 @@ class Batch:
     draft_experts: int | None = None
     draft_available_experts: torch.Tensor | None = None
     is_speculative_verify: bool = False
+    # Speculative verify on a GDN model: per request (live state slot, one scratch slot per
+    # verified position). Set by the SpeculativeDecoder; None elsewhere.
+    speculative_states: "list[tuple[int, list[int]]] | None" = None
     num_token_non_padded: torch.Tensor | None = None
     # these fields should be set by scheduler
     input_ids: torch.Tensor = field(init=False)

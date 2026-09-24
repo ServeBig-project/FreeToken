@@ -1001,22 +1001,15 @@ class Engine:
         """Let execution backends own metadata after Scheduler allocates rows."""
         if self.linear_state_pool is not None:
             if batch.is_decode_only:
-                if linear_cache_is_hybrid:
-                    pool = self.linear_state_pool
-                    slots = [
-                        req.linear_slot_idx
-                        if req.linear_slot_idx is not None
-                        else pool.padding_slot
-                        for req in batch.padded_reqs
-                    ]
-                    batch.linear_table_idx = torch.tensor(
-                        slots,
-                        dtype=torch.int32,
-                        device="cpu",
-                        pin_memory=True,
-                    ).to(self.device, non_blocking=True)
-                else:
-                    batch.linear_table_idx = input_mapping[0].to(torch.int32)
+                pool = self.linear_state_pool
+                slots = [
+                    req.linear_slot_idx if req.linear_slot_idx is not None
+                    else pool.padding_slot if linear_cache_is_hybrid else req.table_idx
+                    for req in batch.padded_reqs
+                ]
+                batch.linear_table_idx = torch.tensor(
+                    slots, dtype=torch.int32, device="cpu", pin_memory=True,
+                ).to(self.device, non_blocking=True)
             if batch.fla_metadata is None:
                 from freetoken.attention.linear import build_fla_metadata
 
@@ -1816,12 +1809,16 @@ def _adjust_config(config: EngineConfig):
 
     if config.speculative_num_steps and config.cuda_graph_max_bs != 0 and config.cuda_graph_bs != []:
         # Never fall back silently: eager SD is far slower and would mislead comparisons.
-        if not config.speculative_graphs:
+        if not config.speculative_graphs and model_config.model_type == "qwen3_moe":
             raise ValueError(
                 "SD CUDA Graph requires BF16 Qwen3 MoE experts with --moe-backend offload, "
                 "FlashInfer attention, page size 1 and at most 8 draft steps; "
                 "pass --cuda-graph-max-bs 0 to run speculation eagerly"
             )
+        if not config.speculative_graphs:
+            # No speculative graphs exist for this architecture: drafts and verification run
+            # eagerly while ordinary decode keeps its graphs.
+            logger.info("speculative decoding runs eagerly on %s", model_config.model_type)
         limit = min(config.cuda_graph_max_bs, config.max_running_req, 32)
         override("cuda_graph_bs", list(range(1, limit + 1)))
     elif config.speculative_num_steps:

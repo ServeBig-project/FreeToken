@@ -4,7 +4,8 @@
 
 This phase adds self-assisted speculative decoding to FreeToken for the
 Qwen3 MoE architecture, with Qwen3-30B-A3B as the real-model acceptance target,
-on one RTX 4090. Draft and target use the same checkpoint. Drafting activates
+on one RTX 4090. Qwen3.5 MoE (Gated DeltaNet hybrids such as Qwen3.6-35B-A3B)
+is supported as described in [Gated DeltaNet models](#gated-deltanet-models). Draft and target use the same checkpoint. Drafting activates
 fewer routed experts; target verification retains the checkpoint's original
 routing.
 
@@ -117,3 +118,30 @@ PYTHONPATH=python python -c 'from freetoken.cli import main; main()' serve \
 This uses the real-model acceptance resource limits, not a tuned lab deployment.
 Use an available GPU assigned to the service. Set `--speculative-num-steps 0`
 for ordinary serving with the same checkpoint.
+
+## Gated DeltaNet models
+
+Qwen3.5 MoE keeps a per-request recurrent state in every linear-attention layer,
+updated in place. A speculative round therefore cannot simply rewind a KV
+pointer after rejected drafts; it keeps one state per verified position:
+
+- Before drafting, each request's live state (conv and recurrent, all GDN
+  layers) is copied to a scratch slot of the `LinearStatePool`; every draft
+  step reads and advances that copy, never the live slot.
+- Verification runs the single-token recurrence once per position instead of
+  the chunked prefill kernel. Position 0 starts from the live state, position
+  `j` from the scratch state written at `j-1`; each position writes its own
+  scratch slot.
+- After rejection sampling accepts `a` drafts, the live slot is overwritten
+  with the scratch state of position `a` (position 0 when every draft was
+  rejected: the token that was the ordinary decode query). The copy is
+  stream-ordered and the scratch slots return to the pool immediately.
+
+Cost: `speculative_num_steps + 2` pool slots per request in the round, i.e.
+`(N + 2) x bytes_per_slot` (Qwen3.6-35B-A3B: about 60 MiB per slot). When the
+pool has fewer free slots than that, the round falls back to ordinary decoding
+and `state_slot_stops` in the speculative statistics counts it; size the pool
+with `--max-running-requests` accordingly. Speculative CUDA graphs are not built
+for these models (they run eagerly); the draft routing and the three adaptive
+controls behave as on Qwen3 MoE and still need BF16 experts with
+`--moe-backend offload`. The legacy policy remains the only supported one.

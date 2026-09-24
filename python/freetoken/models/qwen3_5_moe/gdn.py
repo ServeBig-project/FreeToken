@@ -163,6 +163,25 @@ class Qwen3_5GatedDeltaNet(BaseOP):
             cu_seqlens=fla.cu_seqlens, scale=self.head_k_dim ** -0.5,
         )
 
+    def _run_verify(
+        self, conv_in: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
+        pool, li: int, steps, dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Speculative verify: one single-token recurrence per position, each starting from a
+        copy of the previous position's state, so every intermediate state survives for the
+        commit and the live slot is never touched."""
+        rec, cv = pool.recurrent_states[li], pool.conv_states[li]
+        core_out = None
+        for step in steps:
+            dst = step.path.cache_indices.long()
+            rec.index_copy_(0, dst, rec.index_select(0, step.prev))
+            cv.index_copy_(0, dst, cv.index_select(0, step.prev))
+            out = self._run_decode(conv_in[step.rows], a[step.rows], b[step.rows], pool, li, step.path, dtype)
+            if core_out is None:
+                core_out = out.new_empty((conv_in.shape[0], *out.shape[1:]))
+            core_out.index_copy_(0, step.rows, out)
+        return core_out
+
     def _run_prefill(
         self, conv_in: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
         pool, li: int, fla, dtype: torch.dtype,
@@ -225,7 +244,9 @@ class Qwen3_5GatedDeltaNet(BaseOP):
         z = z.reshape(total, self.num_v_heads, self.head_v_dim)
         li = pool.local_index(self.layer_id)
 
-        if batch.is_decode_only:
+        if fla.verify is not None:
+            core_out = self._run_verify(conv_in, a, b, pool, li, fla.verify, dtype)
+        elif batch.is_decode_only:
             assert fla.decode is not None
             core_out = self._run_decode(conv_in, a, b, pool, li, fla.decode, dtype)
         elif batch.is_mixed:

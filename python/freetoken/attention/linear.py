@@ -40,6 +40,17 @@ class FLAPathMetadata:
 
 
 @dataclass
+class FLAVerifyStep:
+    """One verified position of a speculative round: the token rows of the requests still
+    active at this position, the slots holding their state before it, and the decode view
+    whose cache_indices are the scratch slots that receive the state after it."""
+
+    rows: torch.Tensor      # [n] int64 rows into the ragged verify batch
+    prev: torch.Tensor      # [n] int64 slot per row to start from
+    path: FLAPathMetadata   # cache_indices [n] int32 destination slots, cu_seqlens arange
+
+
+@dataclass
 class FLAMetadata:
     """Per-forward GDN metadata, built once and shared by every GDN layer.
 
@@ -50,6 +61,7 @@ class FLAMetadata:
 
     decode: FLAPathMetadata | None = None
     prefill: FLAPathMetadata | None = None
+    verify: list[FLAVerifyStep] | None = None
 
 
 def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
@@ -106,10 +118,37 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
 
     decode = build_decode(batch.decode_reqs) if batch.has_decode else None
     prefill = build_prefill(batch.prefill_reqs) if batch.has_prefill else None
+    verify = None
+    if batch.speculative_states is not None:
+        verify = _build_verify_steps(batch.prefill_reqs, batch.speculative_states, device, pin)
     return FLAMetadata(
         decode=decode,
         prefill=prefill,
+        verify=verify,
     )
+
+
+def _build_verify_steps(reqs, states, device, pin):
+    """Position j of every request verifies its (j+1)-th token; the state before position 0 is
+    the request's live slot, before position j>0 the scratch slot written at j-1."""
+    offsets, total = [], 0
+    for r in reqs:
+        offsets.append(total)
+        total += r.extend_len
+    steps = []
+    for j in range(max(r.extend_len for r in reqs)):
+        active = [i for i, r in enumerate(reqs) if r.extend_len > j]
+        rows = torch.tensor([offsets[i] + j for i in active], dtype=torch.int64, **pin)
+        prev = torch.tensor([states[i][0] if j == 0 else states[i][1][j - 1] for i in active],
+                            dtype=torch.int64, **pin)
+        dst = torch.tensor([states[i][1][j] for i in active], dtype=torch.int32, **pin)
+        steps.append(FLAVerifyStep(
+            rows=rows.to(device, non_blocking=True), prev=prev.to(device, non_blocking=True),
+            path=FLAPathMetadata(
+                cu_seqlens=torch.arange(len(active) + 1, dtype=torch.int32, device=device),
+                cache_indices=dst.to(device, non_blocking=True)),
+        ))
+    return steps
 
 
 def _build_track_metadata(reqs, cu_host, device, pin):

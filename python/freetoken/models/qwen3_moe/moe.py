@@ -4,8 +4,7 @@ from typing import TYPE_CHECKING
 
 from freetoken.layers import BaseOP, LinearReplicated, make_moe_layer
 from freetoken.core import get_global_ctx
-from freetoken.moe.fused import fused_topk
-from freetoken.moe.resident_draft import cached_draft_routing
+from freetoken.moe.resident_draft import draft_routing
 
 if TYPE_CHECKING:
     import torch
@@ -27,24 +26,9 @@ class Qwen3MoeMLP(BaseOP):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         router_logits = self.gate.forward(hidden_states)
-        ctx = get_global_ctx()
-        draft_experts = ctx.batch.draft_experts
-        if draft_experts is not None and ctx.speculative_cost is not None:
-            _, predicted = fused_topk(hidden_states, router_logits, self.experts.top_k, self.experts.renormalize)
-            ctx.speculative_cost.record_prediction(self.layer_id, predicted, router_logits)
-        if draft_experts is not None:
-            available = (ctx.batch.draft_available_experts[self.layer_id]
-                         if ctx.batch.draft_available_experts is not None else None)
-            if ctx.draft_load_missing:
-                available = ctx.moe_offload_cache.slot_for_id[self.layer_id] >= 0
-            if available is not None:
-                weights, ids = cached_draft_routing(
-                    hidden_states, router_logits, draft_experts, self.experts.renormalize,
-                    available, load_missing=ctx.draft_load_missing,
-                )
-            else:
-                weights, ids = fused_topk(hidden_states, router_logits, draft_experts, self.experts.renormalize)
-            return self.experts.routed_forward(hidden_states, weights, ids)
+        draft = draft_routing(get_global_ctx(), self.layer_id, self.experts, hidden_states, router_logits)
+        if draft is not None:
+            return self.experts.routed_forward(hidden_states, *draft)
         final_hidden_states = self.experts.forward(
             hidden_states=hidden_states,
             router_logits=router_logits,
