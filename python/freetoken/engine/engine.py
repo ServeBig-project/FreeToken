@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import math
 import os
+import time
 from datetime import timedelta
 from typing import Any, Dict, Iterable, NamedTuple, Sequence, Tuple
 
@@ -288,6 +289,7 @@ class ForwardOutput(NamedTuple):
     next_tokens_gpu: torch.Tensor
     next_tokens_cpu: torch.Tensor
     copy_done_event: torch.cuda.Event
+    speculative_ends: list[int] | None = None
 
 
 class Engine:
@@ -310,6 +312,7 @@ class Engine:
         # (num_pages sizing, --moe-cache-auto); the instance owns rebuild/validation after.
         self._pool_cls = resolve_pool_class(config.model_config)
         self.ctx = Context(config.page_size)
+        self.ctx.draft_load_missing = config.speculative_draft_load_missing
         set_global_ctx(self.ctx)
 
         self.tp_cpu_group = self._init_communication(config)
@@ -413,6 +416,13 @@ class Engine:
 
         # ======================= Sampler initialization ========================
         self.sampler = Sampler(self.device, config.model_config.vocab_size)
+        self.speculative_cost = None
+        if config.speculative_adaptive_cost or config.speculative_verify_prefetch:
+            from .speculative_cost import SpeculativeCost
+            self.ctx.speculative_cost = self.speculative_cost = SpeculativeCost(self)
+            if config.speculative_verify_prefetch:
+                from freetoken.moe.prefetch import VerifyPrefetch
+                self.speculative_cost.prefetch = VerifyPrefetch(self.speculative_cost)
 
         post_free_memory = self._sync_get_memory()[0]
         logger.info_rank0(f"Free memory after initialization: {mem_GB(post_free_memory)}")
@@ -444,6 +454,7 @@ class Engine:
             dummy_req=self.dummy_req,
             moe_offload_cache=self.moe_offload_cache,
             layered_execution_adapter=self._layered_execution_adapter,
+            speculative_config=config if config.speculative_graphs else None,
         )
         if config.attention_backend.split(",")[0] == "triton":
             # Prefill runs on the first comma part; warm its autotune cache.
@@ -901,6 +912,7 @@ class Engine:
         self.rebuild_teardown_started = True
         # 1. Tear down CUDA graphs + backend capture scratch (free-before-alloc).
         self.attn_backend.reset_capture()
+        prior_replays = self.graph_runner.replay_counts
         self.graph_runner.destroy_cuda_graphs()
         # 2. Resize caches in place (each frees its old GPU tensors before allocating).
         # Pin the new window first (validated above) so any KV-pool rebuild below sizes the window
@@ -945,20 +957,29 @@ class Engine:
             dummy_req=self.dummy_req,
             moe_offload_cache=self.moe_offload_cache,
             layered_execution_adapter=self._layered_execution_adapter,
+            speculative_config=config if config.speculative_graphs else None,
         )
+        self.graph_runner.replay_counts = prior_replays
 
-    def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
+    def compute_logits(self, batch: Batch) -> torch.Tensor:
         assert torch.cuda.current_stream() == self.stream
+        if self.speculative_cost is not None:
+            self.speculative_cost.begin_model(batch)
         with self.ctx.forward_batch(batch):
             if self.graph_runner.can_use_cuda_graph(batch):
                 logits = self.graph_runner.replay(batch)
             else:
                 logits = self.model.forward()
+        if self.speculative_cost is not None:
+            self.speculative_cost.end_model(batch)
         if self.cpu_moe_executor is not None:
             # One pinned read: surfaces a fired flag-handshake watchdog (dead coordinator
             # -> stale expert outputs) as a loud error instead of silent corruption.
             self.cpu_moe_executor.raise_if_unhealthy()
+        return logits
 
+    def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
+        logits = self.compute_logits(batch)
         for req in batch.reqs:
             req.complete_one()
 
@@ -1097,30 +1118,47 @@ class Engine:
         graph_runner.prepare_layer_range_replay(batch)
         current_layer = start_layer
         while current_layer < end_layer:
-            group_end = graph_runner.layer_range_end(current_layer)
-            if group_end is None or group_end > end_layer:
-                group_end = end_layer
             cache = self.moe_offload_cache
-            resident = (
-                cache is not None
-                and cache.has_resident_prefill_layer(current_layer)
+            graph_end = next(
+                (
+                    candidate_end
+                    for candidate_end in graph_runner.layer_range_candidate_ends(
+                        current_layer
+                    )
+                    if candidate_end <= end_layer
+                    and not any(
+                        cache is not None
+                        and cache.has_resident_prefill_layer(layer_id)
+                        for layer_id in range(current_layer, candidate_end)
+                    )
+                ),
+                None,
             )
-            if (
-                not resident
-                and graph_runner.layer_range_end(current_layer) == group_end
-            ):
+            if graph_end is not None:
                 state = graph_runner.replay_layer_range(
                     batch,
                     state,
                     current_layer,
-                    group_end,
+                    graph_end,
                 )
+                next_layer = graph_end
             else:
+                next_graph_start = graph_runner.next_layer_range_start(
+                    current_layer,
+                    end_layer,
+                )
+                next_layer = (
+                    next_graph_start
+                    if next_graph_start is not None
+                    else end_layer
+                )
                 with self.ctx.forward_batch(batch):
                     if state is None:
                         state = self.model.begin_layer_group_prefill(batch.input_ids)
-                    state = self.model.advance_layer_group_prefill(state, group_end)
-            current_layer = group_end
+                    state = self.model.advance_layer_group_prefill(state, next_layer)
+            if next_layer <= current_layer:
+                raise RuntimeError("decode layer-range walker made no progress")
+            current_layer = next_layer
         return state
 
     def finish_layer_group_prefill(
@@ -1420,6 +1458,12 @@ def _adjust_config(config: EngineConfig):
         object.__setattr__(model_config, "expert_quant", "nowag")
         object.__setattr__(model_config, "nowag_expert_path", nowag_expert_path)
     expert_quant = getattr(model_config, "expert_quant", "none")
+
+    if config.speculative_num_steps:
+        if config.moe_backend == "auto":
+            override("moe_backend", "offload")
+            if not config.moe_cache_size and config.moe_cache_rate is None:
+                override("moe_cache_auto", True)
 
     if not is_moe:
         # A dense model has no routed experts: the MoE knobs are inert, and the offload family
@@ -1769,6 +1813,20 @@ def _adjust_config(config: EngineConfig):
     if is_moe:
         object.__setattr__(model_config, "moe_backend", config.moe_backend)
     object.__setattr__(model_config, "nvfp4_backend", config.nvfp4_backend)
+
+    if config.speculative_num_steps and config.cuda_graph_max_bs != 0 and config.cuda_graph_bs != []:
+        # Never fall back silently: eager SD is far slower and would mislead comparisons.
+        if not config.speculative_graphs:
+            raise ValueError(
+                "SD CUDA Graph requires BF16 Qwen3 MoE experts with --moe-backend offload, "
+                "FlashInfer attention, page size 1 and at most 8 draft steps; "
+                "pass --cuda-graph-max-bs 0 to run speculation eagerly"
+            )
+        limit = min(config.cuda_graph_max_bs, config.max_running_req, 32)
+        override("cuda_graph_bs", list(range(1, limit + 1)))
+    elif config.speculative_num_steps:
+        override("cuda_graph_bs", [])
+        override("cuda_graph_max_bs", 0)
 
     # Must stay LAST: page_size is only final here (_adjust_dsv4_config sets P=128, the
     # TRTLLM block sets 64). Also covers the programmatic LLM(...) path that bypasses parse_args.

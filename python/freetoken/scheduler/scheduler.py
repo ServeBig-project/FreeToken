@@ -26,6 +26,13 @@ from freetoken.utils import (
     load_toolcall_anchor_id,
 )
 
+from .adaptive_gate import (
+    AdaptiveFastPathGate,
+    AdaptiveFastPathStats,
+    adaptive_gate_enabled,
+    direct_prefill_batch_is_eligible,
+    pending_complete_prefill_depth,
+)
 from .cache import CacheManager
 from .config import SchedulerConfig
 from .decode import DecodeManager
@@ -42,8 +49,9 @@ from .layered_pipeline import LayeredPipelineExecutor
 from .mixed_batch import LegacyBatchComposer, MixedBatchComposer
 from .prefill import ChunkedReq, PrefillManager
 from .resident_decode import StableDecodeInput, prepare_stable_decode
-from .resident_wave import ResidentExecutor
+from .resident_wave import ResidentExecutor, request_output_view
 from .status import SchedulerStatusReporter
+from .speculative import SpeculativeDecoder
 from .table import TableManager
 
 if TYPE_CHECKING:
@@ -101,6 +109,8 @@ class Scheduler(SchedulerIOMixin):
         self.layered_stats = LayeredExecutionStats()
         self.resident_executor: ResidentExecutor | None = None
         self.layered_pipeline_executor: LayeredPipelineExecutor | None = None
+        self.adaptive_fast_path_gate: AdaptiveFastPathGate | None = None
+        self.adaptive_fast_path_stats = AdaptiveFastPathStats()
         self._resident_decode_input: StableDecodeInput | None = None
         if config.batching_policy == "legacy":
             composer_cls = LegacyBatchComposer
@@ -144,6 +154,12 @@ class Scheduler(SchedulerIOMixin):
                 free_req_resources=self._free_req_resources,
             )
             self.resident_executor = self.layered_pipeline_executor
+            if adaptive_gate_enabled(
+                str(ENV.LP_ADAPTIVE_GATE), warn=logger.warning_rank0
+            ):
+                self.adaptive_fast_path_gate = AdaptiveFastPathGate(
+                    config.max_running_req
+                )
         else:
             raise ValueError(f"Unknown batching policy: {config.batching_policy!r}")
         self.batch_composer = (
@@ -192,6 +208,10 @@ class Scheduler(SchedulerIOMixin):
             )
         self.token_pool = self.table_manager.token_pool
         self.config = config
+        self.speculative = (
+            SpeculativeDecoder(self.engine, self.cache_manager, self.table_manager, self._build_forward_input)
+            if config.speculative_num_steps else None
+        )
         self._refresh_prefill_budget("startup")
         self.status_reporter = SchedulerStatusReporter(
             log=logger.info_rank0,
@@ -753,6 +773,17 @@ class Scheduler(SchedulerIOMixin):
         self.stream.wait_stream(self.engine.stream)
         outputs: list[ForwardData] = []
         if not executor.active:
+            gate = self.adaptive_fast_path_gate
+            if gate is not None:
+                pending_depth = pending_complete_prefill_depth(
+                    self.prefill_manager.pending_list, self.prefill_budget
+                )
+                continuation_uids = {
+                    pending.uid
+                    for pending in self.prefill_manager.pending_list
+                    if pending.chunked_req is not None
+                    or pending.layered_cached_len is not None
+                }
             batch = executor.schedule_first_batch(self.prefill_budget)
             if batch is not None and not batch.has_prefill:
                 forward_input = self._prepare_resident_decode_batch(batch)
@@ -769,7 +800,39 @@ class Scheduler(SchedulerIOMixin):
                 outputs = [data]
             elif batch is not None:
                 self._resident_decode_input = None
-                executor.begin_wave(batch, self.prefill_budget)
+                use_fast_path = False
+                if gate is not None:
+                    use_fast_path, blocked_by = gate.should_use_fast_path(
+                        running_decode_count=len(self.decode_manager.running_reqs),
+                        pending_complete_prefill_depth=pending_depth,
+                        wave_active=executor.active,
+                        now=time.monotonic(),
+                    )
+                    if blocked_by == "decode":
+                        self.adaptive_fast_path_stats.gate_blocks_by_decode += 1
+                    elif blocked_by == "queue":
+                        self.adaptive_fast_path_stats.gate_blocks_by_queue += 1
+                    elif blocked_by == "cooldown":
+                        self.adaptive_fast_path_stats.gate_blocks_by_cooldown += 1
+                    use_fast_path = use_fast_path and direct_prefill_batch_is_eligible(
+                        batch,
+                        token_budget=self.prefill_budget,
+                        continuation_uids=continuation_uids,
+                    )
+                if use_fast_path:
+                    pipeline_executor = self.layered_pipeline_executor
+                    if pipeline_executor is None:
+                        raise RuntimeError("adaptive fast path requires layered pipeline")
+                    pipeline_executor.discard_staged_admission()
+                    outputs = self._forward_direct_resident_batch(batch)
+                    self.adaptive_fast_path_stats.fast_path_forwards += 1
+                    self.adaptive_fast_path_stats.fast_path_prefills += len(
+                        batch.prefill_reqs
+                    )
+                else:
+                    executor.begin_wave(batch, self.prefill_budget)
+                    if gate is not None:
+                        self.adaptive_fast_path_stats.wave_opens += 1
         elif executor.active:
             executor.prepare_step(self.prefill_budget)
 
@@ -777,6 +840,8 @@ class Scheduler(SchedulerIOMixin):
             self.engine.stream.wait_stream(self.stream)
             with self.engine_stream_ctx:
                 outputs = executor.advance_step()
+            if self.adaptive_fast_path_gate is not None and not executor.active:
+                self.adaptive_fast_path_gate.note_wave_closed(time.monotonic())
             if self.config.batching_policy == "layered-pipeline":
                 for data in outputs:
                     output_batch = data[0].batch
@@ -808,6 +873,40 @@ class Scheduler(SchedulerIOMixin):
         self._resident_last_outputs = deferred_outputs
         self._flush_abort_acks()
 
+    def _forward_direct_resident_batch(self, batch: Batch) -> list[ForwardData]:
+        """Run one eager resident-loop batch and retain resident drain timing."""
+        forward_input = self._prepare_resident_batch(batch)
+        self._report_prompt_admissions(batch)
+        with self.engine_stream_ctx:
+            self.engine.stream.wait_stream(self.stream)
+            self._restore_linear_states(batch)
+            output = self._forward(forward_input)
+        if batch.has_decode:
+            self.cache_manager.reserve_next_decode(batch.decode_reqs)
+        if not batch.is_mixed:
+            return [(forward_input, output)]
+
+        decode_indices = list(range(batch.decode_size))
+        prefill_indices = list(range(batch.decode_size, batch.size))
+        decode_input = request_output_view(forward_input, decode_indices)
+        decode_input.batch.decode_size = len(decode_indices)
+        prefill_input = request_output_view(forward_input, prefill_indices)
+        prefill_input.batch.log_new_tokens = batch.log_new_tokens
+        prefill_input.batch.log_cached_tokens = batch.log_cached_tokens
+        prefill_input.batch.prompt_admissions = list(batch.prompt_admissions)
+        decode_output = output._replace(
+            next_tokens_gpu=output.next_tokens_gpu[: batch.decode_size],
+            next_tokens_cpu=output.next_tokens_cpu[: batch.decode_size],
+        )
+        prefill_output = output._replace(
+            next_tokens_gpu=output.next_tokens_gpu[batch.decode_size :],
+            next_tokens_cpu=output.next_tokens_cpu[batch.decode_size :],
+        )
+        return [
+            (decode_input, decode_output),
+            (prefill_input, prefill_output),
+        ]
+
     @torch.inference_mode()
     def run_forever(self) -> NoReturn:
         # DSV4 (owned-KV) decode reads its per-token window/cmp/idx slot maps off the attention
@@ -825,7 +924,7 @@ class Scheduler(SchedulerIOMixin):
             assert torch.cuda.current_stream() == self.stream
             while True:
                 self.resident_loop()
-        elif ENV.DISABLE_OVERLAP_SCHEDULING:
+        elif ENV.DISABLE_OVERLAP_SCHEDULING or self.speculative is not None:
             with self.engine_stream_ctx:
                 self.engine.stream.wait_stream(self.stream)
                 while True:
@@ -878,8 +977,9 @@ class Scheduler(SchedulerIOMixin):
         if suppressed_finished_reqs is None:
             suppressed_finished_reqs = self.finished_reqs
 
-        batch, (_, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
-        copy_done.synchronize()
+        batch, output = last_data[0].batch, last_data[1]
+        next_tokens_cpu = output.next_tokens_cpu
+        output.copy_done_event.synchronize()
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
         with self.cache_manager.lazy_free_region():
@@ -909,43 +1009,50 @@ class Scheduler(SchedulerIOMixin):
                     # are freed below/already; shipping this token would append past the
                     # client's terminal reply.
                     continue
-                next_token = next_tokens_cpu[i]
-                req.append_host(next_token.unsqueeze(0))
-                next_token = int(next_token.item())
-                # ``can_decode`` tracks launched forwards; overlap may already have advanced it
-                # for the ongoing batch. Length is reached only when this drained token fills
-                # the host-visible output budget. EOS and stop strings still win over length.
-                hit_length = req.input_ids.numel() == req.max_device_len
-                hit_eos = (
-                    not req.sampling_params.ignore_eos and next_token in self.eos_token_ids
-                )
-                matched_stop = (
-                    self._match_stop_str(req)
-                    if not hit_eos and req.sampling_params.stop_strs
-                    else None
-                )
-                finished = hit_length or hit_eos or matched_stop is not None
-                finish_reason = (
-                    ("stop" if (hit_eos or matched_stop is not None) else "length")
-                    if finished
-                    else None
-                )
-                if (
-                    next_token == self.toolcall_anchor_id
-                    and req.toolcall_anchor_len is None
-                    and not finished
-                ):
-                    req.toolcall_anchor_len = req.input_ids.numel()
-                reply.append(
-                    DetokenizeMsg(
-                        uid=req.uid,
-                        next_token=next_token,
-                        finished=finished,
-                        finish_reason=finish_reason,
-                        matched_stop=matched_stop,
-                        stop_strs=req.sampling_params.stop_strs or None,
+                tokens = next_tokens_cpu[i].reshape(-1)
+                if output.speculative_ends is not None:
+                    tokens = tokens[tokens >= 0]
+                for j, next_token in enumerate(tokens):
+                    if output.speculative_ends is not None:
+                        req.complete_one()
+                    req.append_host(next_token.unsqueeze(0))
+                    next_token = int(next_token.item())
+                    # Only the host-visible, committed prefix determines termination.
+                    hit_length = req.input_ids.numel() == req.max_device_len
+                    hit_eos = (
+                        not req.sampling_params.ignore_eos and next_token in self.eos_token_ids
                     )
-                )
+                    matched_stop = (
+                        self._match_stop_str(req)
+                        if not hit_eos and req.sampling_params.stop_strs
+                        else None
+                    )
+                    finished = hit_length or hit_eos or matched_stop is not None
+                    finish_reason = (
+                        ("stop" if (hit_eos or matched_stop is not None) else "length")
+                        if finished else None
+                    )
+                    if (
+                        next_token == self.toolcall_anchor_id
+                        and req.toolcall_anchor_len is None
+                        and not finished
+                    ):
+                        req.toolcall_anchor_len = req.input_ids.numel()
+                    reply.append(
+                        DetokenizeMsg(
+                            uid=req.uid,
+                            next_token=next_token,
+                            finished=finished,
+                            finish_reason=finish_reason,
+                            matched_stop=matched_stop,
+                            stop_strs=req.sampling_params.stop_strs or None,
+                        )
+                    )
+                    if finished:
+                        break
+                if output.speculative_ends is not None:
+                    self.cache_manager.release_speculative(req, output.speculative_ends[i])
+                    self.speculative.accepted_draft_tokens += min(j + 1, len(tokens) - 1)
 
                 # NOTE: overlap scheduling may make the request freed twice, skip second free
                 if finished and req not in suppressed_finished_reqs:
@@ -971,6 +1078,9 @@ class Scheduler(SchedulerIOMixin):
         mamba_slots = self._mamba_slot_usage()
         swa_tokens = self._swa_token_usage()
         if reply:
+            reply[-1].cuda_graph = self.engine.graph_runner.stats_snapshot()
+            if self.speculative is not None and (batch.has_decode or self.speculative.cost is not None):
+                reply[-1].speculative = self.speculative.snapshot()
             mem = self._gpu_mem_bytes()
             mamba_used, mamba_total = mamba_slots or (0, 0)
             swa_used, swa_total = swa_tokens or (0, 0)
@@ -991,6 +1101,7 @@ class Scheduler(SchedulerIOMixin):
             page_size=self.config.page_size,
             mamba_slots=mamba_slots,
             swa_tokens=swa_tokens,
+            generated_decode_tokens=(len(reply) if output.speculative_ends is not None else None),
         )
         self.send_result(reply)
         return new_finished_reqs
@@ -1494,6 +1605,9 @@ class Scheduler(SchedulerIOMixin):
         batch = self.batch_composer.schedule_next_batch(self.prefill_budget)
         if batch is None:
             return None
+        if self.speculative is not None and batch.is_decode_only:
+            reqs, _ = self.speculative.selector.select(batch, self.config.max_forward_len)
+            batch = Batch(reqs, decode_size=len(reqs))
         forward_input = self._prepare_batch(batch)
         self._report_prompt_admissions(batch)
         return forward_input
@@ -1526,8 +1640,13 @@ class Scheduler(SchedulerIOMixin):
         batch.input_ids = self.token_pool[input_mapping]
         if self.toolcall_anchor_id is not None and batch.has_decode:
             self.cache_manager.snapshot_toolcall_anchor(batch.decode_reqs)
-        forward_output = self.engine.forward_batch(batch, sample_args)
-        self.token_pool[output_mapping] = forward_output.next_tokens_gpu
+        forward_output = (
+            self.speculative.forward(forward_input)
+            if self.speculative is not None and batch.is_decode_only
+            else self.engine.forward_batch(batch, sample_args)
+        )
+        if forward_output.speculative_ends is None:
+            self.token_pool[output_mapping] = forward_output.next_tokens_gpu
         self.decode_manager.filter_reqs(forward_input.batch.reqs)
         return forward_output
 

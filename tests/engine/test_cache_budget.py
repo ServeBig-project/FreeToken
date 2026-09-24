@@ -135,6 +135,7 @@ def _dsv4_adjust_cfg(**over):
         moe_cache_rate = None
         moe_backend = "offload"
         max_running_req = 1
+        speculative_num_steps = 0
         cuda_graph_max_bs = 1
         cuda_graph_bs = [1]
         max_seq_len = 1024
@@ -250,6 +251,7 @@ def test_adjust_config_resolves_num_tokens_generic():
         moe_cache_rate = None
         moe_backend = "auto"
         max_running_req = 4
+        speculative_num_steps = 0
         cuda_graph_max_bs = 2
         cuda_graph_bs = [1, 2]
         max_seq_len = 1024
@@ -477,6 +479,7 @@ def _generic_rotary_cfg(max_position, override):
         moe_cache_rate = None
         moe_backend = "auto"
         max_running_req = 4
+        speculative_num_steps = 0
         cuda_graph_max_bs = 2
         cuda_graph_bs = [1, 2]
         max_seq_len = 1024

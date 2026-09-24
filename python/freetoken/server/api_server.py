@@ -1011,6 +1011,7 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
         _GLOBAL_STATE.free_vram_bytes = int(meta.pop("free_vram_bytes", 0) or 0)
         _GLOBAL_STATE.cache_floors = meta.pop("floors", None)
         _GLOBAL_STATE.cache_pools = meta.pop("pools", None)
+        _GLOBAL_STATE.stats.cuda_graph = meta.pop("cuda_graph", _GLOBAL_STATE.stats.cuda_graph)
         _GLOBAL_STATE.swa_full_tokens_ratio = float(meta.pop("swa_full_tokens_ratio", 0.0) or 0.0)
         _GLOBAL_STATE.cache_budget_bytes = int(meta.pop("cache_budget_bytes", 0) or 0)
         _GLOBAL_STATE.gpus = list(meta.pop("gpus", None) or [])

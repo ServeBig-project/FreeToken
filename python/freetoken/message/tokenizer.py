@@ -48,6 +48,8 @@ class DetokenizeMsg(BaseTokenizerMsg):
     swa_total_tokens: int = 0
     # Bytes this engine process holds on the GPU (torch reserved pool). 0 on CPU.
     gpu_mem_bytes: int = 0
+    speculative: dict | None = None
+    cuda_graph: dict | None = None
 
 
 @dataclass
@@ -72,6 +74,7 @@ class TokenizeMsg(BaseTokenizerMsg):
     sampling_params: SamplingParams
     chat_template_kwargs: Dict[str, Any] | None = None
     tools: List[Dict[str, Any]] | None = None
+    cache_group: str = ""
 
 
 @dataclass

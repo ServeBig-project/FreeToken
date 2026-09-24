@@ -37,6 +37,22 @@ class StatsTracker:
         self.swa_used_tokens = 0
         self.swa_total_tokens = 0
         self.vram_bytes = 0
+        self.cuda_graph = {"enabled": False, "target_decode": 0, "draft": 0, "verify": 0,
+                           "replay_shapes": [], "capture_seconds": 0.0, "extra_reserved_bytes": 0}
+        self.speculative = {"draft_tokens": 0, "accepted_draft_tokens": 0, "verify_steps": 0,
+                            "residency_stops": 0, "draft_expert_loads": 0,
+                            "cost_ar_requests": 0, "cost_stopped_requests": 0,
+                            "cost_probe_requests": 0, "cost_control_ms": 0.0,
+                            "cost_samples": dict.fromkeys(("ar", "draft", "verify"), 0),
+                            "cost_gpu_ms": dict.fromkeys(("ar", "draft", "verify", "moe_compute",
+                                                          "demand_copy", "prefetch_copy", "prefetch_wait"), 0.0),
+                            "cost_transfer_predictions": {
+                                phase: dict(predicted_experts=0.0, actual_experts=0, abs_error_experts=0.0)
+                                for phase in ("ar", "draft", "verify")}}
+        self.speculative.update(dict.fromkeys((
+            "prefetch_predicted_experts", "prefetch_loaded_experts", "prefetch_used_experts",
+            "prefetch_evicted_unused_experts", "prefetch_loaded_bytes", "prefetch_used_bytes",
+            "prefetch_evicted_unused_bytes"), 0))
 
     @property
     def active(self) -> int:
@@ -57,6 +73,10 @@ class StatsTracker:
 
     def observe(self, reply: Any, now: float | None = None) -> None:
         t = time.monotonic() if now is None else now
+        if getattr(reply, "cuda_graph", None) is not None:
+            self.cuda_graph = reply.cuda_graph
+        if getattr(reply, "speculative", None) is not None:
+            self.speculative.update(reply.speculative)
         if getattr(reply, "completion_tokens_delta", 0) > 0:
             self._decode.append((t, reply.completion_tokens_delta))
             self.completion_tokens_total += reply.completion_tokens_delta
@@ -161,6 +181,18 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
         "swa": swa,
         "vram_bytes": tr.vram_bytes,
         "gpus": list(getattr(state, "gpus", None) or []),
+        "cuda_graph": tr.cuda_graph,
+        "speculative": {
+            "enabled": bool(getattr(config, "speculative_num_steps", 0)),
+            "adaptive_cost_enabled": config.speculative_adaptive_cost,
+            "draft_load_missing_enabled": config.speculative_draft_load_missing,
+            "verify_prefetch_enabled": config.speculative_verify_prefetch,
+            "max_draft_steps": config.speculative_num_steps,
+            "draft_length_histogram": [0] * (config.speculative_num_steps + 1),
+            **tr.speculative,
+            "draft_residency": config.speculative_draft_residency,
+            "draft_expert_loads": tr.speculative["draft_expert_loads"] if config.moe_collect_stats else None,
+        },
         "throughput": {
             "decode_tps": round(tr.decode_tps(), 1),
             "prefill_tps": round(tr.prefill_tps(), 1),

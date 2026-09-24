@@ -91,6 +91,7 @@ def test_schedule_reports_admission_only_after_prepare_succeeds():
     batch = SimpleNamespace(prompt_admissions=[(1, 12, 4), (2, 34, 0)])
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.prefill_budget = 99
+    scheduler.speculative = None  # speculative decoding off (the default)
     scheduler.batch_composer = SimpleNamespace(
         schedule_next_batch=lambda budget: batch
     )
@@ -116,6 +117,7 @@ def test_prepare_failure_emits_no_prompt_admission():
     batch = SimpleNamespace(prompt_admissions=[(1, 12, 0)])
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.prefill_budget = 99
+    scheduler.speculative = None  # speculative decoding off (the default)
     scheduler.batch_composer = SimpleNamespace(
         schedule_next_batch=lambda budget: batch
     )

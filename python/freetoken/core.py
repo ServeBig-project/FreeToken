@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, List, Tuple
 import torch
 
 if TYPE_CHECKING:
+    from freetoken.engine.speculative_cost import SpeculativeCost
     from freetoken.attention import BaseAttnBackend, BaseAttnMetadata
     from freetoken.attention.linear import FLAMetadata
     from freetoken.kvcache import BaseCacheHandle, BaseKVCachePool
@@ -64,6 +65,7 @@ class Req:
     # handler must not free resources under an in-flight forward; it sets this flag and
     # _process_last_data frees the request when the batch drains (after copy_done.synchronize).
     aborted: bool = False
+    cache_group: str = ""
 
     def __post_init__(self) -> None:
         assert self.input_ids.is_cpu
@@ -117,6 +119,10 @@ class Batch:
     # whole forward. A batch containing any prefill rows uses the ragged extend path;
     # only a decode-only batch is eligible for the specialized decode/CUDA-graph path.
     decode_size: int = 0
+    draft_experts: int | None = None
+    draft_available_experts: torch.Tensor | None = None
+    is_speculative_verify: bool = False
+    num_token_non_padded: torch.Tensor | None = None
     # these fields should be set by scheduler
     input_ids: torch.Tensor = field(init=False)
     positions: torch.Tensor = field(init=False)
@@ -199,6 +205,8 @@ class Context:
     attn_backend: BaseAttnBackend = field(init=False)
     moe_backend: BaseMoeBackend = field(init=False)
     moe_offload_cache: OffloadMoeCache | None = None
+    draft_load_missing: bool = False
+    speculative_cost: SpeculativeCost | None = None
     kv_cache: BaseKVCachePool = field(init=False)
     # Per-request recurrent state for GatedDeltaNet layers; set by the engine for
     # hybrid linear-attention models, otherwise None.

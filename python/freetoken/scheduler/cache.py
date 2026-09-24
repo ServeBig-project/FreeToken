@@ -247,14 +247,14 @@ class CacheManager:
         ids = req.input_ids[:0] if req.mm_embeds is not None else req.input_ids[: input_len - 1]
         if self.is_swa:
             from freetoken.kvcache.swa_radix_cache import SWACacheHandle
-            m = self.prefix_cache.match_prefix(ids)
+            m = self.prefix_cache.match_prefix(ids, cache_group=req.cache_group)
             return MatchResult(SWACacheHandle(m.cached_len, m.node, m.kv_indices))
         if self.is_hybrid:
             from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
-            m = self.prefix_cache.match_prefix(ids)
+            m = self.prefix_cache.match_prefix(ids, cache_group=req.cache_group)
             return MatchResult(
                 HybridCacheHandle(m.cached_len, m.node, m.kv_indices), mamba_value=m.mamba_value)
-        return self.prefix_cache.match_prefix(ids)
+        return self.prefix_cache.match_prefix(ids, cache_group=req.cache_group)
 
     @property
     def available_size(self) -> int:
@@ -558,6 +558,12 @@ class CacheManager:
             )
             offset += length
 
+    def release_speculative(self, req: Req, allocated_len: int) -> None:
+        """Return whole provisional pages beyond the committed target KV."""
+        start = div_ceil(req.cached_len, self.page_size) * self.page_size
+        end = div_ceil(allocated_len, self.page_size) * self.page_size
+        self._free(self.page_table[req.table_idx, start:end])
+
     def _allocate_paged_rows(
         self,
         needed_pages: int,
@@ -641,7 +647,8 @@ class CacheManager:
                 self._free(tail)
             return
         insert_ids = req.input_ids[: req.cached_len]
-        cached_len, new_handle = self.prefix_cache.insert_prefix(insert_ids, page_indices)
+        cached_len, new_handle = self.prefix_cache.insert_prefix(
+            insert_ids, page_indices, cache_group=req.cache_group)
         # unlock until all operations on handle is done
         self.unlock(old_handle)
         # this part is already in the prefix cache, free it. A naive-SWA request (swa_paged, no
@@ -728,7 +735,7 @@ class CacheManager:
                 frozen_idx = 1 - req.mamba_next_track_idx
                 frozen = req.mamba_ping_pong[frozen_idx]
                 prefix_len, mamba_exist = self.prefix_cache.insert(
-                    req.input_ids[:L], page_indices[:L], frozen)
+                    req.input_ids[:L], page_indices[:L], frozen, cache_group=req.cache_group)
                 pool.free([s for s in req.mamba_ping_pong if mamba_exist or s != frozen])
                 req.mamba_ping_pong = None
                 self._free(page_indices[free_upto : max(free_upto, prefix_len)])
@@ -742,7 +749,8 @@ class CacheManager:
             keep_live = False
             if insert_len == req.cached_len and insert_len > 0:
                 prefix_len, mamba_exist = self.prefix_cache.insert(
-                    req.input_ids[:insert_len], page_indices[:insert_len], req.linear_slot_idx)
+                    req.input_ids[:insert_len], page_indices[:insert_len], req.linear_slot_idx,
+                    cache_group=req.cache_group)
                 self.unlock(old_handle)
                 self._free(page_indices[free_upto : max(free_upto, prefix_len)])
                 keep_live = not mamba_exist           # tree now owns linear_slot_idx
@@ -765,13 +773,13 @@ class CacheManager:
         frozen_idx = 1 - req.mamba_next_track_idx          # the slot the forward just wrote
         frozen = req.mamba_ping_pong[frozen_idx]
         prefix_len, mamba_exist = self.prefix_cache.insert(
-            req.input_ids[:L], page_indices[:L], frozen)
+            req.input_ids[:L], page_indices[:L], frozen, cache_group=req.cache_group)
         self.unlock(old_handle)
         self._free(page_indices[old_handle.cached_len : prefix_len])
         # Lock the committed snapshot node FIRST: the replacement-slot alloc below can trigger
         # evict_mamba (via ensure_mamba_slots), which would otherwise reclaim this still-unlocked
         # just-donated node -- freeing its KV pages under the still-decoding request.
-        m = self.prefix_cache.match_prefix(req.input_ids[:L])
+        m = self.prefix_cache.match_prefix(req.input_ids[:L], cache_group=req.cache_group)
         # Same re-point as the generic path: the dedup free above returned this request's own
         # pages for [old_handle.cached_len, prefix_len) while its row still named them.
         if prefix_len > old_handle.cached_len:
@@ -818,7 +826,7 @@ class CacheManager:
             _, freed = self.prefix_cache.insert(
                 req.input_ids[:insert_len], page_indices[:insert_len],
                 swa_evicted_seqlen=req.swa_evicted_seqlen,
-                update_kv_after_len=old_handle.cached_len)
+                update_kv_after_len=old_handle.cached_len, cache_group=req.cache_group)
         self.unlock(old_handle)
         self._free_swa(freed)   # idempotent: revived/out-of-window slots are already sentinel -> no-op
         self._free(freed)
@@ -844,8 +852,9 @@ class CacheManager:
                 )
                 if keep_from > 0:
                     self._free_swa(
-                        self.prefix_cache.trim_head_swa(req.input_ids[:prompt_len], keep_from))
-                self.prefix_cache.match_prefix(req.input_ids[:prompt_len])
+                        self.prefix_cache.trim_head_swa(
+                            req.input_ids[:prompt_len], keep_from, cache_group=req.cache_group))
+                self.prefix_cache.match_prefix(req.input_ids[:prompt_len], cache_group=req.cache_group)
         else:
             # inc_lock is node-granular, and the suffix insert just made this chunk's whole
             # extend one node: locking it would pin the entire chunk's swa for all of decode,
@@ -856,8 +865,8 @@ class CacheManager:
             keep_from = align_down(
                 max(insert_len - self.sliding_window_size - _SWA_RETAIN_GAP, 0), self.page_size)
             if keep_from > 0:
-                self.prefix_cache.match_prefix(req.input_ids[:keep_from])
-            m = self.prefix_cache.match_prefix(req.input_ids[:insert_len])
+                self.prefix_cache.match_prefix(req.input_ids[:keep_from], cache_group=req.cache_group)
+            m = self.prefix_cache.match_prefix(req.input_ids[:insert_len], cache_group=req.cache_group)
             # Re-point the page table to the tree's live slots for the committed region. Any dup
             # slots insert reclaimed had their full->swa mapping reset to the 0 sentinel; unlike the
             # full pool (KV survives in place until realloc), a stale swa mapping would make the

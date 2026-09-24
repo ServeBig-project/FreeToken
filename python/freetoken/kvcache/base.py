@@ -210,7 +210,7 @@ class BasePrefixCache(ABC):
         """
 
     @abstractmethod
-    def match_prefix(self, input_ids: torch.Tensor) -> MatchResult:
+    def match_prefix(self, input_ids: torch.Tensor, cache_group: str = "") -> MatchResult:
         """
         Match prefix and return the indices of the matched prefix in the cache.
         This operation will not modify the cache.
@@ -218,12 +218,14 @@ class BasePrefixCache(ABC):
 
         Args:
             input_ids (torch.Tensor): The input ids to match. Shape: (seq_len,)
+            cache_group: Only prefixes from this group can match; tokens are unchanged.
         Returns:
             MatchResult: The match result containing the cache handles.
         """
 
     @abstractmethod
-    def insert_prefix(self, input_ids: torch.Tensor, indices: torch.Tensor) -> InsertResult:
+    def insert_prefix(self, input_ids: torch.Tensor, indices: torch.Tensor,
+                      cache_group: str = "") -> InsertResult:
         """
         Insert a new prefix into the cache.
         This operation will modify the cache.

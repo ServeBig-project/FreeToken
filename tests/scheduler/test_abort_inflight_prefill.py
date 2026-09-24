@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import torch
 
 from freetoken.core import Batch, Req, SamplingParams
+from freetoken.engine.engine import ForwardOutput
 from freetoken.kvcache.linear_state_pool import LinearStatePool
 from freetoken.message import AbortBackendMsg
 from freetoken.models.config import LinearGatedDeltaGroupConfig
@@ -61,6 +62,8 @@ def _setup():
         eos_token_ids=set(),
         toolcall_anchor_id=None,
         config=SimpleNamespace(page_size=1),
+        engine=SimpleNamespace(graph_runner=SimpleNamespace(stats_snapshot=lambda: {})),
+        speculative=None,  # speculative decoding off (the default)
         status_reporter=SimpleNamespace(report_batch=lambda *_, **__: None),
         send_result=sent.extend,
         _kv_usage_pages=cm.page_usage,
@@ -83,7 +86,7 @@ def _launch_req(pool, cm, tm, prompt, *, cls=Req, track_seqlen=None):
     """A launched (forward in flight) hybrid req: handle locked, pages allocated,
     GDN slots held, cached_len advanced -- the state _process_last_data will drain."""
     mr = cm.match_req(SimpleNamespace(input_ids=prompt, input_len=len(prompt),
-                                      mm_embeds=None))
+                                      mm_embeds=None, cache_group=""))
     req = cls(input_ids=prompt, table_idx=tm.allocate(), cached_len=0, output_len=4,
               uid=UID, sampling_params=SamplingParams(max_tokens=4),
               cache_handle=mr.cuda_handle)
@@ -100,8 +103,8 @@ def _launch_req(pool, cm, tm, prompt, *, cls=Req, track_seqlen=None):
 def _as_last_data(batch):
     return (
         SimpleNamespace(batch=batch),
-        (None, torch.tensor([42], dtype=torch.int32),
-         SimpleNamespace(synchronize=lambda: None)),
+        ForwardOutput(None, torch.tensor([42], dtype=torch.int32),
+                      SimpleNamespace(synchronize=lambda: None)),
     )
 
 

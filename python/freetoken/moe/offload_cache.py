@@ -907,6 +907,7 @@ class OffloadMoeCache:
         if self.prefill_overlap:
             self._init_prefill_overlap_buffers()
 
+
     def set_alphas(
         self, gate_up_alpha: torch.Tensor | None, down_alpha: torch.Tensor | None
     ) -> None:
@@ -2034,20 +2035,17 @@ class OffloadMoeCache:
         self, layer_id: int, expert_ids: torch.Tensor
     ) -> None:
         """Admit ordinary decode routes using causal layer-distance eviction."""
-        if (
-            not expert_ids.is_cuda
-            or expert_ids.numel() * self.num_layers <= self.decode_cache_size
-        ):
+        if not expert_ids.is_cuda or expert_ids.numel() * self.num_layers <= self.decode_cache_size:
             self.ensure_experts(layer_id, expert_ids)
             return
 
-        from freetoken.moe.offload_kernels import ensure_decode_experts
+        from freetoken.moe.offload_kernels import ensure_experts
 
         if self.collect_decode_freq:
             ids = expert_ids.reshape(-1).long()
             self.decode_freq[layer_id].scatter_add_(0, ids, torch.ones_like(ids))
         self._pending_src_layer = layer_id
-        ensure_decode_experts(self, layer_id, expert_ids)
+        ensure_experts(self, layer_id, expert_ids, layer_distance=True)
 
     def ensure_experts_hybrid(self, layer_id: int, expert_ids: torch.Tensor) -> None:
         """Capped-fetch LRU for the hybrid backend.

@@ -19,6 +19,12 @@ class EngineConfig:
     tp_info: DistributedInfo
     dtype: torch.dtype
     max_running_req: int = 4
+    speculative_num_steps: int = 0
+    speculative_draft_experts: int = 3
+    speculative_draft_residency: str = "off"
+    speculative_adaptive_cost: bool = False
+    speculative_draft_load_missing: bool = False
+    speculative_verify_prefetch: bool = False
     attention_backend: str = "auto"
     moe_backend: str = "auto"
     # NVFP4 routed-expert GEMM backend (--nvfp4-backend): auto|marlin|flashinfer|triton.
@@ -87,6 +93,45 @@ class EngineConfig:
     # is final. Mutually exclusive with num_page_override.
     num_token_override: int | None = None
 
+    def __post_init__(self) -> None:
+        if self.speculative_draft_residency not in ("off", "router"):
+            raise ValueError("speculative_draft_residency must be off or router")
+        if self.speculative_draft_residency != "off" and self.speculative_num_steps <= 0:
+            raise ValueError("--speculative-draft-residency requires SD enabled")
+        if self.speculative_num_steps < 0:
+            raise ValueError("speculative_num_steps must be >= 0")
+        if self.speculative_draft_experts < 1:
+            raise ValueError("speculative_draft_experts must be >= 1")
+        if (self.speculative_adaptive_cost or self.speculative_draft_load_missing
+                or self.speculative_verify_prefetch):
+            if not 1 <= self.speculative_num_steps <= 8:
+                raise ValueError("SD cost, missing-expert loading and prefetch require 1..8 draft steps")
+            if self.speculative_draft_load_missing and self.speculative_draft_residency != "router":
+                raise ValueError("--speculative-draft-load-missing requires --speculative-draft-residency router")
+            model = self.model_config
+            if (self.moe_backend not in ("auto", "offload") or self.dtype != torch.bfloat16
+                    or model.expert_quant != "none" or self.nowag_expert_path
+                    or model.moe_weight_format not in (None, "bf16")):
+                raise ValueError("new SD controls require BF16 experts with --moe-backend offload")
+        if not self.speculative_num_steps:
+            return
+        if self.tp_info.size != 1:
+            raise ValueError("self-speculative decoding requires a single GPU (tp_size=1)")
+        if getattr(self, "batching_policy", "legacy") != "legacy":
+            raise ValueError("self-speculative decoding requires --batching-policy legacy")
+        if self.hf_config.architectures[0] != "Qwen3MoeForCausalLM":
+            raise ValueError("self-speculative decoding currently supports only Qwen3 MoE")
+        if self.speculative_draft_experts > self.model_config.num_experts_per_tok:
+            raise ValueError(
+                "speculative_draft_experts must not exceed the target's experts per token "
+                f"({self.model_config.num_experts_per_tok})"
+            )
+        if self.moe_backend in ("cpu", "hybrid") or self.moe_cpu_layers:
+            raise ValueError(
+                "self-speculative decoding requires GPU expert execution; use "
+                "--moe-backend offload or fused without --moe-cpu-layers"
+            )
+
     @cached_property
     def hf_config(self):
         return cached_load_hf_config(self.model_path)
@@ -96,6 +141,19 @@ class EngineConfig:
         spec = get_model_spec(self.hf_config.architectures[0])
         parse_config = _load_attr(spec.module, spec.parse_config)
         return parse_config(self.hf_config)
+
+    @property
+    def speculative_graphs(self) -> bool:
+        return bool(
+            0 < self.speculative_num_steps <= 8
+            and self.dtype == torch.bfloat16 and self.model_config.model_type == "qwen3_moe"
+            and self.model_config.expert_quant == "none" and not self.nowag_expert_path
+            and self.model_config.moe_weight_format in (None, "bf16")
+            and self.attention_backend == "fi" and self.moe_backend == "offload"
+            and self.page_size == 1 and self.tp_info.size == 1
+            and getattr(self, "batching_policy", "legacy") == "legacy"
+            and self.cuda_graph_max_bs != 0 and self.cuda_graph_bs != []
+        )
 
     @property
     def max_seq_len(self) -> int:

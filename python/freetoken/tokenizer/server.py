@@ -223,6 +223,8 @@ def tokenize_worker(
                         swa_used_tokens=msg.swa_used_tokens,
                         swa_total_tokens=msg.swa_total_tokens,
                         gpu_mem_bytes=msg.gpu_mem_bytes,
+                        speculative=msg.speculative,
+                        cuda_graph=msg.cuda_graph,
                     )
                     for msg, reply in zip(detokenize_msg, replies, strict=True)
                 ]
@@ -254,7 +256,8 @@ def tokenize_worker(
                     )
                 if ok_msgs:
                     backend = [
-                        UserMsg(uid=msg.uid, input_ids=t, sampling_params=msg.sampling_params)
+                        UserMsg(uid=msg.uid, input_ids=t, sampling_params=msg.sampling_params,
+                                cache_group=msg.cache_group)
                         for msg, t in zip(ok_msgs, ok_tensors, strict=True)
                     ]
                     send_backend.put(backend[0] if len(backend) == 1 else BatchBackendMsg(data=backend))

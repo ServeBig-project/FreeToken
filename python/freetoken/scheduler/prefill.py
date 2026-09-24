@@ -132,6 +132,19 @@ class PrefillAdder:
         chunk_size = min(self.token_budget, remain_len)
         if self.chunk_token_limit is not None:
             chunk_size = min(chunk_size, self.chunk_token_limit)
+        if (
+            self.incremental_window_prefill
+            and self.cache_manager.swa_paged
+            and chunk_size < remain_len
+        ):
+            # A memory-bounded wave can now end before the prompt. Its resumed
+            # compressor state, like ordinary chunked prefill, needs a page boundary.
+            chunk_size = (
+                align_down(cached_len + chunk_size, self.cache_manager.page_size)
+                - cached_len
+            )
+            if chunk_size <= 0:
+                return None
         incremental_swa = (
             self.cache_manager.incremental_prefill_window_reservation(remain_len)
             if self.incremental_window_prefill
@@ -196,6 +209,7 @@ class PrefillAdder:
             cache_handle=cache_handle,
             sampling_params=pending_req.sampling_params,
             mm_embeds=pending_req.mm_embeds,
+            cache_group=pending_req.cache_group,
         )
         # Hybrid GDN per-request state slots (None for non-hybrid). On a fresh admit these are
         # freshly allocated; on a chunked continuation they are inherited from the prior chunk.
@@ -260,7 +274,8 @@ class PrefillManager:
 
     def add_one_req(self, req: UserMsg) -> None:
         self.pending_list.append(
-            PendingReq(req.uid, req.input_ids, req.sampling_params, mm_embeds=req.mm_embeds)
+            PendingReq(req.uid, req.input_ids, req.sampling_params,
+                       mm_embeds=req.mm_embeds, cache_group=req.cache_group)
         )
 
     def schedule_next_batch(
@@ -358,41 +373,6 @@ class PrefillManager:
                 )
             )
         return candidates
-
-    def schedule_full_prefill_batch(
-        self,
-        allowed_uids: set[int],
-        *,
-        max_reqs: int | None = None,
-    ) -> Batch | None:
-        """Materialize one full uncached range per allowed FIFO request.
-
-        Layered prefill uses the configured chunk length only to size wave
-        admission.  Its physical batch keeps each request's remaining prompt as
-        one causal range. A cache that exposes incremental prefill-window execution
-        binds that range by physical tile without turning it into a continuation;
-        other SWA caches retain their ordinary chunk-cap behavior.
-        """
-        token_budget = 0
-        selected = 0
-        for pending in self.pending_list:
-            if pending.uid not in allowed_uids:
-                break
-            if max_reqs is not None and selected >= max_reqs:
-                break
-            cursor = pending.layered_cached_len
-            if cursor is None and pending.chunked_req is not None:
-                cursor = pending.chunked_req.cached_len
-            token_budget += max(pending.input_len - (cursor or 0), 0)
-            selected += 1
-        if token_budget < 1:
-            return None
-        return self.schedule_next_batch(
-            token_budget,
-            allowed_uids=allowed_uids,
-            max_reqs=max_reqs,
-            incremental_window_prefill=True,
-        )
 
     def has_pending_uid(self, uid: int) -> bool:
         return any(req.uid == uid for req in self.pending_list)

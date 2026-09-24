@@ -22,6 +22,7 @@ class PendingReq:
     # that admission boundary; it is not request completion state.
     layered_cached_len: int | None = None
     mm_embeds: torch.Tensor | None = None
+    cache_group: str = ""
 
     @property
     def input_len(self) -> int:

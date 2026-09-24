@@ -310,10 +310,12 @@ def fused_experts_nvfp4(
     apply_router_weight_on_input: bool = False,
     act_alpha: float = 1.702,
     act_limit: float = 7.0,
+    expert_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Prefill inline-NVFP4 MoE. ``topk_ids`` index rows of the bank tensors in
     ``[0, num_experts)``: full-layer banks with position == expert id (the
-    materialized ``[:E]`` slot view or the overlap double buffer), raw ids."""
+    materialized ``[:E]`` slot view or the overlap double buffer), raw ids.
+    With ``expert_map``, ids are logical and the map selects physical bank rows."""
     M, H = hidden_states.shape
     top_k = topk_ids.shape[1]
     two_i = gate_up_packed.shape[1]
@@ -321,7 +323,9 @@ def fused_experts_nvfp4(
     dev, dt = hidden_states.device, hidden_states.dtype
     cfg = _prefill_config(M)
 
-    sorted_ids, expert_ids, ntpp = moe_align_block_size(topk_ids, cfg["BLOCK_SIZE_M"], num_experts)
+    sorted_ids, expert_ids, ntpp = moe_align_block_size(
+        topk_ids, cfg["BLOCK_SIZE_M"], num_experts, expert_map
+    )
     tw = topk_weights.reshape(-1).contiguous()
     num_valid = topk_ids.numel()
 

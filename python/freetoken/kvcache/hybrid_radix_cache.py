@@ -23,7 +23,7 @@ import torch
 from freetoken.utils import align_down
 
 from .base import BaseCacheHandle
-from .radix_cache import RadixTreeNode, _get_key_fn
+from .radix_cache import RadixTreeNode, _get_key_fn, _group_root
 
 
 @dataclass(frozen=True)
@@ -67,17 +67,18 @@ class HybridRadixCache:
         self.root = RadixTreeNode(self.key_fn)
         self.root.set_key_value(self.empty, self.empty)
         self.root.ref_count = 1  # root is always protected
+        self.roots = {"": self.root}
         self.full_evictable = 0
         self.full_protected = 0
         self.mamba_evictable = 0     # number of live, unlocked snapshots
         self.mamba_protected = 0
 
     # ---------------------------------------------------------------- match / insert
-    def match_prefix(self, input_ids: torch.Tensor) -> HybridMatch:
+    def match_prefix(self, input_ids: torch.Tensor, cache_group: str = "") -> HybridMatch:
         """Match the token prefix, then truncate the reusable length to the deepest node on
         the path that still owns a LIVE snapshot (a continuation can only resume the GDN
         recurrence from a checkpointed boundary)."""
-        node, _ = self._walk(input_ids)
+        node, _ = self._walk(input_ids, cache_group)
         # walk up to the deepest node whose END boundary has a live snapshot
         cur, end_len = node, self._path_len(node)
         while not cur.is_root():
@@ -85,17 +86,17 @@ class HybridRadixCache:
                 return HybridMatch(self._collect_kv(cur), end_len, cur.mamba_value, cur)
             end_len -= cur.length
             cur = cur.parent
-        return HybridMatch(self.empty, 0, None, self.root)
+        return HybridMatch(self.empty, 0, None, cur)
 
     def insert(self, input_ids: torch.Tensor, kv_indices: torch.Tensor,
-               mamba_value: int) -> Tuple[int, bool]:
+               mamba_value: int, cache_group: str = "") -> Tuple[int, bool]:
         """Insert the committed KV prefix and DONATE ``mamba_value`` at the (page-aligned) end
         boundary node. Returns (matched_prefix_len, mamba_exist). If the boundary node already
         owns a live snapshot, returns mamba_exist=True and does not attach (caller frees the
         donated slot -- dedup)."""
         insert_len = align_down(len(input_ids), self.page_size)
         input_ids, kv_indices = input_ids[:insert_len], kv_indices[:insert_len]
-        node, prefix_len = self._walk(input_ids)
+        node, prefix_len = self._walk(input_ids, cache_group)
         if prefix_len != insert_len:
             new_node = RadixTreeNode(self.key_fn)
             new_node.set_key_value(input_ids[prefix_len:], kv_indices[prefix_len:].clone())
@@ -253,7 +254,7 @@ class HybridRadixCache:
         return torch.cat(vals) if vals else self.empty
 
     def _leaves(self) -> List[RadixTreeNode]:
-        out, stack = [], [self.root]
+        out, stack = [], list(self.roots.values())
         while stack:
             n = stack.pop()
             if n.is_leaf():
@@ -264,7 +265,7 @@ class HybridRadixCache:
         return out
 
     def _snapshot_nodes(self) -> List[RadixTreeNode]:
-        out, stack = [], [self.root]
+        out, stack = [], list(self.roots.values())
         while stack:
             n = stack.pop()
             if n.mamba_value is not None and not n.is_root():
@@ -272,9 +273,9 @@ class HybridRadixCache:
             stack.extend(n.children.values())
         return out
 
-    def _walk(self, input_ids: torch.Tensor) -> Tuple[RadixTreeNode, int]:
+    def _walk(self, input_ids: torch.Tensor, cache_group: str = "") -> Tuple[RadixTreeNode, int]:
         prefix_len, total = 0, len(input_ids)
-        node = self.root
+        node = _group_root(self.roots, cache_group, self.key_fn, self.empty)
         tic = time.monotonic_ns()
         while prefix_len < total:
             child = node.children.get(self.key_fn(input_ids[prefix_len:]))

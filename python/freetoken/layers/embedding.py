@@ -103,7 +103,7 @@ class ParallelLMHead(VocabParallelEmbedding):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         ctx = get_global_ctx()
         batch = ctx.batch
-        if batch.uses_extend_path:
+        if batch.uses_extend_path and not batch.is_speculative_verify:
             indices = batch.attn_metadata.get_last_indices(batch.size)
             x = x[indices].contiguous()
             del indices

@@ -23,10 +23,11 @@ class NaivePrefixCache(BasePrefixCache):
     def lock_handle(self, handle: BaseCacheHandle, unlock: bool = False) -> None:
         pass
 
-    def match_prefix(self, input_ids: torch.Tensor) -> MatchResult:
+    def match_prefix(self, input_ids: torch.Tensor, cache_group: str = "") -> MatchResult:
         return MatchResult(NaiveCacheHandle())
 
-    def insert_prefix(self, input_ids: torch.Tensor, indices: torch.Tensor) -> InsertResult:
+    def insert_prefix(self, input_ids: torch.Tensor, indices: torch.Tensor,
+                      cache_group: str = "") -> InsertResult:
         return InsertResult(0, NaiveCacheHandle())
 
     def evict(self, size: int) -> torch.Tensor:

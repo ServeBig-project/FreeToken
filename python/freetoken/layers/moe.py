@@ -228,7 +228,7 @@ class OffloadMoELayer(MoELayer):
         router_logits: torch.Tensor | None = None,
     ):
         ctx = get_global_ctx()
-        if ctx.batch.uses_extend_path:
+        if ctx.batch.uses_extend_path and not ctx.batch.is_speculative_verify:
             final_hidden_states = self.prefill_forward(hidden_states, router_logits)
         else:
             final_hidden_states = self.decode_forward(hidden_states, router_logits)
@@ -248,7 +248,7 @@ class OffloadMoELayer(MoELayer):
         rewrites expert ids into cache slot ids); pass a fresh tensor or a clone.
         """
         ctx = get_global_ctx()
-        if ctx.batch.uses_extend_path:
+        if ctx.batch.uses_extend_path and not ctx.batch.is_speculative_verify:
             out = self._prefill_routed(hidden_states, topk_weights, topk_ids)
         else:
             out = self._decode_routed(hidden_states, topk_weights, topk_ids)
@@ -264,6 +264,7 @@ class OffloadMoELayer(MoELayer):
             gating_output=router_logits,
             topk=self.top_k,
             renormalize=self.renormalize,
+            num_token_non_padded=get_global_ctx().batch.num_token_non_padded,
         )
         return self._decode_routed(hidden_states, topk_weights, topk_ids)
 
@@ -324,9 +325,23 @@ class OffloadMoELayer(MoELayer):
             return executor.decode(self.layer_id, hidden_states, topk_weights, topk_ids)
         if cache.decode_target == "hybrid":
             return self._decode_hybrid(cache, hidden_states, topk_weights, topk_ids)
+        cost = get_global_ctx().speculative_cost
+        if cost is not None:
+            phase = cost.phase(get_global_ctx().batch)
+            cost.record_routes(phase, self.layer_id, topk_ids)
+            if cost.prefetch is not None:
+                cost.prefetch.before_layer(phase, self.layer_id)
         cache.ensure_decode_experts(self.layer_id, topk_ids)
+        if cost is not None:
+            cost.copy_rows[phase, self.layer_id].copy_(cache.num_indices[0])
+            cost.copy_events[phase][self.layer_id][0].record()
         cache.copy_missing()
-        return self._expert_gemm(
+        if cost is not None:
+            cost.copy_events[phase][self.layer_id][1].record()
+            if phase == 1 and cost.prefetch is not None:
+                cost.prefetch.launch(self.layer_id, topk_ids, get_global_ctx().batch)
+            cost.gemm_events[phase][self.layer_id][0].record()
+        output = self._expert_gemm(
             cache,
             hidden_states,
             topk_weights,
@@ -336,6 +351,9 @@ class OffloadMoELayer(MoELayer):
             alphas=cache.alphas_for_slots(self.layer_id),
             is_prefill=False,
         )
+        if cost is not None:
+            cost.gemm_events[phase][self.layer_id][1].record()
+        return output
 
     def _decode_hybrid(
         self,
@@ -394,40 +412,37 @@ class OffloadMoELayer(MoELayer):
     ) -> torch.Tensor:
         """Prefill movement for the selected scheduling policy.
 
-        Joint maps raw expert ids directly into its canonical physical slots.
-        Other policies retain whole-layer streaming, where position equals the
-        logical expert id.
+        Grouped kernels sort logical experts, then map each block to the shared
+        pool. Other kernels consume physical slot ids directly.
         """
         cache = self.offload_cache
         assert cache is not None
-        if cache.has_resident_prefill_layer(self.layer_id):
-            cache.map_prefill_experts(self.layer_id, topk_ids)
-            return self._expert_gemm(
-                cache,
-                hidden_states,
-                topk_weights,
-                topk_ids,
-                views=cache.bank_views(),
-                n=cache.decode_cache_size,
-                alphas=cache.alphas_for_resident_layer_slots(self.layer_id),
-                is_prefill=True,
+        resident = cache.has_resident_prefill_layer(self.layer_id)
+        if resident or cache.prefill_group_size:
+            expert_map = (
+                cache.slot_for_id[self.layer_id]
+                if cache.quant_format in ("bf16", "nvfp4", "fp8_block", "mxfp4_triton", "ds_fp4")
+                else None
             )
-        if cache.prefill_group_size:
-            # Startup warmup and other direct prefill forwards do not have a
-            # scheduler-owned resident group.  Joint still uses the canonical
-            # pool: admit only the routed experts through the ordinary LRU,
-            # which rewrites logical ids to physical slots in place.
-            cache.ensure_experts(self.layer_id, topk_ids)
-            cache.copy_missing()
+            logical_ids = topk_ids.clone() if expert_map is not None else topk_ids
+            if resident:
+                cache.map_prefill_experts(self.layer_id, topk_ids)
+                alphas = cache.alphas_for_resident_layer_slots(self.layer_id)
+            else:
+                # Warmup has no resident group; load only the routed experts.
+                cache.ensure_experts(self.layer_id, topk_ids)
+                cache.copy_missing()
+                alphas = cache.alphas_for_slots(self.layer_id)
             return self._expert_gemm(
                 cache,
                 hidden_states,
                 topk_weights,
-                topk_ids,
+                logical_ids,
                 views=cache.bank_views(),
-                n=cache.decode_cache_size,
-                alphas=cache.alphas_for_slots(self.layer_id),
+                n=self.num_experts if expert_map is not None else cache.decode_cache_size,
+                alphas=alphas,
                 is_prefill=True,
+                expert_map=expert_map,
             )
         if cache.prefill_overlap:
             views = self._wait_prefill_overlap(cache)
@@ -486,6 +501,7 @@ class OffloadMoELayer(MoELayer):
         n: int | None,
         alphas: tuple[torch.Tensor, torch.Tensor] | None,
         is_prefill: bool,
+        expert_map: torch.Tensor | None = None,
     ) -> torch.Tensor:
         fmt = cache.quant_format
         if fmt in ("nvfp4_marlin", "nvfp4_b12x"):
@@ -533,6 +549,7 @@ class OffloadMoELayer(MoELayer):
                     self.apply_router_weight_on_input,
                     act_alpha,
                     act_limit,
+                    expert_map,
                 )
             # Marlin-style int32 wide-load GEMV (arithmetic dequant, no HW cvt).
             # Bit-identical to the byte-at-a-time path; lifts gate/up BW ~43%->51%
@@ -564,6 +581,7 @@ class OffloadMoELayer(MoELayer):
                     hidden_states, gate_up, gate_up_scale, down, down_scale,
                     topk_weights, topk_ids, n, self.activation,
                     self.apply_router_weight_on_input,
+                    expert_map,
                 )
             return fused_experts_decode_fp8_block(
                 hidden_states, gate_up, gate_up_scale, down, down_scale,
@@ -595,6 +613,7 @@ class OffloadMoELayer(MoELayer):
                 top_k=self.top_k,
                 hidden_act_alpha=self.hidden_act_alpha,
                 swiglu_limit=self.swiglu_limit,
+                **({"expert_map": expert_map} if is_prefill else {}),
             )
         if fmt == "ds_fp4":
             # DeepSeek-V4 FP4 experts: grouped inline-dequant GEMM for streaming
@@ -608,7 +627,7 @@ class OffloadMoELayer(MoELayer):
                 return routed_experts_fp4_prefill(
                     hidden_states, topk_ids, topk_weights,
                     gate_up_packed, gate_up_scale, down_packed, down_scale,
-                    self.swiglu_limit, n,
+                    self.swiglu_limit, n, expert_map,
                 )
             from freetoken.moe.fused_ds_fp4 import routed_experts_fp4
 
@@ -662,6 +681,7 @@ class OffloadMoELayer(MoELayer):
             topk_ids,
             self.activation,
             self.apply_router_weight_on_input,
+            **({"expert_map": expert_map} if is_prefill else {}),
         )
 
 

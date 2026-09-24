@@ -249,6 +249,36 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--speculative-num-steps",
+        type=int,
+        default=ServerArgs.speculative_num_steps,
+        help="Draft tokens per self-speculative round; 0 disables speculation (default).",
+    )
+    parser.add_argument(
+        "--speculative-draft-experts",
+        type=_positive_int,
+        default=ServerArgs.speculative_draft_experts,
+        help="Routed experts per draft token (Qwen3 MoE, single GPU, legacy scheduling).",
+    )
+
+    parser.add_argument(
+        "--speculative-draft-residency", choices=["off", "router"],
+        default=ServerArgs.speculative_draft_residency,
+        help="Restrict drafting to current GPU experts by router score.",
+    )
+    parser.add_argument(
+        "--speculative-adaptive-cost", action="store_true",
+        help="Use measured costs and accepted prefixes to decide after each draft step whether to continue.",
+    )
+    parser.add_argument(
+        "--speculative-draft-load-missing", action="store_true",
+        help="Allow router-resident drafting to load missing experts when fewer than draft k are cached.",
+    )
+    parser.add_argument(
+        "--speculative-verify-prefetch", action="store_true",
+        help="Prefetch predicted verification experts into the shared cache while drafting.",
+    )
+    parser.add_argument(
         "--max-seq-len-override",
         type=int,
         default=ServerArgs.max_seq_len_override,

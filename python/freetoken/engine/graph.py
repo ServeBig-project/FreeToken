@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List
 
@@ -66,7 +67,7 @@ class GraphCaptureBuffer:
         )
 
     def copy_from(self, batch: Batch) -> None:
-        _slice = slice(batch.padded_size)
+        _slice = slice(batch.positions.numel())
         self.input_ids[_slice] = batch.input_ids
         if batch.out_loc is not None:
             self.out_loc[_slice] = batch.out_loc
@@ -116,6 +117,7 @@ class GraphRunner:
         dummy_req: Req,
         moe_offload_cache: OffloadMoeCache | None = None,
         layered_execution_adapter: LayeredExecutionAdapter | None = None,
+        speculative_config=None,
     ) -> None:
         cuda_graph_bs = _determine_cuda_graph_bs(
             cuda_graph_bs=cuda_graph_bs,
@@ -134,10 +136,25 @@ class GraphRunner:
             tuple[int, int, int], _LayerRangeCapture
         ] = {}
         self.layer_range_group_ends: dict[int, int] = {}
+        self.layer_range_group_end_candidates: dict[int, tuple[int, ...]] = {}
         self.layer_range_batch_sizes: tuple[int, ...] = ()
         self._layer_range_state_inputs: object | None = None
         self._prepared_layer_range_batch: Batch | None = None
+        self.replay_counts: dict[tuple[str, int, int, int], int] = {}
+        self.speculative = None
+        cost = get_global_ctx().speculative_cost
+        cost_state = cost.before_capture() if cost is not None else None
+        started = time.perf_counter()
+        before = torch.cuda.memory_reserved(device)
         self._capture_graphs(max_seq_len, vocab_size, model)
+        if self.max_graph_bs and speculative_config is not None:
+            from .speculative_graph import SpeculativeGraphs
+            self.speculative = SpeculativeGraphs(self, model, speculative_config, max_seq_len, vocab_size)
+        if cost is not None:
+            cost.after_capture(cost_state)
+        torch.cuda.synchronize(device)
+        self.capture_seconds = time.perf_counter() - started if self.max_graph_bs else 0.0
+        self.extra_reserved_bytes = max(0, torch.cuda.memory_reserved(device) - before) if self.max_graph_bs else 0
 
     def _reset_moe_offload_cache(self) -> None:
         if self.moe_offload_cache is not None:
@@ -165,6 +182,8 @@ class GraphRunner:
         logger.info_rank0(f"Free GPU memory before capturing CUDA graphs: {mem_GB(free_memory)}")
 
         self.buffer = GraphCaptureBuffer.init(self.max_graph_bs, vocab_size, self.device)
+        # MoE-only rebuild preserves real prefix KV, so capture must write the dummy slot.
+        self.buffer.out_loc[:] = get_global_ctx().page_table[self.dummy_req.table_idx, 0]
         self._reset_moe_offload_cache()
 
         pbar = tqdm(
@@ -198,6 +217,7 @@ class GraphRunner:
             self.graph_map[bs] = graph
 
         assert pool is not None
+        self.pool = pool
         self._capture_layer_range_graphs(model)
         self._reset_moe_offload_cache()
         free_memory = get_free_memory(self.device)
@@ -207,11 +227,11 @@ class GraphRunner:
         self,
         model: BaseLLMModel,
     ) -> None:
-        """Capture decode graphs for resident prefill layer groups.
+        """Capture decode graphs for resident and coarse layer ranges.
 
-        Capturing one graph per group keeps startup graph work linear in model depth.
         The active resident group remains eager because its decode rows are merged with
-        prefill rows; these graphs cover only the decode-only groups before and after it.
+        prefill rows.  Width-four graphs reduce launch overhead in the decode-only
+        ranges before and after it, while resident-stage graphs remain as fallbacks.
         """
         cache = self.moe_offload_cache
         adapter = self.layered_execution_adapter
@@ -227,15 +247,42 @@ class GraphRunner:
             (stage.start_layer, stage.end_layer)
             for stage in cache.resident_stages()
         ]
+        num_layers = cache.num_layers
+        coarse_groups = [
+            (start_layer, min(start_layer + 4, num_layers))
+            for start_layer in range(0, num_layers, 4)
+        ]
+        group_set = set(groups)
+        capture_groups = sorted(
+            group_set.union(coarse_groups),
+            key=lambda group: (group[0], -group[1]),
+        )
+        extra_coarse_groups = [
+            group for group in coarse_groups if group not in group_set
+        ]
         batch_sizes = self.graph_bs_list
         if not batch_sizes:
             return
 
         self.layer_range_batch_sizes = tuple(batch_sizes)
-        self.layer_range_group_ends = dict(groups)
+        candidate_ends: dict[int, list[int]] = {}
+        for start_layer, end_layer in capture_groups:
+            candidate_ends.setdefault(start_layer, []).append(end_layer)
+        self.layer_range_group_end_candidates = {
+            start_layer: tuple(sorted(ends, reverse=True))
+            for start_layer, ends in candidate_ends.items()
+        }
+        self.layer_range_group_ends = {
+            start_layer: ends[0]
+            for start_layer, ends in self.layer_range_group_end_candidates.items()
+        }
         logger.info_rank0(
             "Capturing resident-prefill decode range graphs: "
             f"groups={groups}, batch_sizes={batch_sizes}"
+        )
+        logger.info_rank0(
+            "Additional coarse decode ranges: "
+            f"ranges={extra_coarse_groups}"
         )
 
         # A shared, graph-external input state lets every group graph accept the
@@ -248,7 +295,7 @@ class GraphRunner:
         self._set_dummy_linear_slots(seed_bs)
         with get_global_ctx().forward_batch(seed_batch):
             seed = model.begin_layer_group_prefill(seed_batch.input_ids)
-            seed = model.advance_layer_group_prefill(seed, groups[0][1])
+            seed = model.advance_layer_group_prefill(seed, capture_groups[0][1])
         self._layer_range_state_inputs = adapter.create_range_graph_inputs(seed)
         self._reset_moe_offload_cache()
 
@@ -262,7 +309,7 @@ class GraphRunner:
             self.attn_backend.prepare_for_layer_range_capture(batch)
             self.buffer.set_batch(batch)
             self._set_dummy_linear_slots(bs)
-            for start_layer, end_layer in groups:
+            for start_layer, end_layer in capture_groups:
                 graph = torch.cuda.CUDAGraph()
                 with get_global_ctx().forward_batch(batch):
                     if start_layer == 0:
@@ -312,15 +359,36 @@ class GraphRunner:
         self.buffer.table_idx[:bs].fill_(self._dummy_state_slot())
 
     def can_use_cuda_graph(self, batch: Batch) -> bool:
+        if batch.draft_experts is not None or batch.is_speculative_verify:
+            return self.speculative is not None and self.speculative.can_replay(batch)
         return batch.is_decode_only and batch.size <= self.max_graph_bs
 
     def replay(self, batch: Batch) -> torch.Tensor:
         assert self.can_use_cuda_graph(batch)
+        if batch.draft_experts is not None or batch.is_speculative_verify:
+            logits = self.speculative.replay(batch)
+            phase = "verify" if batch.is_speculative_verify else "draft"
+            shape = (phase, batch.size, batch.positions.numel(), self.speculative._key(batch)[2])
+            self.replay_counts[shape] = self.replay_counts.get(shape, 0) + 1
+            return logits
         self.buffer.copy_from(batch)
         g = self.graph_map[batch.padded_size]
         self.attn_backend.prepare_for_replay(batch)
         g.replay()
+        shape = ("target_decode", batch.size, batch.size, batch.padded_size)
+        self.replay_counts[shape] = self.replay_counts.get(shape, 0) + 1
         return self.buffer.logits[: batch.size]
+
+    def stats_snapshot(self) -> dict:
+        result = {"enabled": bool(self.max_graph_bs), "target_decode": 0, "draft": 0, "verify": 0,
+                  "capture_seconds": self.capture_seconds, "extra_reserved_bytes": self.extra_reserved_bytes,
+                  "replay_shapes": []}
+        for (phase, batch_size, query_tokens, physical_query_tokens), count in sorted(self.replay_counts.items()):
+            result[phase] += count
+            result["replay_shapes"].append(dict(phase=phase, batch_size=batch_size,
+                                                query_tokens=query_tokens, replays=count,
+                                                physical_query_tokens=physical_query_tokens))
+        return result
 
     def has_layer_range_graphs_for(self, batch: Batch) -> bool:
         return (
@@ -331,6 +399,25 @@ class GraphRunner:
 
     def layer_range_end(self, start_layer: int) -> int | None:
         return self.layer_range_group_ends.get(start_layer)
+
+    def layer_range_candidate_ends(self, start_layer: int) -> tuple[int, ...]:
+        """Return captured ends for ``start_layer``, widest first."""
+        return self.layer_range_group_end_candidates.get(start_layer, ())
+
+    def next_layer_range_start(
+        self,
+        current_layer: int,
+        end_layer: int,
+    ) -> int | None:
+        """Return the next captured start strictly inside the requested range."""
+        return min(
+            (
+                start_layer
+                for start_layer in self.layer_range_group_ends
+                if current_layer < start_layer < end_layer
+            ),
+            default=None,
+        )
 
     def prepare_layer_range_replay(self, batch: Batch) -> None:
         if not self.has_layer_range_graphs_for(batch):
@@ -387,8 +474,11 @@ class GraphRunner:
         # free-before-alloc cannot reclaim this GPU memory. empty_cache() is left to the
         # caller / next capture (GraphRunner._capture_graphs already runs it).
         self.graph_map = {}
+        self.speculative = None
+        self.pool = None
         self.layer_range_graph_map = {}
         self.layer_range_group_ends = {}
+        self.layer_range_group_end_candidates = {}
         self.layer_range_batch_sizes = ()
         self._layer_range_state_inputs = None
         self._prepared_layer_range_batch = None
