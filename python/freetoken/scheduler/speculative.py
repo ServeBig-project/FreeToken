@@ -145,7 +145,7 @@ class SpeculativeDecoder:
         pool, states, slots = engine.linear_state_pool, None, None
         if pool is not None:
             per_request = engine.config.speculative_num_steps + 2
-            if pool.num_free_slots() < per_request * batch.size:
+            if pool.num_free_slots < per_request * batch.size:
                 self.state_slot_stops += 1
                 self._record_lengths([0] * batch.size)
                 return engine.forward_batch(batch, forward_input.sample_args)

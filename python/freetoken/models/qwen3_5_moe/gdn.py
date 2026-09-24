@@ -177,10 +177,10 @@ class Qwen3_5GatedDeltaNet(BaseOP):
             rec.index_copy_(0, dst, rec.index_select(0, step.prev))
             cv.index_copy_(0, dst, cv.index_select(0, step.prev))
             out = self._run_decode(conv_in[step.rows], a[step.rows], b[step.rows], pool, li, step.path, dtype)
-            if core_out is None:
-                core_out = out.new_empty((conv_in.shape[0], *out.shape[1:]))
-            core_out.index_copy_(0, step.rows, out)
-        return core_out
+            if core_out is None:  # one extra row absorbs the inert requests' writes
+                core_out = out.new_empty((conv_in.shape[0] + 1, *out.shape[1:]))
+            core_out.index_copy_(0, step.write, out)
+        return core_out[:-1]
 
     def _run_prefill(
         self, conv_in: torch.Tensor, a: torch.Tensor, b: torch.Tensor,

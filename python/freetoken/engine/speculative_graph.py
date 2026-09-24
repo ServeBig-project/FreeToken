@@ -1,8 +1,9 @@
-"""Fixed-step Qwen3 draft and ragged verification CUDA graphs."""
+"""Fixed-step draft and ragged verification CUDA graphs (Qwen3 MoE and Qwen3.5 MoE)."""
 from copy import copy
 
 import torch
 
+from freetoken.attention.linear import FLAMetadata, FLAPathMetadata, FLAVerifyStep, verify_layout
 from freetoken.core import Batch, get_global_ctx
 from .graph import GraphCaptureBuffer
 
@@ -17,7 +18,13 @@ class SpeculativeGraphs:
         self.verify_wrappers = {}
         ctx = get_global_ctx()
         kv = ctx.kv_cache
-        usable_tokens = kv.k_cache(0).flatten(0, 1).shape[0] - 1
+        stores = []
+        for layer in range(kv.num_layers):
+            try:
+                stores.append((kv.k_cache(layer), kv.v_cache(layer)))
+            except KeyError:  # linear-attention layer without paged KV
+                continue
+        usable_tokens = stores[0][0].flatten(0, 1).shape[0] - 1
         max_tokens = min(runner.max_graph_bs * (config.speculative_num_steps + 1), usable_tokens)
         self.max_tokens = max_tokens
         self.query_width = config.speculative_num_steps + 1
@@ -28,13 +35,19 @@ class SpeculativeGraphs:
         self.real_tokens = torch.empty((), dtype=torch.int32, device=runner.device)
         self.dummy_slot = ctx.page_table[runner.dummy_req.table_idx, 0]
         self.buffer = GraphCaptureBuffer.init(max_tokens, vocab_size, runner.device)
+        # GDN models: persistent [query_width, bs] verify layout the captured kernels index through.
+        self.pool = ctx.linear_state_pool
+        if self.pool is not None:
+            shape = (self.query_width, runner.max_graph_bs)
+            self.v_rows, self.v_write, self.v_prev = (
+                torch.zeros(shape, dtype=torch.int64, device=runner.device) for _ in range(3))
+            self.v_dst = torch.zeros(shape, dtype=torch.int32, device=runner.device)
         self.available = (
             torch.ones(config.model_config.num_moe_layers, config.model_config.num_experts,
                        dtype=torch.bool, device=runner.device) if self.router else None
         )
         # Rebuild can preserve existing prefix KV. Capture scratch must not overwrite it.
-        scratch = [storage(layer).flatten(0, 1)[:max_tokens]
-                   for layer in range(kv.num_layers) for storage in (kv.k_cache, kv.v_cache)]
+        scratch = [storage.flatten(0, 1)[:max_tokens] for pair in stores for storage in pair]
         saved = [tensor.clone() for tensor in scratch]
         try:
             for bs in reversed(runner.graph_bs_list):
@@ -87,6 +100,8 @@ class SpeculativeGraphs:
         batch.input_ids = self.buffer.input_ids[:tokens]
         batch.positions = self.buffer.positions[:tokens]
         batch.out_loc = self.buffer.out_loc[:tokens]
+        if self.pool is not None:
+            batch.fla_metadata = self._gdn_metadata(phase, bs, lengths, tokens)
         runner.attn_backend.prepare_speculative_graph(batch, wrapper, table)
         graph = torch.cuda.CUDAGraph()
         with get_global_ctx().forward_batch(batch):
@@ -95,6 +110,29 @@ class SpeculativeGraphs:
             with torch.cuda.graph(graph, pool=runner.pool, stream=runner.stream):
                 self.buffer.logits[:tokens] = model.forward()
         self.graphs[(phase, bs, tokens)] = graph
+
+    def _gdn_metadata(self, phase, bs, lengths, tokens):
+        """Capture-time GDN views over the persistent buffers, pointing every slot at the pool's
+        padding slot so capture never touches a request's state."""
+        cu = self.buffer.fla_cu_seqlens[: bs + 1]
+        if phase == "draft":
+            self.buffer.table_idx[:bs].fill_(self.pool.padding_slot)
+            return FLAMetadata(decode=FLAPathMetadata(cu_seqlens=cu, cache_indices=self.buffer.table_idx[:bs]))
+        offsets, offset = [], 0
+        for length in lengths:
+            offsets.append(offset)
+            offset += length
+        self.v_rows[:, :bs] = torch.tensor(offsets, device=self.runner.device)
+        self.v_write[:, :bs] = tokens
+        self.v_prev[:, :bs] = self.pool.padding_slot
+        self.v_dst[:, :bs] = self.pool.padding_slot
+        return FLAMetadata(verify=self._verify_steps(bs))
+
+    def _verify_steps(self, bs):
+        cu = self.buffer.fla_cu_seqlens[: bs + 1]
+        return [FLAVerifyStep(rows=self.v_rows[j, :bs], write=self.v_write[j, :bs], prev=self.v_prev[j, :bs],
+                              path=FLAPathMetadata(cu_seqlens=cu, cache_indices=self.v_dst[j, :bs]))
+                for j in range(self.query_width)]
 
     def _key(self, batch):
         tokens = batch.positions.numel()
@@ -119,6 +157,13 @@ class SpeculativeGraphs:
         self.buffer.copy_from(batch)
         if batch.draft_experts is not None and self.available is not None:
             self.available.copy_(batch.draft_available_experts)
+        if self.pool is not None and batch.is_speculative_verify:
+            bs = batch.size
+            rows, write, prev, dst = verify_layout(
+                batch.prefill_reqs, batch.speculative_states, self.pool.padding_slot, key[2],
+                self.query_width, {"device": "cpu", "pin_memory": True})
+            for buffer, host in ((self.v_rows, rows), (self.v_write, write), (self.v_prev, prev), (self.v_dst, dst)):
+                buffer[:, :bs].copy_(host, non_blocking=True)
         wrapper = (self.verify_wrappers[batch.size] if batch.is_speculative_verify
                    else self.runner.attn_backend.graph_wrappers[batch.size])
         self.runner.attn_backend.prepare_speculative_graph(batch, wrapper)

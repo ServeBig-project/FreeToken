@@ -41,13 +41,16 @@ class FLAPathMetadata:
 
 @dataclass
 class FLAVerifyStep:
-    """One verified position of a speculative round: the token rows of the requests still
-    active at this position, the slots holding their state before it, and the decode view
-    whose cache_indices are the scratch slots that receive the state after it."""
+    """One verified position of a speculative round, one row per request (fixed shape so a
+    CUDA graph can replay it): the token row to read, the row to write, the slot holding the
+    state before this position, and the decode view whose cache_indices receive the state
+    after it. A request with no token at this position reads its last row and writes the
+    dummy row and the pool's padding slot."""
 
-    rows: torch.Tensor      # [n] int64 rows into the ragged verify batch
-    prev: torch.Tensor      # [n] int64 slot per row to start from
-    path: FLAPathMetadata   # cache_indices [n] int32 destination slots, cu_seqlens arange
+    rows: torch.Tensor      # [bs] int64 rows into the ragged verify batch
+    write: torch.Tensor     # [bs] int64 output rows (dummy row = token count)
+    prev: torch.Tensor      # [bs] int64 slot per row to start from
+    path: FLAPathMetadata   # cache_indices [bs] int32 destination slots, cu_seqlens arange
 
 
 @dataclass
@@ -75,6 +78,8 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
 
     # GDN state slot per request: the hybrid-radix live slot (decoupled from table_idx) when
     # allocated, else table_idx (naive / force-naive GDN models keep the old keying).
+    from freetoken.core import get_global_ctx
+
     def gdn_slot(r):
         return r.linear_slot_idx if r.linear_slot_idx is not None else r.table_idx
 
@@ -120,7 +125,17 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
     prefill = build_prefill(batch.prefill_reqs) if batch.has_prefill else None
     verify = None
     if batch.speculative_states is not None:
-        verify = _build_verify_steps(batch.prefill_reqs, batch.speculative_states, device, pin)
+        reqs = batch.prefill_reqs
+        tokens = sum(r.extend_len for r in reqs)
+        rows, write, prev, dst = verify_layout(
+            reqs, batch.speculative_states, get_global_ctx().linear_state_pool.padding_slot,
+            tokens, max(r.extend_len for r in reqs), pin)
+        arange = torch.arange(len(reqs) + 1, dtype=torch.int32, device=device)
+        verify = [FLAVerifyStep(
+            rows=rows[j].to(device, non_blocking=True), write=write[j].to(device, non_blocking=True),
+            prev=prev[j].to(device, non_blocking=True),
+            path=FLAPathMetadata(cu_seqlens=arange, cache_indices=dst[j].to(device, non_blocking=True)),
+        ) for j in range(rows.shape[0])]
     return FLAMetadata(
         decode=decode,
         prefill=prefill,
@@ -128,27 +143,25 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
     )
 
 
-def _build_verify_steps(reqs, states, device, pin):
-    """Position j of every request verifies its (j+1)-th token; the state before position 0 is
-    the request's live slot, before position j>0 the scratch slot written at j-1."""
+def verify_layout(reqs, states, dummy_slot, dummy_row, positions, pin):
+    """Host [positions, bs] index tensors for the fixed-shape verify: position j of request i
+    verifies its (j+1)-th token. Before position 0 the state is the live slot, before j>0 the
+    scratch slot written at j-1; positions past a request's tokens are inert."""
     offsets, total = [], 0
     for r in reqs:
         offsets.append(total)
         total += r.extend_len
-    steps = []
-    for j in range(max(r.extend_len for r in reqs)):
-        active = [i for i, r in enumerate(reqs) if r.extend_len > j]
-        rows = torch.tensor([offsets[i] + j for i in active], dtype=torch.int64, **pin)
-        prev = torch.tensor([states[i][0] if j == 0 else states[i][1][j - 1] for i in active],
-                            dtype=torch.int64, **pin)
-        dst = torch.tensor([states[i][1][j] for i in active], dtype=torch.int32, **pin)
-        steps.append(FLAVerifyStep(
-            rows=rows.to(device, non_blocking=True), prev=prev.to(device, non_blocking=True),
-            path=FLAPathMetadata(
-                cu_seqlens=torch.arange(len(active) + 1, dtype=torch.int32, device=device),
-                cache_indices=dst.to(device, non_blocking=True)),
-        ))
-    return steps
+    rows, write, prev, dst = ([[0] * len(reqs) for _ in range(positions)] for _ in range(4))
+    for i, r in enumerate(reqs):
+        live, scratch = states[i]
+        for j in range(positions):
+            active = j < r.extend_len
+            rows[j][i] = offsets[i] + (j if active else r.extend_len - 1)
+            write[j][i] = offsets[i] + j if active else dummy_row
+            prev[j][i] = (live if j == 0 else scratch[j - 1]) if active else dummy_slot
+            dst[j][i] = scratch[j] if active else dummy_slot
+    return (torch.tensor(rows, dtype=torch.int64, **pin), torch.tensor(write, dtype=torch.int64, **pin),
+            torch.tensor(prev, dtype=torch.int64, **pin), torch.tensor(dst, dtype=torch.int32, **pin))
 
 
 def _build_track_metadata(reqs, cu_host, device, pin):

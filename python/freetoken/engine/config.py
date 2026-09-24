@@ -146,7 +146,7 @@ class EngineConfig:
     def speculative_graphs(self) -> bool:
         return bool(
             0 < self.speculative_num_steps <= 8
-            and self.dtype == torch.bfloat16 and self.model_config.model_type == "qwen3_moe"
+            and self.dtype == torch.bfloat16 and self.model_config.model_type in ("qwen3_moe", "qwen3_5_moe")
             and self.model_config.expert_quant == "none" and not self.nowag_expert_path
             and self.model_config.moe_weight_format in (None, "bf16")
             and self.attention_backend == "fi" and self.moe_backend == "offload"
