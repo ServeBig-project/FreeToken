@@ -21,8 +21,9 @@ class SpeculativeGraphs:
         max_tokens = min(runner.max_graph_bs * (config.speculative_num_steps + 1), usable_tokens)
         self.max_tokens = max_tokens
         self.query_width = config.speculative_num_steps + 1
-        # Below this bound padding could switch LRU admission to layer-distance eviction.
-        self.exact_bs = max(4, runner.moe_offload_cache.decode_cache_size // (
+        # Admission is LRU up to this many query tokens and layer-distance above it, so
+        # padding a smaller verification batch past it could change the eviction policy.
+        self.exact_tokens = max(4, runner.moe_offload_cache.decode_cache_size // (
             config.model_config.num_experts_per_tok * config.model_config.num_moe_layers))
         self.real_tokens = torch.empty((), dtype=torch.int32, device=runner.device)
         self.dummy_slot = ctx.page_table[runner.dummy_req.table_idx, 0]
@@ -44,7 +45,8 @@ class SpeculativeGraphs:
                 self.verify_wrappers[bs] = wrapper
                 # The first plan sets FlashInfer's maximum total query-row bound.
                 limit = min(bs * self.query_width, max_tokens)
-                counts = range(limit, bs - 1, -1) if bs <= self.exact_bs else [limit]
+                # Exact shapes only where the policy could flip; larger counts pad to the limit.
+                counts = sorted({limit, *range(bs, min(limit, self.exact_tokens) + 1)}, reverse=True)
                 for tokens in counts:
                     remaining = tokens - bs
                     lengths = []
@@ -78,7 +80,7 @@ class SpeculativeGraphs:
                       draft_experts=self.top_k if phase == "draft" else None,
                       is_speculative_verify=phase == "verify",
                       draft_available_experts=self.available if phase == "draft" else None)
-        if phase == "verify" and bs > self.exact_bs:
+        if phase == "verify" and tokens > self.exact_tokens:
             self.real_tokens.fill_(tokens)
             batch.num_token_non_padded = self.real_tokens
         batch.padded_reqs = reqs
@@ -96,7 +98,7 @@ class SpeculativeGraphs:
 
     def _key(self, batch):
         tokens = batch.positions.numel()
-        if batch.is_speculative_verify and batch.size > self.exact_bs:
+        if batch.is_speculative_verify and tokens > self.exact_tokens:
             tokens = min(batch.size * self.query_width, self.max_tokens)
         return ("verify" if batch.is_speculative_verify else "draft", batch.size, tokens)
 
@@ -108,7 +110,7 @@ class SpeculativeGraphs:
     def replay(self, batch):
         key = self._key(batch)
         real = batch.positions.numel()
-        if batch.is_speculative_verify and batch.size > self.exact_bs:
+        if batch.is_speculative_verify and real > self.exact_tokens:
             self.real_tokens.fill_(real)
             if real < key[2]:
                 self.buffer.input_ids[real:key[2]].zero_()

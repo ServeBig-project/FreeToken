@@ -24,13 +24,14 @@ and private graph memory are additional allocations; startup fails if those do
 not fit rather than silently reducing expert slots or KV pages. Graph capture
 does not publish output or modify reusable request KV.
 
-With 1706 expert slots and batch limit 32, N4 captures 136 graphs and N8 captures
-176 across the three phases. B1–4 retain exact verification query shapes; higher batches reuse one
+With 1706 expert slots and batch limit 32, N4 and N8 each capture 106 graphs
+across the three phases. Verification query shapes are exact only up to the query
+token count where expert admission switches from LRU to layer-distance eviction
+(four tokens here, more with a larger expert cache); every larger count reuses one
 full-width verification graph per B. Short tails append dummy queries after all
 real queries. Their attention output is initialized to zero, KV writes use the
 reserved dummy slot, and negative expert IDs skip expert admission and compute.
-Dummy queries do not load experts or change real routing. The exact-shape range
-also expands when needed to preserve the cache's LRU/layer-distance choice.
+Dummy queries do not load experts or change real routing.
 SD warmups retain expert residency between shapes
 and reset it before serving. Startup cost and additional reservation are reported
 by `capture_seconds` and `extra_reserved_bytes` below.

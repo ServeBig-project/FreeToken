@@ -166,7 +166,7 @@ class SpeculativeCost:
 
     def _physical_verify(self, batch_size, logical):
         graphs = self.engine.graph_runner.speculative
-        if graphs is not None and batch_size > graphs.exact_bs:
+        if graphs is not None and logical > graphs.exact_tokens:
             return min(batch_size * graphs.query_width, graphs.max_tokens)
         return logical
 
