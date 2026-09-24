@@ -102,8 +102,10 @@ class LayeredPipelineExecutor:
         if not admission.members:
             self._staged_admission = None
             return compose_mixed_batch(decode_reqs, None)
+        # Memory, not the soft chunk cap, may cut a wave: an oversized first
+        # request stays intact whenever observed memory can hold it.
         wave_budget = self._memory.token_budget(
-            token_budget, self._max_wave_chunks * token_budget
+            token_budget, admission.reserved_chunks * token_budget
         )
         if self._engine.config.tp_info.size > 1:
             budget = torch.tensor([wave_budget], dtype=torch.int64, device="cpu")

@@ -143,7 +143,7 @@ expert cache 注册的每个 stage working set；具备这些公开接口后才�
 `--max-prefill-length` (`T`) 同时用于 planned-chunk admission，并限制一次
 layer-group iteration 的 prefill 总行数。它不限制 logical prompt 长度。
 `--prefill-wave-max-chunks` (`W`) 是完整请求的 aggregate soft cap：首个请求
-本身若大于 `W`，它仍保持完整并独占 wave。`--prefill-layer-group-size`
+本身若大于 `W`，它仍保持完整并独占 wave。只有实测 prefill 显存不足时（包括尚未测量前只给一个 tile 的首个 wave），wave 才会在 prompt 中途结束，剩余部分进入下一个 wave。`--prefill-layer-group-size`
 (`G`) 控制 resident layer group 的大小，并受 shared expert cache 容量限制。
 
 ## 验收判据
