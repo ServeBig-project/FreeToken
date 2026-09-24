@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import torch
 
 from freetoken.core import Batch, Req, SamplingParams
+from freetoken.engine.engine import ForwardOutput
 from freetoken.message import DetokenizeMsg
 from freetoken.scheduler.decode import DecodeManager
 from freetoken.scheduler.scheduler import Scheduler
@@ -29,6 +30,8 @@ def _scheduler(*, eos_token_ids=()):
         eos_token_ids=set(eos_token_ids),
         toolcall_anchor_id=None,
         config=SimpleNamespace(page_size=1),
+        engine=SimpleNamespace(graph_runner=SimpleNamespace(stats_snapshot=lambda: {})),
+        speculative=None,  # speculative decoding off (the default)
         status_reporter=SimpleNamespace(report_batch=lambda *_, **__: None),
         send_result=sent.extend,
         _kv_usage_pages=lambda: (0, 32),
@@ -71,7 +74,7 @@ def _launch(batch, decode_manager):
 def _drain(scheduler, batch, token):
     last_data = (
         SimpleNamespace(batch=batch),
-        (
+        ForwardOutput(
             None,
             torch.tensor([token], dtype=torch.int32),
             SimpleNamespace(synchronize=lambda: None),

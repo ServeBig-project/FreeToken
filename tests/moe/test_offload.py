@@ -325,6 +325,9 @@ def test_prefill_overlap_waits_for_previous_prefill_release_after_begin(monkeypa
 
 
 def test_offload_moe_layer_decode_forward_uses_remapped_slot_ids(monkeypatch):
+    import freetoken.core as core
+    from freetoken.core import Batch, Context, Req
+
     layer, cache = _make_layer_and_cache()
     topk_weights = torch.tensor([[0.7, 0.3]], dtype=torch.float32)
     topk_ids = torch.tensor([[2, 1]], dtype=torch.int32)
@@ -334,7 +337,9 @@ def test_offload_moe_layer_decode_forward_uses_remapped_slot_ids(monkeypatch):
 
     monkeypatch.setattr(
         "freetoken.layers.moe.fused_topk",
-        lambda *, hidden_states, gating_output, topk, renormalize: (topk_weights, topk_ids),
+        lambda *, hidden_states, gating_output, topk, renormalize, num_token_non_padded=None: (
+            topk_weights, topk_ids
+        ),
     )
 
     def fake_ensure(layer_id, expert_ids):
@@ -362,7 +367,14 @@ def test_offload_moe_layer_decode_forward_uses_remapped_slot_ids(monkeypatch):
 
     monkeypatch.setattr("freetoken.layers.moe.fused_experts_decode_impl", fake_fused_decode)
 
-    out = layer.decode_forward(hidden_states, router_logits)
+    ctx = Context(page_size=1)
+    monkeypatch.setattr(core, "_GLOBAL_CTX", ctx)
+    req = Req(
+        input_ids=torch.tensor([0], dtype=torch.int32), table_idx=0, cached_len=0,
+        output_len=1, uid=0, sampling_params=None, cache_handle=None,
+    )
+    with ctx.forward_batch(Batch(reqs=[req], decode_size=1)):
+        out = layer.decode_forward(hidden_states, router_logits)
 
     assert out is hidden_states
     assert calls["ensure_layer_id"] == 0
@@ -449,7 +461,9 @@ def test_graph_capture_reuses_warm_offload_cache_before_capture(monkeypatch):
 
     events = []
     _init_tp()
-    monkeypatch.setattr(core, "_GLOBAL_CTX", Context(page_size=1))
+    ctx = Context(page_size=1)
+    ctx.page_table = torch.zeros((1, 1), dtype=torch.int32)  # dummy_req row, max_seq_len=1
+    monkeypatch.setattr(core, "_GLOBAL_CTX", ctx)
 
     class FakeGraph:
         def pool(self):

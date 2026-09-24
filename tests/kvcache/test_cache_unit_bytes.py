@@ -24,6 +24,13 @@ def _init_tp() -> None:
         set_tp_info(rank=0, size=1)
 
 
+# docs/sd-cuda-graphs.md: eager execution reports disabled graphs and zero replay counters.
+_EAGER_GRAPH_STATS = {
+    "enabled": False, "target_decode": 0, "draft": 0, "verify": 0, "replay_shapes": [],
+    "capture_seconds": 0.0, "extra_reserved_bytes": 0,
+}
+
+
 def _mha_engine(layers=4, pages=100, page_size=16, kv_heads=2, head_dim=64, dtype=torch.bfloat16):
     from freetoken.kvcache.mha_pool import MHAKVCache
 
@@ -36,6 +43,7 @@ def _mha_engine(layers=4, pages=100, page_size=16, kv_heads=2, head_dim=64, dtyp
         moe_offload_cache=None,
         linear_state_pool=None,
         config=None,
+        graph_runner=SimpleNamespace(stats_snapshot=lambda: _EAGER_GRAPH_STATS),
     )
     return eng
 
