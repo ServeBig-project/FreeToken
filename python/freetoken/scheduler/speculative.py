@@ -185,15 +185,16 @@ class SpeculativeDecoder:
             p_chosen = p[:length].gather(1, candidates[:, None]).flatten()
             q_chosen = q[:length].gather(1, candidates[:, None]).flatten()
             uniform = torch.rand(length, device=engine.device, generator=self.generator)
-            accepted = (uniform * q_chosen < p_chosen).to(torch.int32).cumprod(0).sum()
+            accepted = (uniform * q_chosen < p_chosen).to(torch.int32).cumprod(0).sum(0, keepdim=True)
             if accepted_lengths is not None:
-                accepted_lengths[i] = accepted
+                accepted_lengths[i : i + 1] = accepted
             # The zero q row after the last draft makes the all-accepted case
             # sample its bonus directly from p. Otherwise sample max(p-q, 0).
-            correction = (p[accepted] - q[accepted]).clamp_min_(0)
+            # A 0-dim index would be read back to the host; keep ``accepted`` 1-D.
+            correction = (p.index_select(0, accepted) - q.index_select(0, accepted)).clamp_min_(0)
             token = torch.multinomial(correction, 1, generator=self.generator).to(torch.int32)
             out = proposals[i, : length + 1].clone()
-            out[accepted] = token[0]
+            out.scatter_(0, accepted, token.flatten())
             out.masked_fill_(torch.arange(length + 1, device=engine.device) > accepted, -1)
             output[i, : length + 1] = out
             req = batch.reqs[i]
