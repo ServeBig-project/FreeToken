@@ -90,7 +90,8 @@ def fused_topk(
 
 
 def moe_align_block_size(
-    topk_ids: torch.Tensor, block_size: int, num_experts: int
+    topk_ids: torch.Tensor, block_size: int, num_experts: int,
+    expert_map: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
@@ -101,6 +102,8 @@ def moe_align_block_size(
         top-k expert indices for each token.
     - block_size: The block size used in block matrix multiplication.
     - num_experts: The total number of experts.
+    - expert_map: Optional logical-expert to physical-bank-row mapping. Routing
+        stays in logical space; only the returned block expert ids are mapped.
 
     Returns:
     - sorted_token_ids: A tensor containing the sorted token indices according
@@ -129,6 +132,14 @@ def moe_align_block_size(
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
     """
+    if expert_map is not None:
+        sorted_ids, expert_ids, padded_count = moe_align_block_size(
+            topk_ids, block_size, num_experts
+        )
+        # Unused tail blocks can be uninitialized; GEMMs ignore them via padded_count.
+        expert_ids = expert_map[expert_ids.clamp(0, num_experts - 1)]
+        return sorted_ids, expert_ids, padded_count
+
     from freetoken.kernel.backend import is_sgl_kernel_installed
 
     if not is_sgl_kernel_installed():
@@ -242,9 +253,11 @@ def fused_experts_impl(
     topk_ids: torch.Tensor,
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
+    expert_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Returns ``hidden_states`` itself, overwritten with the routed output. A caller that
-    still needs the input afterwards (a shared expert, a residual) must read it BEFORE this
+    """Returns ``hidden_states`` itself, overwritten with the routed output.
+    With ``expert_map``, routes are logical ids and weights remain in physical rows.
+    A caller that still needs the input afterwards (a shared expert, a residual) must read it BEFORE this
     call or pass a copy. ``fused_experts_decode_impl`` allocates instead, so the contract is
     not shared; the resident bf16 path routes decode through here too."""
     from freetoken.kernel import fused_moe_kernel_triton, moe_sum_reduce_triton
@@ -259,6 +272,8 @@ def fused_experts_impl(
     assert hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16]
     num_tokens, _ = hidden_states.shape
     E, N, _ = w1.shape
+    if expert_map is not None:
+        E = expert_map.numel()
     M = num_tokens
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
@@ -300,7 +315,7 @@ def fused_experts_impl(
     curr_topk_weights = topk_weights[begin_token_idx:end_token_idx]
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-        curr_topk_ids, config["BLOCK_SIZE_M"], E
+        curr_topk_ids, config["BLOCK_SIZE_M"], E, expert_map
     )
 
     fused_moe_kernel_triton(

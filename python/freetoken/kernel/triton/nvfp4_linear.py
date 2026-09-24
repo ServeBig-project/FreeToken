@@ -925,6 +925,10 @@ class Nvfp4LMHead(BaseOP):
         if batch.uses_extend_path:
             indices = batch.attn_metadata.get_last_indices(batch.size)
             x = x[indices].contiguous()
+        return self.forward_selected(x)
+
+    def forward_selected(self, x: torch.Tensor) -> torch.Tensor:
+        """Project already-selected output rows without applying batch indices again."""
         if self._transposed:
             return nvfp4_dense_linear_t(x, self.weight, self.weight_scale, self.weight_global)
         return nvfp4_dense_linear(x, self.weight, self.weight_scale, self.weight_global)

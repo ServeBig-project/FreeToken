@@ -65,6 +65,7 @@ class ChatCompletionRequest(BaseModel):
 
     model: str
     messages: list[Message]
+    cache_group: str = ""
     max_tokens: int | None = None
     max_completion_tokens: int | None = None
     temperature: float | None = None
@@ -103,6 +104,7 @@ class CompletionRequest(BaseModel):
 
     model: str
     prompt: str | list[str] | list[int] | list[list[int]]
+    cache_group: str = ""
     max_tokens: int | None = None
     max_completion_tokens: int | None = None
     temperature: float | None = None

@@ -86,6 +86,7 @@ def run_mxfp4_prefill_experts_t(
     top_k: int,
     hidden_act_alpha: float,
     swiglu_limit: float | None,
+    expert_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Prefill experts using the transposed weight layout shared with split-K decode
     ([E, K//2, N] blocks, [E, K//32, N] scales, N innermost). Uses
@@ -121,7 +122,8 @@ def run_mxfp4_prefill_experts_t(
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids,
         config["BLOCK_SIZE_M"],
-        num_weight_experts,
+        num_weight_experts if expert_map is None else expert_map.numel(),
+        expert_map,
     )
 
     gate_up = torch.empty(

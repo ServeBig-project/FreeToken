@@ -218,6 +218,7 @@ def _prefill_gemm(a_fp8, a_scale, w, s, c, tw, sorted_ids, expert_ids, ntpp, num
 def fused_experts_fp8_blockscale(
     hidden_states, gate_up, gate_up_scale, down, down_scale,
     topk_weights, topk_ids, num_experts, activation="silu",
+    expert_map=None,
 ) -> torch.Tensor:
     """Prefill inline-dequant block-fp8 MoE. ``topk_ids`` index expert rows in [0, num_experts)
     (materialized layer: position == expert id)."""
@@ -235,7 +236,9 @@ def fused_experts_fp8_blockscale(
     cfg = dict(BLOCK_SIZE_M=64 if M > 64 else 16, BLOCK_SIZE_N=128, BLOCK_SIZE_K=128,
                GROUP_SIZE_M=8, num_warps=8 if M > 64 else 4, num_stages=3)
 
-    sorted_ids, expert_ids, ntpp = moe_align_block_size(topk_ids, cfg["BLOCK_SIZE_M"], num_experts)
+    sorted_ids, expert_ids, ntpp = moe_align_block_size(
+        topk_ids, cfg["BLOCK_SIZE_M"], num_experts, expert_map
+    )
     tw = topk_weights.reshape(-1).contiguous()
     num_valid = topk_ids.numel()
 

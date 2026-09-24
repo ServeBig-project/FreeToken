@@ -115,12 +115,23 @@ class RadixCacheHandle(BaseCacheHandle):
 
     def get_matched_indices(self) -> torch.Tensor:
         node = self.node
+        if node.is_root():
+            return node.value
         value_list: List[torch.Tensor] = []
         while not node.is_root():
             value_list.append(node.value)
             node = node.parent
         value_list.reverse()
         return torch.cat(value_list)
+
+
+def _group_root(roots, group: str, key_fn: KEY_FN, empty: torch.Tensor) -> RadixTreeNode:
+    if group not in roots:
+        root = RadixTreeNode(key_fn)
+        root.set_key_value(empty, empty)
+        root.ref_count = 1
+        roots[group] = root
+    return roots[group]
 
 
 class RadixPrefixCache(BasePrefixCache):
@@ -136,7 +147,9 @@ class RadixPrefixCache(BasePrefixCache):
         self.evictable_size = 0
         self.protected_size = 0
         self.root_node = RadixTreeNode(self.key_fn)
+        self.root_node.set_key_value(self.empty_tensor, self.empty_tensor)
         self.root_node.ref_count = 1  # root is always protected
+        self.roots = {"": self.root_node}
 
     def lock_handle(self, handle: BaseCacheHandle, unlock: bool = False) -> None:
         assert isinstance(handle, RadixCacheHandle)
@@ -157,14 +170,15 @@ class RadixPrefixCache(BasePrefixCache):
                 node.ref_count += 1
                 node = node.parent
 
-    def match_prefix(self, input_ids: torch.Tensor) -> MatchResult:
-        node, prefix_len = self._tree_walk(input_ids)
+    def match_prefix(self, input_ids: torch.Tensor, cache_group: str = "") -> MatchResult:
+        node, prefix_len = self._tree_walk(input_ids, cache_group)
         return MatchResult(RadixCacheHandle(prefix_len, node))
 
-    def insert_prefix(self, input_ids: torch.Tensor, indices: torch.Tensor) -> InsertResult:
+    def insert_prefix(self, input_ids: torch.Tensor, indices: torch.Tensor,
+                      cache_group: str = "") -> InsertResult:
         insert_len = align_down(len(input_ids), self.page_size)
         input_ids, indices = input_ids[:insert_len], indices[:insert_len]
-        node, prefix_len = self._tree_walk(input_ids)
+        node, prefix_len = self._tree_walk(input_ids, cache_group)
         if prefix_len != insert_len:  # NOTE: prefix_len < insert_len
             new_node = RadixTreeNode(self.key_fn)
             new_node.set_key_value(input_ids[prefix_len:], indices[prefix_len:].clone())
@@ -216,7 +230,7 @@ class RadixPrefixCache(BasePrefixCache):
         pass
 
     def _collect_leave_nodes_for_evict(self) -> List[RadixTreeNode]:
-        nodes: List[RadixTreeNode] = [self.root_node]
+        nodes: List[RadixTreeNode] = list(self.roots.values())
         leave_nodes: List[RadixTreeNode] = []
 
         while len(nodes) > 0:
@@ -230,10 +244,10 @@ class RadixPrefixCache(BasePrefixCache):
 
         return leave_nodes
 
-    def _tree_walk(self, input_ids: torch.Tensor) -> Tuple[RadixTreeNode, int]:
+    def _tree_walk(self, input_ids: torch.Tensor, cache_group: str = "") -> Tuple[RadixTreeNode, int]:
         prefix_len = 0
         indice_len = len(input_ids)
-        node = self.root_node
+        node = _group_root(self.roots, cache_group, self.key_fn, self.empty_tensor)
         tic = time.monotonic_ns()
 
         while prefix_len < indice_len:

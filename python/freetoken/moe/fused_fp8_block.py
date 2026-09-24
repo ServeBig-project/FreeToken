@@ -17,6 +17,7 @@ def fused_experts_fp8_block(
     hidden_states, gate_up, gate_up_scale, down, down_scale,
     topk_weights, topk_ids, num_experts, activation="silu",
     apply_router_weight_on_input=False,
+    expert_map=None,
 ):
     """Prefill: W8A8 fused grouped GEMM over the materialized-layer banks
     (``[num_experts, ...]``, position == expert id)."""
@@ -25,7 +26,7 @@ def fused_experts_fp8_block(
 
     return fused_experts_fp8_blockscale(
         hidden_states, gate_up, gate_up_scale, down, down_scale,
-        topk_weights, topk_ids, num_experts, activation,
+        topk_weights, topk_ids, num_experts, activation, expert_map,
     )
 
 
