@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 
-from benchmark_http import idle
+from benchmark_http import cache_slots, idle
 from collect_http import PROMPTS, shape_counts
 
 PREFIX = "Describe how a Python generator resumes after yielding a value, with a small example:"
@@ -37,6 +37,7 @@ def main():
         report["models"] = client.get("/v1/models").json()
         model = report["models"]["data"][0]["id"]
         report["initial_stats"] = idle(client)
+        report["cache_slots"] = cache_slots(client)
 
         def call(request, cancel_before=None):
             payload = {"model": model, **request}
@@ -95,13 +96,9 @@ def main():
                                       "replays": value - old.get(key, 0)}
                                      for key, value in new.items() if value > old.get(key, 0)]
             checks = report["checks"]
-            checks[f"{label}:geometry"] = (after["moe_residency"]["cache_slots"] == capacity
-                                           and after["moe_residency"]["resident_experts"] == 0
-                                           and after["kv"]["total_pages"] == 4096)
+            checks[f"{label}:geometry"] = cache_slots(client) == capacity and after["kv"]["total_pages"] == 4096
             checks[f"{label}:features"] = (after["speculative"]["enabled"]
-                                           and after["speculative"]["draft_residency"] == args.mode
-                                           and not after["speculative"]["adaptive_enabled"]
-                                           and not after["speculative"]["reuse_enabled"])
+                                           and after["speculative"]["draft_residency"] == args.mode)
             checks[f"{label}:execution"] = after["cuda_graph"]["enabled"] == (args.execution == "graph")
             checks[f"{label}:replay"] = bool(stage["replay_delta"]) if args.execution == "graph" else not stage["replay_delta"]
             for index, (request, row) in enumerate(zip(requests, rows)):

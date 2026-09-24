@@ -3,8 +3,8 @@
 Only public contracts, CLI/HTTP outputs, and this author's existing blackbox
 helpers are used. The coordinator starts all servers. No production module is
 imported. The supported main configuration is Qwen3-30B-A3B BF16, offload,
-legacy, context1024, prefill512, KV4096 and1706 expert slots, with old adaptive,
-permanent residency and approximate verify disabled.
+legacy, context1024, prefill512, KV4096 and1706 expert slots (read from
+`/v1/cache/status`).
 
 ## Fixed performance and quality entry
 
@@ -57,10 +57,9 @@ FT_SD_PACKAGE=/ABSOLUTE/CANDIDATE/python \
   blackbox_tests/sd_improvements/test_cli_contract.py
 ```
 
-These three checks cover option discoverability, load-missing without router,
-and new adaptive cost combined with the old adaptive profile. Their outcomes
-change whether the advertised CLI is usable and invalid configurations reject
-for the stated reason. CUDA devices are hidden from these subprocesses;
+These two checks cover option discoverability and load-missing without router.
+Their outcomes change whether the advertised CLI is usable and the invalid
+configuration rejects for the stated reason. CUDA devices are hidden from these subprocesses;
 timeouts or unrelated CUDA errors do not count as correct rejection.
 
 ## New-feature HTTP contracts

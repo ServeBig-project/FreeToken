@@ -9,7 +9,8 @@ import sys
 import httpx
 
 TESTS = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(TESTS), str(TESTS / "self_speculative"), str(TESTS / "sd_concurrency")]
+sys.path[:0] = [str(TESTS), str(TESTS / "self_speculative"), str(TESTS / "sd_concurrency"), str(TESTS / "sd_graph")]
+from benchmark_http import cache_slots
 from sd_concurrency.inputs import PROMPTS
 from sd_concurrency.evaluate_http import shape_counts
 from test_serving import SAMPLED, Server
@@ -67,7 +68,7 @@ def main():
         def inspect(stats, capacity):
             spec = stats["speculative"]
             assert all(spec[key] is value for key, value in expected.items()), spec
-            assert spec["enabled"] and not spec["adaptive_enabled"] and not spec["reuse_enabled"], spec
+            assert spec["enabled"], spec
             assert spec["max_draft_steps"] == args.speculative_num_steps, spec
             assert spec["draft_residency"] == args.speculative_draft_residency, spec
             histogram = spec["draft_length_histogram"]
@@ -75,7 +76,7 @@ def main():
             assert all(type(spec[key]) is int and spec[key] >= 0 for key in COUNTERS), spec
             for suffix in ("experts", "bytes"):
                 assert spec[f"prefetch_used_{suffix}"] + spec[f"prefetch_evicted_unused_{suffix}"] <= spec[f"prefetch_loaded_{suffix}"], spec
-            assert stats["moe_residency"]["cache_slots"] == capacity and stats["moe_residency"]["resident_experts"] == 0
+            assert cache_slots(client) == capacity
             assert stats["kv"]["total_pages"] == 4096 and stats["model"]["ctx"] == 1024
             assert stats["requests"]["active"] == 0
             assert stats["cuda_graph"]["enabled"] is (args.execution == "graph")

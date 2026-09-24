@@ -75,13 +75,11 @@ def stream(url, body, abort=False):
 
 def run(args):
     url = args.url.rstrip("/")
-    initial_stats = api(url, "/v1/stats")
-    before = initial_stats["speculative"]
+    before = api(url, "/v1/stats")["speculative"]
     ordinary = args.scenario == "ordinary-reference"
     require(before["draft_residency"] == args.mode, "server residency mode differs")
     require(before["enabled"] == (not ordinary), "unexpected SD enabled setting")
-    require(before["adaptive_enabled"] == args.adaptive, "unexpected adaptive setting")
-    require(before["reuse_enabled"] == args.reuse, "unexpected reuse setting")
+    cache_slots = api(url, "/v1/cache/status")["geometry"]["moe_cache_size"]
     model = api(url, "/v1/models")["data"][0]["id"]
     common = {"model": model, "temperature": 0, "top_k": -1, "top_p": 1.0}
     cases = [
@@ -91,15 +89,15 @@ def run(args):
         dict(common, prompt="The capital of Japan is", max_tokens=4),
     ]
     greedy = [complete(url, case) for case in cases]
-    if args.scenario not in ("baseline", "ordinary-reference") and not args.reuse:
+    if args.scenario not in ("baseline", "ordinary-reference"):
         reference = json.loads(args.reference.read_text())
         require(reference["model"] == model, "reference model differs")
         require(reference["cases"] == cases, "reference input contract differs")
         if args.scenario == "shortage":
             require(reference["scenario"] == "ordinary-reference",
                     "shortage needs an independent ordinary target reference")
-            require(reference["moe_residency"] == initial_stats["moe_residency"],
-                    "shortage and ordinary reference cache budgets/residency differ")
+            require(reference["cache_slots"] == cache_slots,
+                    "shortage and ordinary reference cache budgets differ")
         require(greedy == reference["greedy"],
                 f"greedy target differs: expected {reference['greedy']}, got {greedy}")
 
@@ -112,12 +110,9 @@ def run(args):
     lifecycle = {}
     if args.scenario in ("baseline", "active"):
         streamed = stream(url, cases[0])
-        if not args.reuse:
-            require(streamed == greedy[0],
-                    f"stream differs: expected {greedy[0]}, got {streamed}")
+        require(streamed == greedy[0], f"stream differs: expected {greedy[0]}, got {streamed}")
         require(bool(greedy[0]["text"]), "stop fixture needs nonempty output")
-        stop_length = 1 if args.reuse else max(1, len(greedy[0]["text"]) // 2)
-        stop = greedy[0]["text"][:stop_length]
+        stop = greedy[0]["text"][:max(1, len(greedy[0]["text"]) // 2)]
         stopped = complete(url, dict(cases[0], stop=[stop]))
         require(stopped["text"] == "" and stopped["finish_reason"] == "stop",
                 f"stop prefix escaped into output: {stopped}")
@@ -126,9 +121,7 @@ def run(args):
                            max_tokens=2), chat=True)
         stream(url, dict(cases[0], max_tokens=256), abort=True)
         recovered = complete(url, cases[0])
-        if not args.reuse:
-            require(recovered == greedy[0],
-                    f"after cancellation expected {greedy[0]}, got {recovered}")
+        require(recovered == greedy[0], f"after cancellation expected {greedy[0]}, got {recovered}")
         lifecycle = {"stream": streamed, "stop": stopped, "after_cancellation": recovered}
 
     after = api(url, "/v1/stats")["speculative"]
@@ -138,17 +131,17 @@ def run(args):
     require(delta["accepted_draft_tokens"] <= delta["draft_tokens"],
             "accepted drafts exceed proposed drafts")
     require(after["draft_residency"] == args.mode, "residency mode changed")
-    for key in ("draft_expert_loads", "draft_expert_replacements"):
-        if args.collect_stats == "off":
-            require(before[key] is None and after[key] is None, f"{key} must be null")
-        else:
-            require(type(before[key]) is int and type(after[key]) is int,
-                    f"{key} must be a collected count")
-            delta[key] = after[key] - before[key]
-            require(delta[key] >= 0, f"{key} regressed")
+    if args.collect_stats == "off":
+        require(before["draft_expert_loads"] is None and after["draft_expert_loads"] is None,
+                "draft_expert_loads must be null")
+    else:
+        require(type(before["draft_expert_loads"]) is int and type(after["draft_expert_loads"]) is int,
+                "draft_expert_loads must be a collected count")
+        delta["draft_expert_loads"] = after["draft_expert_loads"] - before["draft_expert_loads"]
+        require(delta["draft_expert_loads"] >= 0, "draft_expert_loads regressed")
     if ordinary:
-        ordinary_counts = keys + ("draft_expert_loads", "draft_expert_replacements")
-        require(all(after[key] == 0 for key in ordinary_counts), "ordinary service has SD activity")
+        require(all(after[key] == 0 for key in keys + ("draft_expert_loads",)),
+                "ordinary service has SD activity")
     elif args.scenario == "shortage":
         require(delta["residency_stops"] > 0, "insufficient-cache fallback was not exercised")
         require(delta["draft_tokens"] == 0 and delta["verify_steps"] == 0,
@@ -156,20 +149,17 @@ def run(args):
     else:
         require(delta["draft_tokens"] > 0 and delta["verify_steps"] > 0,
                 "coverage failure: workload never drafted and verified")
-        require(delta["residency_stops"] == 0, "pinned expert fixture unexpectedly fell back")
+        if args.mode == "off":
+            require(delta["residency_stops"] == 0, "residency off refused drafting")
     if args.collect_stats == "on":
         if args.mode == "off" and not ordinary:
             require(delta["draft_expert_loads"] > 0,
                     "coverage failure: off control never loaded a draft expert")
         else:
             require(delta["draft_expert_loads"] == 0, "resident-only draft loaded an expert")
-        replacement_expected = args.mode == "affinity" and args.scenario == "active"
-        require((delta["draft_expert_replacements"] > 0) if replacement_expected
-                else delta["draft_expert_replacements"] == 0,
-                "affinity replacement coverage/count differs from the scenario")
     report = {"model": model, "mode": args.mode, "scenario": args.scenario,
               "cases": cases, "greedy": greedy, "sampled": concurrent, "delta": delta,
-              "moe_residency": initial_stats["moe_residency"], "lifecycle": lifecycle}
+              "cache_slots": cache_slots, "lifecycle": lifecycle}
     if args.scenario in ("baseline", "ordinary-reference"):
         args.reference.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     return report
@@ -180,18 +170,16 @@ if __name__ == "__main__":
     parser.add_argument("--url", required=True)
     parser.add_argument("--scenario", required=True,
                         choices=("baseline", "ordinary-reference", "active", "shortage"))
-    parser.add_argument("--mode", choices=("off", "router", "affinity"), required=True)
+    parser.add_argument("--mode", choices=("off", "router"), required=True)
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--collect-stats", choices=("on", "off"), default="on")
-    parser.add_argument("--adaptive", action="store_true")
-    parser.add_argument("--reuse", action="store_true")
     args = parser.parse_args()
-    if args.scenario in ("baseline", "ordinary-reference") and (args.mode != "off" or args.reuse):
-        parser.error("reference capture requires mode=off without reuse")
-    if args.scenario == "ordinary-reference" and (args.adaptive or args.collect_stats == "off"):
-        parser.error("ordinary reference requires SD controls off and statistics on")
+    if args.scenario in ("baseline", "ordinary-reference") and args.mode != "off":
+        parser.error("reference capture requires mode=off")
+    if args.scenario == "ordinary-reference" and args.collect_stats == "off":
+        parser.error("ordinary reference requires statistics on")
     if args.scenario == "shortage" and args.mode == "off":
-        parser.error("shortage requires router or affinity")
+        parser.error("shortage requires router")
     started = time.monotonic()
     result = run(args)
     result["elapsed_seconds"] = round(time.monotonic() - started, 3)

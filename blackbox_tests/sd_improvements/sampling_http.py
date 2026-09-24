@@ -11,7 +11,8 @@ import sys
 import httpx
 
 TESTS = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(TESTS / "self_speculative"))
+sys.path[:0] = [str(TESTS / "self_speculative"), str(TESTS / "sd_graph")]
+from benchmark_http import cache_slots
 from sampling_confirmation import exact_permutation_p
 from test_serving import SAMPLED, Server
 
@@ -59,7 +60,7 @@ def collect(args):
                     save()
                     assert after["cuda_graph"]["enabled"] is True
                     assert after["requests"]["active"] == 0 and after["kv"]["total_pages"] == 4096
-                    assert after["moe_residency"]["cache_slots"] == 1706 and after["moe_residency"]["resident_experts"] == 0
+                    assert cache_slots(client) == 1706
                     spec = after["speculative"]
                     assert spec["enabled"] is (args.arm == "all-on")
                     if args.arm == "all-on":

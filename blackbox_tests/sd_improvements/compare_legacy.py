@@ -31,7 +31,6 @@ def main():
         a, b = before["stats_after"], after["stats_after"]
         checks[f"{label}:same_resources"] = (a["model"]["ctx"] == b["model"]["ctx"]
             and a["kv"]["total_pages"] == b["kv"]["total_pages"]
-            and a["moe_residency"] == b["moe_residency"]
             and a["speculative"]["enabled"] is True and b["speculative"]["enabled"] is True
             and a["speculative"]["draft_residency"] == b["speculative"]["draft_residency"])
         checks[f"{label}:response_count"] = len(before["responses"]) == len(after["responses"])

@@ -14,7 +14,7 @@ TESTS = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(TESTS), str(TESTS / "sd_concurrency"), str(TESTS / "sd_graph")]
 from sd_concurrency.inputs import PROMPTS
 from sd_concurrency.evaluate_http import percentile, shape_counts
-from benchmark_http import FROZEN, TASKS, coding_prompt, idle, stats_delta, stream
+from benchmark_http import FROZEN, TASKS, cache_slots, coding_prompt, idle, stats_delta, stream
 
 
 def main():
@@ -67,8 +67,7 @@ def main():
             graph = after["cuda_graph"]
             checks = {
                 "resources": (after["model"]["ctx"] == 1024 and after["kv"]["total_pages"] == 4096
-                              and after["moe_residency"]["cache_slots"] == 1706
-                              and after["moe_residency"]["resident_experts"] == 0),
+                              and cache_slots(client) == 1706),
                 "execution": graph["enabled"] == (args.execution == "graph"),
                 "replays": (bool(replays) if args.execution == "graph" else
                             not replays and all(graph[p] == 0 for p in ("target_decode", "draft", "verify"))),

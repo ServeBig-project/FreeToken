@@ -27,6 +27,12 @@ def idle(client):
     raise AssertionError(f"Requests did not return to idle: {stats}")
 
 
+def cache_slots(client):
+    response = client.get("/v1/cache/status")
+    assert response.status_code == 200, response.text
+    return response.json()["geometry"]["moe_cache_size"]
+
+
 def stats_delta(before, after):
     result = {}
     for key, value in after.items():

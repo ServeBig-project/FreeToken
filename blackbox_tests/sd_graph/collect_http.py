@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 
-from benchmark_http import PERFORMANCE, idle, stream
+from benchmark_http import PERFORMANCE, cache_slots, idle, stream
 from corpus import CALIBRATION
 
 PROMPTS = [PERFORMANCE[0][1], PERFORMANCE[1][1], CALIBRATION[0], CALIBRATION[2]]
@@ -43,10 +43,9 @@ def main():
         report["models"] = models.json()
         model = report["models"]["data"][0]["id"]
         initial = report["initial_stats"] = idle(client)
-        assert initial["moe_residency"]["cache_slots"] == 1706
-        assert initial["moe_residency"]["resident_experts"] == 0
+        report["cache_slots"] = cache_slots(client)
+        assert report["cache_slots"] == 1706
         assert initial["kv"]["total_pages"] == 4096
-        assert not initial["speculative"]["adaptive_enabled"] and not initial["speculative"]["reuse_enabled"]
         assert initial["speculative"]["enabled"] == (args.mode != "ar")
         assert initial["speculative"]["draft_residency"] == ("router" if args.mode == "router" else "off")
         assert initial["cuda_graph"]["enabled"] == (args.execution == "graph")

@@ -14,10 +14,8 @@ def semantic(row):
 def configuration(report):
     stats = report["initial_stats"]
     return {"model_root": report["models"]["data"][0]["root"], "context": stats["model"]["ctx"],
-            "kv_pages": stats["kv"]["total_pages"], "cache_slots": stats["moe_residency"]["cache_slots"],
-            "resident_experts": stats["moe_residency"]["resident_experts"],
-            "speculative": {key: stats["speculative"][key] for key in
-                            ("enabled", "draft_residency", "adaptive_enabled", "reuse_enabled")}}
+            "kv_pages": stats["kv"]["total_pages"], "cache_slots": report["cache_slots"],
+            "speculative": {key: stats["speculative"][key] for key in ("enabled", "draft_residency")}}
 
 
 def main():

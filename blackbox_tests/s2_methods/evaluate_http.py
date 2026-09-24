@@ -12,7 +12,7 @@ import time
 
 import httpx
 
-from corpus import CALIBRATION, PERFORMANCE, TASKS, coding_prompt
+from corpus import PERFORMANCE, TASKS, coding_prompt
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "self_speculative"))
 from test_serving import Server
@@ -83,7 +83,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("base_url")
     parser.add_argument("output", type=Path)
-    parser.add_argument("--part", choices=("evaluate", "calibrate", "draft-ablation"), default="evaluate")
+    parser.add_argument("--part", choices=("evaluate", "draft-ablation"), default="evaluate")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     report = {"part": args.part, "base_url": args.base_url, "batches": [], "quality": []}
@@ -121,24 +121,20 @@ def main():
             print(json.dumps({"label": label, "seconds": elapsed, "completion_tokens": tokens}), flush=True)
             return rows
 
-        if args.part == "calibrate":
-            for index, prompt in enumerate(CALIBRATION):
-                batch(f"calibration-{index}", [request(prompt)])
-        else:
-            batch("warmup", [request(PERFORMANCE[0][1], 64)] * 4)
-            limit = 64 if args.part == "draft-ablation" else 256
-            for repeat in range(2):
-                for name, prompt in PERFORMANCE:
-                    for concurrency in (1, 4):
-                        batch(f"performance-{repeat}-{name}-c{concurrency}", [request(prompt, limit)] * concurrency)
-            if args.part == "evaluate":
-                for offset in range(0, len(TASKS), 4):
-                    tasks = TASKS[offset:offset + 4]
-                    responses = batch(f"quality-{offset // 4}", [request(coding_prompt(task), ignore_eos=False) for task in tasks])
-                    for task, response in zip(tasks, responses):
-                        report["quality"].append({"task": task["name"], **judge(task, response, args.output)})
-                report["quality_passed"] = sum(row["passed"] for row in report["quality"])
-                report["quality_total"] = len(TASKS)
+        batch("warmup", [request(PERFORMANCE[0][1], 64)] * 4)
+        limit = 64 if args.part == "draft-ablation" else 256
+        for repeat in range(2):
+            for name, prompt in PERFORMANCE:
+                for concurrency in (1, 4):
+                    batch(f"performance-{repeat}-{name}-c{concurrency}", [request(prompt, limit)] * concurrency)
+        if args.part == "evaluate":
+            for offset in range(0, len(TASKS), 4):
+                tasks = TASKS[offset:offset + 4]
+                responses = batch(f"quality-{offset // 4}", [request(coding_prompt(task), ignore_eos=False) for task in tasks])
+                for task, response in zip(tasks, responses):
+                    report["quality"].append({"task": task["name"], **judge(task, response, args.output)})
+            report["quality_passed"] = sum(row["passed"] for row in report["quality"])
+            report["quality_total"] = len(TASKS)
     (args.output / "http.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
     print(json.dumps({"output": str(args.output), "quality_passed": report.get("quality_passed")}), flush=True)
 

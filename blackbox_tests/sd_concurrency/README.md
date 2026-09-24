@@ -4,8 +4,8 @@ Only the coordinator starts services. Use Qwen3-30B-A3B BF16, context1024,
 prefill512, KV4096,1706 dynamic expert slots, maximum running requests32,
 legacy scheduling and the same synchronous execution setting for every mode.
 Compare AR, ordinary SD and router SD, each with eager/Graph32. SD uses k3 and
-at most4 draft steps; permanent residency, adaptive draft and verify reuse stay
-off. Record the complete public command for every fresh service.
+at most4 draft steps, with the three boolean controls off. Record the complete
+public command for every fresh service.
 
 ## Frozen inputs and commands
 

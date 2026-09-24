@@ -13,7 +13,7 @@ import time
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "sd_graph"))
-from benchmark_http import FROZEN, TASKS, coding_prompt, idle, stats_delta, stream
+from benchmark_http import FROZEN, TASKS, cache_slots, coding_prompt, idle, stats_delta, stream
 from inputs import PROMPTS
 
 CONCURRENCIES = (4, 8, 16, 32)
@@ -87,12 +87,9 @@ def main():
             graph = after["cuda_graph"]
             checks = {
                 "resources": (after["model"]["ctx"] == 1024 and after["kv"]["total_pages"] == 4096
-                              and after["moe_residency"]["cache_slots"] == 1706
-                              and after["moe_residency"]["resident_experts"] == 0),
+                              and cache_slots(client) == 1706),
                 "features": (after["speculative"]["enabled"] == (args.mode != "ar")
-                             and after["speculative"]["draft_residency"] == ("router" if args.mode == "router" else "off")
-                             and not after["speculative"]["adaptive_enabled"]
-                             and not after["speculative"]["reuse_enabled"]),
+                             and after["speculative"]["draft_residency"] == ("router" if args.mode == "router" else "off")),
                 "execution": graph["enabled"] == (args.execution == "graph"),
                 "idle": after["requests"]["active"] == 0,
                 "responses": all(row["done"] and row["usage"] is not None

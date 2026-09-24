@@ -11,8 +11,6 @@ cases = [
     (["--speculative-draft-residency", "invalid"], ("invalid choice", "residency")),
     (["--speculative-draft-residency", "router", "--speculative-num-steps", "0"],
      ("residency", "speculative")),
-    (["--speculative-draft-residency", "affinity", "--speculative-num-steps", "0"],
-     ("residency", "speculative")),
 ]
 for flags, markers in cases:
     completed = subprocess.run(command + flags, env=dict(os.environ, CUDA_VISIBLE_DEVICES=""),

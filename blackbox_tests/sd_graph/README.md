@@ -2,9 +2,9 @@
 
 These clients read only public HTTP. The coordinator starts every GPU service.
 Use the real Qwen3-30B-A3B BF16 checkpoint, legacy scheduling, synchronous eager
-or Graph execution, identical context/prefill limits, KV4096, maximum running requests4,
-cache1706, and permanent residency/adaptive/verification reuse disabled.
-SD uses maximum4 draft steps and3 draft experts, with residency off or router.
+or Graph execution, identical context/prefill limits, KV4096, maximum running requests4
+and cache1706 (read from `/v1/cache/status`). SD uses maximum4 draft steps and3
+draft experts, with residency off or router and the three boolean controls off.
 The Graph switch is `--cuda-graph-max-bs 0` or `4`. Record the full command.
 
 ## Current acceptance contract
