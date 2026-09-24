@@ -5,7 +5,7 @@ The existing `--cuda-graph-max-bs` controls this path. `0` keeps eager execution
 `--max-running-requests 32` is set, including all intermediate tail batches.
 The capture limit is the smaller of these two settings and 32. Supported SD
 configurations are single-GPU Qwen3 MoE BF16 with the offload backend, FlashInfer attention,
-page size 1, legacy scheduling, K=3, and at most eight proposed tokens. Draft
+page size 1, legacy scheduling, any draft K, and at most eight proposed tokens. Draft
 residency may be `off` or `router`. Permanent resident lists,
 approximate verification reuse, affinity and quantized experts keep their existing
 eager behavior. The three new [adaptive/loading/prefetch options](adaptive-loading.md)

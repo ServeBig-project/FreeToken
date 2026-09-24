@@ -122,9 +122,8 @@ class EngineConfig:
             if self.speculative_draft_residency not in ("off", "router"):
                 raise ValueError("new SD controls support draft residency off or router")
             if self.cuda_graph_max_bs != 0 and self.cuda_graph_bs != []:
-                if (self.speculative_draft_experts != 3 or self.attention_backend not in ("auto", "fi")
-                        or self.page_size != 1):
-                    raise ValueError("SD Graph requires draft k3, FlashInfer attention and page size 1; use eager otherwise")
+                if self.attention_backend not in ("auto", "fi") or self.page_size != 1:
+                    raise ValueError("SD Graph requires FlashInfer attention and page size 1; use eager otherwise")
         if self.speculative_reuse_expert_cap < 0:
             raise ValueError("speculative_reuse_expert_cap must be >= 0")
         if self.speculative_reuse_expert_cap:
@@ -193,7 +192,7 @@ class EngineConfig:
     @property
     def speculative_graphs(self) -> bool:
         return bool(
-            0 < self.speculative_num_steps <= 8 and self.speculative_draft_experts == 3
+            0 < self.speculative_num_steps <= 8
             and self.speculative_draft_residency in ("off", "router")
             and not self.speculative_reuse_expert_cap
             and not self.resident_experts and not self.moe_expert_profile
