@@ -40,8 +40,7 @@ class StatsTracker:
         self.cuda_graph = {"enabled": False, "target_decode": 0, "draft": 0, "verify": 0,
                            "replay_shapes": [], "capture_seconds": 0.0, "extra_reserved_bytes": 0}
         self.speculative = {"draft_tokens": 0, "accepted_draft_tokens": 0, "verify_steps": 0,
-                            "reuse_changed_routes": 0, "residency_stops": 0,
-                            "draft_expert_loads": 0, "draft_expert_replacements": 0,
+                            "residency_stops": 0, "draft_expert_loads": 0,
                             "cost_ar_requests": 0, "cost_stopped_requests": 0,
                             "cost_probe_requests": 0, "cost_control_ms": 0.0,
                             "cost_samples": dict.fromkeys(("ar", "draft", "verify"), 0),
@@ -156,9 +155,6 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
     metadata arrives."""
     tr: StatsTracker = state.stats
     config = state.config
-    from .api_server import cache_geometry
-    cache_slots = cache_geometry(state)["moe_cache_size"]
-    resident_count = len(config.resident_experts)
     ready_at = getattr(state, "ready_at", None)
     uptime_s = max(0, int(time.monotonic() - ready_at)) if ready_at is not None else 0
     kv = (
@@ -192,17 +188,10 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
             "draft_load_missing_enabled": config.speculative_draft_load_missing,
             "verify_prefetch_enabled": config.speculative_verify_prefetch,
             "max_draft_steps": config.speculative_num_steps,
-            "reuse_enabled": bool(config.speculative_reuse_expert_cap),
             "draft_length_histogram": [0] * (config.speculative_num_steps + 1),
             **tr.speculative,
             "draft_residency": config.speculative_draft_residency,
             "draft_expert_loads": tr.speculative["draft_expert_loads"] if config.moe_collect_stats else None,
-            "draft_expert_replacements": tr.speculative["draft_expert_replacements"] if config.moe_collect_stats else None,
-        },
-        "moe_residency": {
-            "resident_experts": resident_count,
-            "cache_slots": cache_slots,
-            "temporary_slots": max(0, cache_slots - resident_count),
         },
         "throughput": {
             "decode_tps": round(tr.decode_tps(), 1),

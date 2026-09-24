@@ -4,8 +4,31 @@ The three new options are independent and default off:
 `--speculative-adaptive-cost`, `--speculative-draft-load-missing`, and
 `--speculative-verify-prefetch`. The supported target is single-GPU Qwen3 MoE
 BF16 with offload, legacy scheduling, and a draft ceiling of 1–8 tokens.
-They retain full target verification. Existing S2 adaptive/reuse and fixed
-resident lists remain separate baselines, outside these combinations.
+They retain full target verification.
+
+## Drafting with already-cached experts
+
+`--speculative-draft-residency {off,router}` defaults to `off`, where drafting
+selects the top K of the original router scores and loads missing experts on
+demand. `router` requires SD and chooses K distinct experts by original router
+score among experts currently present in the GPU cache. Their original router
+probabilities supply the mixture weights, with the checkpoint's usual
+normalization. For `--moe-backend fused`, all experts are resident, so `router`
+behaves like ordinary draft routing.
+
+Without `--speculative-draft-load-missing`, every layer must hold at least K
+cached experts before a draft round. Otherwise all requests that could still
+draft in that batch use ordinary target generation for that round. No experts are
+reserved or loaded to make the check pass; drafting performs zero expert loads,
+so its available set stays valid for the whole round. Ordinary generation,
+prefill and target verification keep their routing and loading behavior.
+
+`/v1/stats.speculative` reports `draft_residency` and `residency_stops`, the
+number of request rounds refused drafting because of that shared shortage. With
+`--moe-collect-stats`, `draft_expert_loads` counts actual expert-row loads during
+draft execution, including the `off` mode; it is `null` when collection is
+disabled. Repeated loads of the same expert count again; duplicate routes sharing
+one load do not.
 
 ## Cache-first drafting with missing experts
 
@@ -18,7 +41,7 @@ scores for the chosen experts. The existing cache admits and copies each distinc
 missing expert once for that layer's whole batch.
 
 This option removes the whole-batch insufficient-residency fallback, without
-requiring fixed resident experts or extra expert slots. The off setting preserves
+requiring extra expert slots. The off setting preserves
 the previous strict cache-only behavior. Cost decisions and request/KV limits are
 separate from `residency_stops`.
 

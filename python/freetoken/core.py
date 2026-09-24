@@ -121,10 +121,8 @@ class Batch:
     decode_size: int = 0
     draft_experts: int | None = None
     draft_available_experts: torch.Tensor | None = None
-    draft_replacement_masks: list[torch.Tensor] | None = None
     is_speculative_verify: bool = False
     num_token_non_padded: torch.Tensor | None = None
-    reuse_offsets: torch.Tensor | None = None
     # these fields should be set by scheduler
     input_ids: torch.Tensor = field(init=False)
     positions: torch.Tensor = field(init=False)
@@ -207,13 +205,8 @@ class Context:
     attn_backend: BaseAttnBackend = field(init=False)
     moe_backend: BaseMoeBackend = field(init=False)
     moe_offload_cache: OffloadMoeCache | None = None
-    expert_counts: torch.Tensor | None = None
-    draft_residency: str = "off"
     draft_load_missing: bool = False
     speculative_cost: SpeculativeCost | None = None
-    draft_affinity: torch.Tensor | None = None
-    reuse_expert_cap: int = 0
-    reuse_changed_routes: torch.Tensor | None = None
     kv_cache: BaseKVCachePool = field(init=False)
     # Per-request recurrent state for GatedDeltaNet layers; set by the engine for
     # hybrid linear-attention models, otherwise None.

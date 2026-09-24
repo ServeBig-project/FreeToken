@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
-from math import ceil
 from typing import TYPE_CHECKING, List
 
 import torch
@@ -26,9 +25,6 @@ class EngineConfig:
     speculative_adaptive_cost: bool = False
     speculative_draft_load_missing: bool = False
     speculative_verify_prefetch: bool = False
-    moe_resident_experts: str | None = None
-    moe_expert_profile: str | None = None
-    speculative_reuse_expert_cap: int = 0
     attention_backend: str = "auto"
     moe_backend: str = "auto"
     # NVFP4 routed-expert GEMM backend (--nvfp4-backend): auto|marlin|flashinfer|triton.
@@ -98,8 +94,8 @@ class EngineConfig:
     num_token_override: int | None = None
 
     def __post_init__(self) -> None:
-        if self.speculative_draft_residency not in ("off", "router", "affinity"):
-            raise ValueError("speculative_draft_residency must be off, router, or affinity")
+        if self.speculative_draft_residency not in ("off", "router"):
+            raise ValueError("speculative_draft_residency must be off or router")
         if self.speculative_draft_residency != "off" and self.speculative_num_steps <= 0:
             raise ValueError("--speculative-draft-residency requires SD enabled")
         if self.speculative_num_steps < 0:
@@ -112,27 +108,15 @@ class EngineConfig:
                 raise ValueError("SD cost, missing-expert loading and prefetch require 1..8 draft steps")
             if self.speculative_draft_load_missing and self.speculative_draft_residency != "router":
                 raise ValueError("--speculative-draft-load-missing requires --speculative-draft-residency router")
-            if self.speculative_reuse_expert_cap or self.moe_resident_experts:
-                raise ValueError("new SD controls require approximate verify and fixed residency disabled")
             model = self.model_config
             if (self.moe_backend not in ("auto", "offload") or self.dtype != torch.bfloat16
                     or model.expert_quant != "none" or self.nowag_expert_path
                     or model.moe_weight_format not in (None, "bf16")):
                 raise ValueError("new SD controls require BF16 experts with --moe-backend offload")
-            if self.speculative_draft_residency not in ("off", "router"):
-                raise ValueError("new SD controls support draft residency off or router")
             if self.cuda_graph_max_bs != 0 and self.cuda_graph_bs != []:
                 if self.attention_backend not in ("auto", "fi") or self.page_size != 1:
                     raise ValueError("SD Graph requires FlashInfer attention and page size 1; use eager otherwise")
-        if self.speculative_reuse_expert_cap < 0:
-            raise ValueError("speculative_reuse_expert_cap must be >= 0")
-        if self.speculative_reuse_expert_cap:
-            if not self.speculative_num_steps:
-                raise ValueError("--speculative-reuse-expert-cap requires SD enabled")
-            model = self.model_config
-            if not model.num_experts_per_tok <= self.speculative_reuse_expert_cap <= model.num_experts:
-                raise ValueError("reuse expert cap must be between target top-k and experts per layer")
-        if not (self.speculative_num_steps or self.moe_resident_experts or self.moe_expert_profile):
+        if not self.speculative_num_steps:
             return
         if self.tp_info.size != 1:
             raise ValueError("self-speculative decoding requires a single GPU (tp_size=1)")
@@ -140,7 +124,7 @@ class EngineConfig:
             raise ValueError("self-speculative decoding requires --batching-policy legacy")
         if self.hf_config.architectures[0] != "Qwen3MoeForCausalLM":
             raise ValueError("self-speculative decoding currently supports only Qwen3 MoE")
-        if self.speculative_num_steps and self.speculative_draft_experts > self.model_config.num_experts_per_tok:
+        if self.speculative_draft_experts > self.model_config.num_experts_per_tok:
             raise ValueError(
                 "speculative_draft_experts must not exceed the target's experts per token "
                 f"({self.model_config.num_experts_per_tok})"
@@ -150,34 +134,6 @@ class EngineConfig:
                 "self-speculative decoding requires GPU expert execution; use "
                 "--moe-backend offload or fused without --moe-cpu-layers"
             )
-        if self.moe_expert_profile and self.speculative_num_steps:
-            raise ValueError("--moe-expert-profile requires ordinary target serving (SD disabled)")
-        if self.speculative_draft_residency == "affinity" and self.moe_backend != "fused":
-            model = self.model_config
-            if (self.nowag_expert_path or model.expert_quant != "none"
-                    or model.moe_weight_format not in (None, "bf16")):
-                raise ValueError("affinity draft residency requires unquantized floating-point expert weights")
-        if self.moe_resident_experts:
-            if self.moe_backend == "fused":
-                raise ValueError("fused experts are already resident; omit --moe-resident-experts")
-            from freetoken.moe.profile import validate_resident_capacity
-            count = len(self.resident_experts)
-            model = self.model_config
-            if not self.moe_cache_auto:
-                size = self.moe_cache_size
-                if self.moe_cache_rate is not None:
-                    size = ceil(model.num_moe_layers * model.num_experts * self.moe_cache_rate)
-                if size or self.moe_cache_rate is not None:
-                    validate_resident_capacity(size, model.num_experts, count, self.moe_prefill_overlap)
-
-    @cached_property
-    def resident_experts(self) -> tuple[tuple[int, int], ...]:
-        if self.moe_resident_experts is None:
-            return ()
-        from freetoken.moe.profile import load_resident_experts
-        return load_resident_experts(
-            self.moe_resident_experts, self.model_config.num_moe_layers, self.model_config.num_experts
-        )
 
     @cached_property
     def hf_config(self):
@@ -193,9 +149,6 @@ class EngineConfig:
     def speculative_graphs(self) -> bool:
         return bool(
             0 < self.speculative_num_steps <= 8
-            and self.speculative_draft_residency in ("off", "router")
-            and not self.speculative_reuse_expert_cap
-            and not self.resident_experts and not self.moe_expert_profile
             and self.dtype == torch.bfloat16 and self.model_config.model_type == "qwen3_moe"
             and self.model_config.expert_quant == "none" and not self.nowag_expert_path
             and self.model_config.moe_weight_format in (None, "bf16")

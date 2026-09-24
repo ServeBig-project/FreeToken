@@ -225,9 +225,6 @@ class Scheduler(SchedulerIOMixin):
         """Called when the scheduler is idle to perform background tasks."""
         logger.info_rank0("Scheduler is idle, waiting for new reqs...")
         self.cache_manager.check_integrity()
-        if self.config.moe_expert_profile:
-            from freetoken.moe.profile import write_profile
-            write_profile(self.config.moe_expert_profile, self.engine.ctx.expert_counts)
         moe_cache = self.engine.moe_offload_cache
         if moe_cache is not None and moe_cache.collect_stats:
             stats = moe_cache.cumulative_stats_snapshot()
@@ -1319,14 +1316,7 @@ class Scheduler(SchedulerIOMixin):
         # Polymorphic free: the DSV4 manager returns the request's window pages + cmp/idx blocks
         # to their tier free-lists; the generic manager frees its KV pages (it reads
         # page_table[req.table_idx], so free the table entry after).
-        # Approximate verification KV belongs to this request's draft grouping,
-        # so only its ordinary prompt KV may become shared history.
-        if self.config.speculative_reuse_expert_cap:
-            self.cache_manager.cache_req(
-                req, finished=True, max_prefix_len=req.max_device_len - req.output_len
-            )
-        else:
-            self.cache_manager.cache_req(req, finished=True)
+        self.cache_manager.cache_req(req, finished=True)
         self.table_manager.free(req.table_idx)
         req.table_idx = -1
 

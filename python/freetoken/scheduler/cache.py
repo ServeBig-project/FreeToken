@@ -616,7 +616,7 @@ class CacheManager:
         if reservation is not None:
             self._free_decode_reservation(reservation)
 
-    def cache_req(self, req: Req, *, finished: bool, max_prefix_len: int | None = None) -> None:
+    def cache_req(self, req: Req, *, finished: bool) -> None:
         self._cancel_decode_reservation(req)
         if self.is_swa:
             return self._cache_req_swa(req, finished=finished)
@@ -646,10 +646,9 @@ class CacheManager:
                     self._free_swa(tail)
                 self._free(tail)
             return
-        insert_len = req.cached_len if max_prefix_len is None else min(req.cached_len, max_prefix_len)
-        insert_ids = req.input_ids[:insert_len]
+        insert_ids = req.input_ids[: req.cached_len]
         cached_len, new_handle = self.prefix_cache.insert_prefix(
-            insert_ids, page_indices[:insert_len], cache_group=req.cache_group)
+            insert_ids, page_indices, cache_group=req.cache_group)
         # unlock until all operations on handle is done
         self.unlock(old_handle)
         # this part is already in the prefix cache, free it. A naive-SWA request (swa_paged, no

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from copy import copy
-from itertools import accumulate
 from typing import TYPE_CHECKING, Callable
 
 import torch
@@ -45,8 +44,8 @@ class SpeculativeDecoder:
         self.verify_steps = 0
         self.residency_stops = 0
         self.draft_length_histogram = [0] * (engine.config.speculative_num_steps + 1)
-        self.draft_stats = (
-            torch.zeros(2, dtype=torch.int64, device=engine.device)
+        self.draft_loads = (
+            torch.zeros((), dtype=torch.int64, device=engine.device)
             if engine.config.moe_collect_stats else None
         )
 
@@ -57,14 +56,9 @@ class SpeculativeDecoder:
             "verify_steps": self.verify_steps,
             "residency_stops": self.residency_stops,
             "draft_length_histogram": list(self.draft_length_histogram),
-            "reuse_changed_routes": (
-                int(self.engine.ctx.reuse_changed_routes.item())
-                if self.engine.ctx.reuse_changed_routes is not None else 0
-            ),
         }
-        if self.draft_stats is not None:
-            loads, replacements = self.draft_stats.tolist()
-            result.update(draft_expert_loads=loads, draft_expert_replacements=replacements)
+        if self.draft_loads is not None:
+            result["draft_expert_loads"] = int(self.draft_loads.item())
         if self.cost is not None:
             result.update(self.cost.snapshot())
         return result
@@ -125,9 +119,8 @@ class SpeculativeDecoder:
             lengths = [min(length, limit) for length in lengths]
         loads_before = (
             expert_cache.lru_stats[:, Stat.MISS].sum()
-            if self.draft_stats is not None and expert_cache is not None else None
+            if self.draft_loads is not None and expert_cache is not None else None
         )
-        replacement_masks = [] if self.draft_stats is not None and engine.ctx.draft_affinity is not None else None
         starts = [req.device_len for req in batch.reqs]
         ends = [start + length for start, length in zip(starts, lengths, strict=True)]
         views = [copy(req) for req in batch.reqs]
@@ -152,7 +145,6 @@ class SpeculativeDecoder:
                 draft_reqs, decode_size=len(draft_reqs),
                 draft_experts=engine.config.speculative_draft_experts,
                 draft_available_experts=available,
-                draft_replacement_masks=replacement_masks,
             )
             logits = self._logits(draft)
             probs = sampler.probabilities(logits, sampler.prepare(draft))
@@ -171,20 +163,13 @@ class SpeculativeDecoder:
         self.draft_tokens += sum(lengths)
         self._record_lengths(lengths)
         if loads_before is not None:
-            self.draft_stats[0] += expert_cache.lru_stats[:, Stat.MISS].sum() - loads_before
-        if replacement_masks:
-            self.draft_stats[1] += torch.cat([mask.flatten() for mask in replacement_masks]).sum()
+            self.draft_loads += expert_cache.lru_stats[:, Stat.MISS].sum() - loads_before
 
         # Target attention overwrites every provisional query, layer by layer,
         # while retaining only the already verified prefix before the round.
         for req, start, length in zip(views, starts, lengths, strict=True):
             req.cached_len, req.device_len = start - 1, start + length
         verify = Batch(views, is_speculative_verify=True)
-        if engine.ctx.reuse_expert_cap:
-            verify.reuse_offsets = torch.tensor(
-                [0, *accumulate(length + 1 for length in lengths)],
-                dtype=torch.int32, device=engine.device,
-            )
         logits = self._logits(verify)
         target_probs = sampler.probabilities(
             logits, sampler.prepare(verify, repeats=[length + 1 for length in lengths])

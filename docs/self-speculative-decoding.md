@@ -6,8 +6,7 @@ This phase adds self-assisted speculative decoding to FreeToken for the
 Qwen3 MoE architecture, with Qwen3-30B-A3B as the real-model acceptance target,
 on one RTX 4090. Draft and target use the same checkpoint. Drafting activates
 fewer routed experts; target verification retains the checkpoint's original
-routing. This is the serving foundation for S2-MoE, before its adaptive drafting
-and approximate target-routing changes.
+routing.
 
 The first version includes stochastic sampling, concurrent requests, streaming,
 request termination, and cancellation. It is not a greedy-only demonstration.
@@ -18,8 +17,9 @@ startup with a clear explanation when speculation is enabled.
 Enabled speculation supports GPU-resident experts (`--moe-backend fused`) and
 GPU expert execution with CPU weight offload (`--moe-backend offload`). `auto`
 resolves to `offload`. CPU/hybrid expert execution and `--moe-cpu-layers` are
-unsupported and fail at startup. This version uses eager execution and
-synchronous scheduling; requests are still batched and can run concurrently.
+unsupported and fail at startup. Scheduling is synchronous while speculation is
+enabled; requests are still batched and can run concurrently. CUDA Graph
+execution is described in [speculative CUDA graphs](sd-cuda-graphs.md).
 
 ## Public interface
 

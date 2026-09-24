@@ -6,7 +6,6 @@ from freetoken.layers import BaseOP, LinearReplicated, make_moe_layer
 from freetoken.core import get_global_ctx
 from freetoken.moe.fused import fused_topk
 from freetoken.moe.resident_draft import cached_draft_routing
-from freetoken.kernel.triton.moe_reuse import reuse_routing
 
 if TYPE_CHECKING:
     import torch
@@ -33,35 +32,18 @@ class Qwen3MoeMLP(BaseOP):
         if draft_experts is not None and ctx.speculative_cost is not None:
             _, predicted = fused_topk(hidden_states, router_logits, self.experts.top_k, self.experts.renormalize)
             ctx.speculative_cost.record_prediction(self.layer_id, predicted, router_logits)
-        reuse = ctx.reuse_expert_cap and ctx.batch.is_speculative_verify
-        if draft_experts is not None or ctx.expert_counts is not None or reuse:
+        if draft_experts is not None:
             available = (ctx.batch.draft_available_experts[self.layer_id]
                          if ctx.batch.draft_available_experts is not None else None)
-            if draft_experts is not None and ctx.draft_load_missing:
+            if ctx.draft_load_missing:
                 available = ctx.moe_offload_cache.slot_for_id[self.layer_id] >= 0
             if available is not None:
-                weights, ids, missing = cached_draft_routing(
+                weights, ids = cached_draft_routing(
                     hidden_states, router_logits, draft_experts, self.experts.renormalize,
-                    available,
-                    ctx.draft_affinity[self.layer_id] if ctx.draft_residency == "affinity" else None,
-                    load_missing=ctx.draft_load_missing,
+                    available, load_missing=ctx.draft_load_missing,
                 )
-                if ctx.batch.draft_replacement_masks is not None and missing is not None:
-                    ctx.batch.draft_replacement_masks.append(missing)
             else:
-                weights, ids = fused_topk(
-                    hidden_states, router_logits, draft_experts or self.experts.top_k, self.experts.renormalize
-                )
-            if reuse:
-                weights, ids = reuse_routing(
-                    router_logits, weights, ids, ctx.batch.reuse_offsets,
-                    ctx.reuse_expert_cap, self.experts.renormalize, ctx.reuse_changed_routes,
-                )
-            if ctx.expert_counts is not None:
-                import torch
-                ctx.expert_counts[self.layer_id].scatter_add_(
-                    0, ids.flatten().long(), torch.ones_like(ids.flatten(), dtype=torch.int64)
-                )
+                weights, ids = fused_topk(hidden_states, router_logits, draft_experts, self.experts.renormalize)
             return self.experts.routed_forward(hidden_states, weights, ids)
         final_hidden_states = self.experts.forward(
             hidden_states=hidden_states,

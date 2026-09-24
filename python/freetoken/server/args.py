@@ -262,13 +262,9 @@ def parse_args(
     )
 
     parser.add_argument(
-        "--speculative-draft-residency", choices=["off", "router", "affinity"],
+        "--speculative-draft-residency", choices=["off", "router"],
         default=ServerArgs.speculative_draft_residency,
-        help="Restrict drafting to current GPU experts by router score or full-weight L2 affinity.",
-    )
-    parser.add_argument(
-        "--speculative-reuse-expert-cap", type=int, default=ServerArgs.speculative_reuse_expert_cap,
-        help="Preferred experts per request/layer during verification; 0 disables approximate routing reuse.",
+        help="Restrict drafting to current GPU experts by router score.",
     )
     parser.add_argument(
         "--speculative-adaptive-cost", action="store_true",
@@ -281,14 +277,6 @@ def parse_args(
     parser.add_argument(
         "--speculative-verify-prefetch", action="store_true",
         help="Prefetch predicted verification experts into the shared cache while drafting.",
-    )
-    parser.add_argument(
-        "--moe-resident-experts", default=ServerArgs.moe_resident_experts,
-        help="JSON gpu_experts list kept resident inside the total offload cache budget.",
-    )
-    parser.add_argument(
-        "--moe-expert-profile", default=ServerArgs.moe_expert_profile,
-        help="Write ordinary target expert-use counts to JSON at idle (SD disabled, eager execution).",
     )
     parser.add_argument(
         "--max-seq-len-override",

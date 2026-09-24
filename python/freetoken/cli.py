@@ -67,7 +67,6 @@ def _print_bench_help(file: TextIO) -> None:
 
 Subcommands:
   bw   Benchmark CPU vs PCIe bandwidth and pick the MoE backend (hybrid/offload)
-  experts   Select resident experts from recorded target routing counts
 
 Use "ft bench <subcommand> --help" for subcommand-specific options.""",
         file=file,
@@ -86,9 +85,6 @@ def _run_bench(argv: list[str]) -> int:
         from freetoken.moe.benchbw import main
 
         return main(argv[1:], prog="ft bench bw")
-    if sub == "experts":
-        from freetoken.moe.profile import main
-        return main(argv[1:])
     print(f"unknown ft bench subcommand: {sub}", file=sys.stderr)
     _print_bench_help(sys.stderr)
     return 2
