@@ -40,7 +40,7 @@ class StatsTracker:
         self.cuda_graph = {"enabled": False, "target_decode": 0, "draft": 0, "verify": 0,
                            "replay_shapes": [], "capture_seconds": 0.0, "extra_reserved_bytes": 0}
         self.speculative = {"draft_tokens": 0, "accepted_draft_tokens": 0, "verify_steps": 0,
-                            "adaptive_stops": 0, "reuse_changed_routes": 0, "residency_stops": 0,
+                            "reuse_changed_routes": 0, "residency_stops": 0,
                             "draft_expert_loads": 0, "draft_expert_replacements": 0,
                             "cost_ar_requests": 0, "cost_stopped_requests": 0,
                             "cost_probe_requests": 0, "cost_control_ms": 0.0,
@@ -188,7 +188,6 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
         "cuda_graph": tr.cuda_graph,
         "speculative": {
             "enabled": bool(getattr(config, "speculative_num_steps", 0)),
-            "adaptive_enabled": bool(config.speculative_adaptive_profile),
             "adaptive_cost_enabled": config.speculative_adaptive_cost,
             "draft_load_missing_enabled": config.speculative_draft_load_missing,
             "verify_prefetch_enabled": config.speculative_verify_prefetch,

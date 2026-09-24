@@ -120,7 +120,6 @@ class Batch:
     # only a decode-only batch is eligible for the specialized decode/CUDA-graph path.
     decode_size: int = 0
     draft_experts: int | None = None
-    draft_routes: torch.Tensor | None = None
     draft_available_experts: torch.Tensor | None = None
     draft_replacement_masks: list[torch.Tensor] | None = None
     is_speculative_verify: bool = False

@@ -271,10 +271,6 @@ def parse_args(
         help="Preferred experts per request/layer during verification; 0 disables approximate routing reuse.",
     )
     parser.add_argument(
-        "--speculative-adaptive-profile", default=ServerArgs.speculative_adaptive_profile,
-        help="JSON with measured target/draft milliseconds and expert bandwidth GiB/s; enables cost-aware expansion.",
-    )
-    parser.add_argument(
         "--speculative-adaptive-cost", action="store_true",
         help="Use measured costs and accepted prefixes to decide after each draft step whether to continue.",
     )

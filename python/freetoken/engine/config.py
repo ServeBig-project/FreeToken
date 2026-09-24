@@ -28,7 +28,6 @@ class EngineConfig:
     speculative_verify_prefetch: bool = False
     moe_resident_experts: str | None = None
     moe_expert_profile: str | None = None
-    speculative_adaptive_profile: str | None = None
     speculative_reuse_expert_cap: int = 0
     attention_backend: str = "auto"
     moe_backend: str = "auto"
@@ -113,8 +112,8 @@ class EngineConfig:
                 raise ValueError("SD cost, missing-expert loading and prefetch require 1..8 draft steps")
             if self.speculative_draft_load_missing and self.speculative_draft_residency != "router":
                 raise ValueError("--speculative-draft-load-missing requires --speculative-draft-residency router")
-            if self.speculative_adaptive_profile or self.speculative_reuse_expert_cap or self.moe_resident_experts:
-                raise ValueError("new SD controls require legacy adaptive, approximate verify and fixed residency disabled")
+            if self.speculative_reuse_expert_cap or self.moe_resident_experts:
+                raise ValueError("new SD controls require approximate verify and fixed residency disabled")
             model = self.model_config
             if (self.moe_backend not in ("auto", "offload") or self.dtype != torch.bfloat16
                     or model.expert_quant != "none" or self.nowag_expert_path
@@ -134,10 +133,6 @@ class EngineConfig:
             model = self.model_config
             if not model.num_experts_per_tok <= self.speculative_reuse_expert_cap <= model.num_experts:
                 raise ValueError("reuse expert cap must be between target top-k and experts per layer")
-        if self.speculative_adaptive_profile:
-            if not self.speculative_num_steps:
-                raise ValueError("--speculative-adaptive-profile requires SD enabled")
-            self.draft_cost
         if not (self.speculative_num_steps or self.moe_resident_experts or self.moe_expert_profile):
             return
         if self.tp_info.size != 1:
@@ -177,13 +172,6 @@ class EngineConfig:
                     validate_resident_capacity(size, model.num_experts, count, self.moe_prefill_overlap)
 
     @cached_property
-    def draft_cost(self) -> dict[str, float] | None:
-        if self.speculative_adaptive_profile is None:
-            return None
-        from .speculative_policy import load_draft_cost
-        return load_draft_cost(self.speculative_adaptive_profile)
-
-    @cached_property
     def resident_experts(self) -> tuple[tuple[int, int], ...]:
         if self.moe_resident_experts is None:
             return ()
@@ -207,7 +195,7 @@ class EngineConfig:
         return bool(
             0 < self.speculative_num_steps <= 8 and self.speculative_draft_experts == 3
             and self.speculative_draft_residency in ("off", "router")
-            and not self.speculative_adaptive_profile and not self.speculative_reuse_expert_cap
+            and not self.speculative_reuse_expert_cap
             and not self.resident_experts and not self.moe_expert_profile
             and self.dtype == torch.bfloat16 and self.model_config.model_type == "qwen3_moe"
             and self.model_config.expert_quant == "none" and not self.nowag_expert_path

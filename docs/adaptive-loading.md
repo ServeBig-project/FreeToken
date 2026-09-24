@@ -85,8 +85,7 @@ Additional `/v1/stats.speculative` counters are cumulative:
 - `cost_transfer_predictions`: predicted expected expert loads, actual distinct
   loads and absolute error, separately for AR, draft and verification.
 
-These measurements do not depend on `--moe-collect-stats`. The new controller
-cannot be combined with the older `--speculative-adaptive-profile` policy.
+These measurements do not depend on `--moe-collect-stats`.
 
 ## Predicted verification prefetch
 

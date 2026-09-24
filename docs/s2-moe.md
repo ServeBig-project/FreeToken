@@ -52,30 +52,8 @@ remaining slots are empty.
 
 ## Cost-aware draft length
 
-`--speculative-adaptive-profile cost.json` enables adaptive expansion. SD must be
-enabled; offload and fused are supported. All three values must be finite and
-strictly positive, measured for this machine, model, cache budget and workload:
-
-```json
-{"target_token_ms": 45.0, "draft_step_ms": 27.0, "expert_bandwidth_gib_s": 24.419}
-```
-
-The numbers above illustrate units, not a recommended calibration. GiB means
-2^30 bytes. The existing `--speculative-num-steps` remains the maximum length.
-Resource and output boundaries may shorten a round or require ordinary decoding.
-
-The policy uses the existing draft prefix's cumulative confidence, newly observed
-non-resident experts and measured draft cost before drawing the next proposal.
-After the first candidate, if prefix confidence times `target_token_ms` is less
-than `draft_step_ms`, that request stops before the next draft model forward.
-Other requests continue, with the routing-cost decision applied when still needed.
-It never removes a sampled candidate merely because its cost looks poor. At least
-the first candidate is kept when resources permit. With verification reuse off,
-the original target's sampling contract remains in force.
-
-The `speculative` stats object adds `adaptive_enabled` and `adaptive_stops`.
-The latter counts request-rounds stopped by the cost decision, not rounds ended
-by token/context/cache limits.
+Draft length is chosen online by `--speculative-adaptive-cost`; see
+[adaptive speculative serving](adaptive-loading.md).
 
 ## Drafting with already-cached experts
 
