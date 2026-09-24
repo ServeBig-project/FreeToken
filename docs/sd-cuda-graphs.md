@@ -53,8 +53,7 @@ by `capture_seconds` and `extra_reserved_bytes` below.
 Only actual replays increment the counters. Internal startup/capture warmups do
 not count; ordinary HTTP warmup requests do. Counters survive cache rebuilds,
 while capture time and reserved-byte measurements describe the latest graph set.
-Eager execution reports disabled graphs and zero replay counters. Unsupported SD
-combinations retain their existing eager behavior without claiming graph execution.
+Eager execution reports disabled graphs and zero replay counters.
 
 FlashInfer graph/eager partitioning can produce different BF16 greedy outputs.
 The user accepts the quantified differences observed in this evaluation, with
