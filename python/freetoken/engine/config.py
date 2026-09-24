@@ -113,9 +113,6 @@ class EngineConfig:
                     or model.expert_quant != "none" or self.nowag_expert_path
                     or model.moe_weight_format not in (None, "bf16")):
                 raise ValueError("new SD controls require BF16 experts with --moe-backend offload")
-            if self.cuda_graph_max_bs != 0 and self.cuda_graph_bs != []:
-                if self.attention_backend not in ("auto", "fi") or self.page_size != 1:
-                    raise ValueError("SD Graph requires FlashInfer attention and page size 1; use eager otherwise")
         if not self.speculative_num_steps:
             return
         if self.tp_info.size != 1:

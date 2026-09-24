@@ -31,6 +31,22 @@ execution is described in [speculative CUDA graphs](sd-cuda-graphs.md).
   default `3`. With speculation enabled, `1 <= K <= target experts per token`.
   Equality is supported as an unchanged-drafter control.
 
+All speculative switches, their defaults and legal combinations:
+
+| Option | Default | Off / default behavior | Constraint |
+| --- | --- | --- | --- |
+| `--speculative-num-steps N` | `0` | ordinary serving | `N` is the draft ceiling; the three controls below and CUDA Graph need `1 <= N <= 8` |
+| `--speculative-draft-experts K` | `3` | — | `1 <= K <=` target experts per token; any K works with CUDA Graph |
+| `--speculative-draft-residency off\|router` | `off` | draft uses the original top-K and loads misses | `router`: only cached experts; see [adaptive serving](adaptive-loading.md) |
+| `--speculative-draft-load-missing` | off | `router` falls back to ordinary generation when a layer has fewer than K cached experts | requires `router` |
+| `--speculative-adaptive-cost` | off | every round drafts up to `N` | — |
+| `--speculative-verify-prefetch` | off | no prefetch | — |
+| `--cuda-graph-max-bs` | automatic | `0` runs speculation eagerly | SD Graph needs BF16 experts, `--moe-backend offload`, FlashInfer and page size 1; otherwise startup fails |
+
+The last three boolean controls require BF16 experts with `--moe-backend offload`
+and may be combined freely with each other, any K and either residency mode,
+except `--speculative-draft-load-missing` without `router`.
+
 Existing model, GPU, expert-cache, KV-cache, concurrency, and server arguments
 retain their meanings. The main model uses an already-supported checkpoint
 format; NoWAG is not required.

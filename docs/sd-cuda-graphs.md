@@ -6,8 +6,10 @@ The existing `--cuda-graph-max-bs` controls this path. `0` keeps eager execution
 The capture limit is the smaller of these two settings and 32. Supported SD
 configurations are single-GPU Qwen3 MoE BF16 with the offload backend, FlashInfer attention,
 page size 1, legacy scheduling, any draft K, and at most eight proposed tokens. Draft
-residency may be `off` or `router`. Quantized experts keep their existing
-eager behavior. The three new [adaptive/loading/prefetch options](adaptive-loading.md)
+residency may be `off` or `router`. With speculation enabled and CUDA Graph
+requested, any other configuration (for example fused or quantized experts)
+fails at startup instead of silently disabling graphs; pass
+`--cuda-graph-max-bs 0` to run it eagerly. The three new [adaptive/loading/prefetch options](adaptive-loading.md)
 support Graph execution, including early stopping and shorter verification tails.
 
 Target decode, one-token drafting, and multi-query verification use separate

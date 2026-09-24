@@ -1814,11 +1814,14 @@ def _adjust_config(config: EngineConfig):
         object.__setattr__(model_config, "moe_backend", config.moe_backend)
     object.__setattr__(model_config, "nvfp4_backend", config.nvfp4_backend)
 
-    if (config.speculative_adaptive_cost or config.speculative_draft_load_missing
-            or config.speculative_verify_prefetch):
-        if config.cuda_graph_max_bs and config.cuda_graph_bs != [] and not config.speculative_graphs:
-            raise ValueError("requested speculative CUDA Graph configuration is unsupported")
-    if config.speculative_graphs:
+    if config.speculative_num_steps and config.cuda_graph_max_bs != 0 and config.cuda_graph_bs != []:
+        # Never fall back silently: eager SD is far slower and would mislead comparisons.
+        if not config.speculative_graphs:
+            raise ValueError(
+                "SD CUDA Graph requires BF16 Qwen3 MoE experts with --moe-backend offload, "
+                "FlashInfer attention, page size 1 and at most 8 draft steps; "
+                "pass --cuda-graph-max-bs 0 to run speculation eagerly"
+            )
         limit = min(config.cuda_graph_max_bs, config.max_running_req, 32)
         override("cuda_graph_bs", list(range(1, limit + 1)))
     elif config.speculative_num_steps:
