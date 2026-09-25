@@ -89,3 +89,13 @@ Runtime depends on model throughput. The normal phase generates 288 output token
 resource checks add 80 tokens and two cache rebuilds. Lifecycle checks request at most
 718 tokens plus a stream closed after its first output; prompt input checks add 32 tokens.
 Request timeout defaults to 180 s.
+
+## Public CLI rejection
+
+`cli_contract.py --python SERVER_PYTHON --pythonpath CANDIDATE/python --gpu GPU_ID
+--port UNUSED_PORT --output REPORT.json` checks `serve --help` and four rejects:
+fused SD Graph and offload Graph N9, each on Qwen3 and Qwen3.6. Controls remain off.
+Each subprocess has a 30-second limit and its process group is removed on timeout.
+Use a visible, usable GPU: a missing-device error cannot satisfy the rejection check.
+The report preserves full argv, stdout, stderr, exit status and each asserted condition.
+These rejection checks do not launch any positive model-serving case.
