@@ -99,3 +99,18 @@ Each subprocess has a 30-second limit and its process group is removed on timeou
 Use a visible, usable GPU: a missing-device error cannot satisfy the rejection check.
 The report preserves full argv, stdout, stderr, exit status and each asserted condition.
 These rejection checks do not launch any positive model-serving case.
+
+## Optional long-context entry smoke
+
+`long_context.py --url URL --public-tokenizer CHECKPOINT --output REPORT.json` builds
+approximately 32,768 text tokens using the public tokenizer and requests 32 output tokens.
+Use the harness service configuration (context 262144, KV 400060, prefill 8192,
+max-running/Graph batch 12, 640 expert slots, N4/k3) with cache reporting enabled.
+The client does not launch or reconfigure the service. The source must retrieve the
+declared access word ORCHID; the complete response and its simple verdict are retained.
+Two follow-ups contain the returned text and compare actual long-prefix reuse against
+a fresh cache group. Each request records tokenizer count, HTTP prompt/output usage,
+complete text, and its own SD/draft/verify Graph counter deltas. Total requested output
+is 96 tokens; the default per-request timeout is 600 seconds. This probe confirms only
+the real long-context entry path and does not replace the full 58-request workload or
+change the eight fixed quality tasks.
