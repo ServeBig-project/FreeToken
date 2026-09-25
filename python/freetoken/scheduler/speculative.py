@@ -93,6 +93,10 @@ class SpeculativeDecoder:
     def forward(self, forward_input: ForwardInput) -> ForwardOutput:
         batch = forward_input.batch
         lengths = self._draft_lengths(batch)
+        limited = self.cache.limit_speculation(lengths)
+        if any(lengths) and not any(limited):
+            self.state_slot_stops += 1
+        lengths = limited
         if not any(lengths):
             self._record_lengths(lengths)
             return self.engine.forward_batch(batch, forward_input.sample_args)
@@ -126,14 +130,7 @@ class SpeculativeDecoder:
         starts = [req.device_len for req in batch.reqs]
         ends = [start + length for start, length in zip(starts, lengths, strict=True)]
         views = [copy(req) for req in batch.reqs]
-        state = None
-        if engine.linear_state_pool is not None:
-            state = engine.linear_state_pool.begin_speculation(
-                batch.reqs, views, engine.config.speculative_num_steps)
-            if state is None:
-                self.state_slot_stops += 1
-                self._record_lengths([0] * batch.size)
-                return engine.forward_batch(batch, forward_input.sample_args)
+        state = self.cache.begin_speculation(batch.reqs, views, lengths)
         # The ordinary decode query is already allocated. Reserve only the extra
         # span; the same physical slots serve drafting and target verification.
         for req, start, end in zip(views, starts, ends, strict=True):

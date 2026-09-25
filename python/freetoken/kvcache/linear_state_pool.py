@@ -77,11 +77,19 @@ class LinearStatePool:
         self.padding_slot = 0
         self._free_slots: list[int] = list(range(1, num_slots))
 
-    def begin_speculation(self, reqs, views, steps):
-        required = (steps + 2) * len(reqs)
-        if self.num_free_slots < required:
-            return None
-        return LinearSpeculativeState(self, reqs, views, steps)
+    @staticmethod
+    def speculative_size(lengths):
+        return sum(length + 1 + (length > 0) for length in lengths)
+
+    def limit_speculation(self, lengths, available):
+        for limit in range(max(lengths), 0, -1):
+            capped = [min(length, limit) for length in lengths]
+            if self.speculative_size(capped) <= available:
+                return capped
+        return [0] * len(lengths)
+
+    def begin_speculation(self, reqs, views, lengths):
+        return LinearSpeculativeState(self, reqs, views, lengths)
 
     def create_speculative_graphs(self, max_batch, query_width, device):
         from freetoken.attention.linear import FLASpeculativeGraphs
@@ -250,17 +258,19 @@ def _linear_pool_min_slots(config) -> int:
 class LinearSpeculativeState:
     """Own temporary draft/verify states until the host decides what output is retained."""
 
-    def __init__(self, pool, reqs, views, steps):
+    def __init__(self, pool, reqs, views, lengths):
         self.pool = pool
-        width = steps + 2
-        self.slots = pool.alloc(width * len(reqs))
-        self.states = []
-        for i, (req, view) in enumerate(zip(reqs, views, strict=True)):
+        self.slots = pool.alloc(pool.speculative_size(lengths))
+        self.states, offset = [], 0
+        for req, view, length in zip(reqs, views, lengths, strict=True):
             live = req.linear_slot_idx if req.linear_slot_idx is not None else req.table_idx
-            own = self.slots[i * width:(i + 1) * width]
-            pool.copy_from(live, own[0])
-            view.linear_slot_idx = own[0]
-            self.states.append((live, own[1:]))
+            if length:
+                pool.copy_from(live, self.slots[offset])
+                view.linear_slot_idx = self.slots[offset]
+                offset += 1
+            scratch = self.slots[offset:offset + length + 1]
+            self.states.append((live, scratch))
+            offset += length + 1
 
     def prepare_verify(self, batch, lengths):
         batch.speculative_states = [(live, scratch[:length + 1])

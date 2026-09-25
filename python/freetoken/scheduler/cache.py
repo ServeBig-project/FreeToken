@@ -558,6 +558,21 @@ class CacheManager:
             )
             offset += length
 
+    def limit_speculation(self, lengths):
+        pool = self.linear_state_pool
+        if pool is None:
+            return lengths
+        available = self.mamba_available_size if self.is_hybrid else pool.num_free_slots
+        return pool.limit_speculation(lengths, available)
+
+    def begin_speculation(self, reqs, views, lengths):
+        pool = self.linear_state_pool
+        if pool is None:
+            return None
+        if self.is_hybrid:
+            self.ensure_mamba_slots(pool.speculative_size(lengths))
+        return pool.begin_speculation(reqs, views, lengths)
+
     def release_speculative(self, req: Req, allocated_len: int) -> None:
         """Return whole provisional pages beyond the committed target KV."""
         start = div_ceil(req.cached_len, self.page_size) * self.page_size
