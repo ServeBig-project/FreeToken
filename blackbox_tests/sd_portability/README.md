@@ -70,6 +70,8 @@ answers may have a single Markdown code fence; the generated functions run in a
 separate Python process with a two-second limit. Each generation allows at most 256
 tokens. Public `geometry.reasoning.kwargs.off` fixes the checkpoint's thinking-off
 template settings identically for AR and SD; the EOS lifecycle check also uses them.
+`--only coding_alias` isolates that unchanged task; its own before/after counters must
+still demonstrate SD and, when requested, draft/verify Graph activity.
 
 The report records each task's complete request, output, usage and boolean score.
 Task failures are visible even in the AR reference. A previously correct task becoming

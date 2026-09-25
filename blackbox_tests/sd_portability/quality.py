@@ -75,7 +75,10 @@ def main():
     parser.add_argument("--model")
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--reference", help="AR or earlier report with identical task requests")
+    parser.add_argument("--only", nargs="+", choices=[task["id"] for task in TASKS],
+                        help="Run only selected tasks without changing their inputs or grading")
     args = parser.parse_args()
+    tasks = [task for task in TASKS if args.only is None or task["id"] in args.only]
     run = {"url": args.url.rstrip("/"), "timeout": args.timeout, "arguments": vars(args),
            "checks": [], "http": [], "tasks": {}, "reference_only": args.expected_steps == 0}
     started = time.monotonic()
@@ -92,7 +95,7 @@ def main():
               (args.expected_steps > 0))
         check(run, "effective Graph setting", before["cuda_graph"]["enabled"] ==
               (args.mode == "graph"))
-        for task in TASKS:
+        for task in tasks:
             body = {"model": model, "messages": [{"role": "user", "content": task["prompt"]}],
                     "chat_template_kwargs": off, "temperature": 0, "top_k": 1, "top_p": 1,
                     "max_tokens": 256, "ignore_eos": False, "stream": False,
@@ -131,13 +134,13 @@ def main():
     score = sum(task["grade"]["correct"] for task in run["tasks"].values())
     counts = {status: sum(item["status"] == status for item in run["checks"])
               for status in ("passed", "failed", "investigate", "uncovered", "regression")}
-    run["summary"] = {**counts, "task_correct": score, "task_total": len(TASKS)}
+    run["summary"] = {**counts, "task_correct": score, "task_total": len(tasks)}
     run["seconds"] = time.monotonic() - started
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(run, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps({"report": str(output), "seconds": run["seconds"], **run["summary"]}))
-    return (1 if counts["failed"] or counts["regression"] else 4 if score < len(TASKS) else
+    return (1 if counts["failed"] or counts["regression"] else 4 if score < len(tasks) else
             2 if counts["investigate"] else 3 if counts["uncovered"] else 0)
 
 
