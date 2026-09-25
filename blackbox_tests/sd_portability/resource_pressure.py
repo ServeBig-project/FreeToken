@@ -48,7 +48,7 @@ def wave(run, args, geometry):
     after = idle(run)
     run["geometry_after"] = same_geometry(run, "completed pool and budget remain fixed", geometry)
     sd_before, sd_after = before["speculative"], after["speculative"]
-    delta = {key: sd_after[key] - sd_before[key]
+    delta = {key: sd_after[key] - sd_before.get(key, 0)
              for key in ("draft_tokens", "accepted_draft_tokens", "verify_steps", "state_slot_stops")}
     histogram = [right - left for left, right in zip(sd_before["draft_length_histogram"],
                                                     sd_after["draft_length_histogram"])]
