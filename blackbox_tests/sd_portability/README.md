@@ -114,3 +114,27 @@ complete text, and its own SD/draft/verify Graph counter deltas. Total requested
 is 96 tokens; the default per-request timeout is 600 seconds. This probe confirms only
 the real long-context entry path and does not replace the full 58-request workload or
 change the eight fixed quality tasks.
+
+## State-capacity pressure
+
+`resource_pressure.py --url URL --state-slots N --output REPORT.json` uses Qwen3.6
+N8, Graph/B4, residency off and all three controls off. Choose N inside the returned
+`geometry.limits.mamba_slots` bounds and below the original capacity; max=0 is not a
+known upper bound. The client changes only the state capacity, keeps the existing
+budget, and restores the original geometry. Four simultaneous requests each demand
+256 final tokens without EOS or stop. Active-request and Graph-shape evidence must
+show batch four; public geometry is checked while active and after completion.
+
+Capacity evidence is either a positive `state_slot_stops` delta or more than 32
+short-draft rounds (lengths 1..7). For four N8 requests, the final eight output tokens
+of each request can account for at most 4×8 such rounds: each uncancelled generation
+or verification round makes output progress. The longer 256-token outputs allow
+shortening outside that tail window to be observed. Cost and residency shortening
+are disabled. This bound uses public output progress, not an internal slot formula.
+If neither event occurs, the path remains uncovered; it is not called a failure.
+
+On a separately started default naive N8/Graph/B4 server, use `--naive-default`
+instead of `--state-slots`. This mode never rebuilds or adds capacity. It requires
+all four outputs to complete through AR, explicit state-capacity stops, batch-four
+Graph activity, and unchanged capacity/budget. Each mode generates 1,024 tokens;
+request timeout defaults to 300 seconds. No token-similarity quality claim is made.
