@@ -386,6 +386,7 @@ class Engine:
             self.linear_state_pool = LinearStatePool(
                 group=linear_group,
                 num_slots=_linear_pool_num_slots(config),
+                fixed_slots=(config.max_running_req if config.cache_type != "hybrid_radix" else 0),
                 dtype=self.dtype,
                 device=self.device,
                 tp_size=config.tp_info.size,
@@ -438,7 +439,7 @@ class Engine:
             sampling_params=None,  # type: ignore
             cache_handle=None,  # type: ignore
         )
-        # padded/dummy rows index the GDN padding slot (0) so gather/scatter hits scratch.
+        # Dummy rows use the state pool's padding sink, never a live request slot.
         if self.linear_state_pool is not None:
             self.dummy_req.linear_slot_idx = self.linear_state_pool.padding_slot
         self.page_table[self.dummy_req.table_idx].fill_(num_tokens)  # point to dummy page

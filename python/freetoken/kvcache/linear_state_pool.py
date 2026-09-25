@@ -32,9 +32,9 @@ def _linear_local_dims(
 class LinearStatePool:
     """Per-request recurrent state (conv + SSM) for GatedDeltaNet layers.
 
-    Indexed by ``Req.table_idx`` (0..max_running_req), the same per-request slot the
-    page table uses, so the scheduler's existing admit/free of ``table_idx`` covers the
-    state's lifetime. One fixed slot per running request; no paging, no eviction.
+    Hybrid caching allocates live states and snapshots from one free list. Naive
+    caching reserves ``fixed_slots`` entries for table-indexed live states; only
+    entries beyond those and the padding sink may be allocated as scratch.
     """
 
     def __init__(
@@ -44,6 +44,7 @@ class LinearStatePool:
         dtype: torch.dtype,
         device: torch.device,
         tp_size: int | None = None,
+        fixed_slots: int = 0,
     ) -> None:
         if tp_size is None:
             tp_size = get_tp_info().size
@@ -70,12 +71,9 @@ class LinearStatePool:
         )
         self._local_index = {layer_id: i for i, layer_id in enumerate(group.layer_ids)}
 
-        # Free-list allocator over slots 1..num_slots-1 (slot 0 reserved as a padding sink,
-        # sglang MambaPool convention). Live working slots, ping-pong track slots, and
-        # radix-tree-donated snapshots are all drawn from this single free-list, so memory
-        # flows between them by demand. Unused by the op harness (which assigns slots by hand).
-        self.padding_slot = 0
-        self._free_slots: list[int] = list(range(1, num_slots))
+        # Naive live slots belong to TableManager, so they must never enter this allocator.
+        self.padding_slot = fixed_slots
+        self._free_slots: list[int] = list(range(self.padding_slot + 1, num_slots))
 
     @staticmethod
     def speculative_size(lengths):
@@ -109,10 +107,10 @@ class LinearStatePool:
         return [self._free_slots.pop() for _ in range(n)]
 
     def reclaim_all_slots(self) -> None:
-        """Restore the free-list to all non-padding slots. Idle-only: the caller (e.g. a
-        CacheManager rebuild that discards the tree owning donated snapshots) must guarantee no
+        """Restore slots after the fixed live slots and padding. Idle-only: the caller
+        (e.g. a CacheManager rebuild that discards donated snapshots) must guarantee no
         running request holds a slot, otherwise live state would be handed out twice."""
-        self._free_slots = list(range(1, self._num_slots))
+        self._free_slots = list(range(self.padding_slot + 1, self._num_slots))
 
     def rebuild(self, num_slots: int) -> None:
         """Reallocate the conv + recurrent state tensors for ``num_slots`` slots IN PLACE.
@@ -141,7 +139,7 @@ class LinearStatePool:
             device=device,
         )
         self._num_slots = num_slots
-        self._free_slots = list(range(1, num_slots))
+        self._free_slots = list(range(self.padding_slot + 1, num_slots))
 
     def free(self, slots) -> None:
         """Return slot ids to the free-list. Accepts an int, list, or 1-D tensor."""
