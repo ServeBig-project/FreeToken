@@ -124,6 +124,10 @@ known upper bound. The client changes only the state capacity, keeps the existin
 budget, and restores the original geometry. Four simultaneous requests each demand
 256 final tokens without EOS or stop. Active-request and Graph-shape evidence must
 show batch four; public geometry is checked while active and after completion.
+This capacity-pressure mode accepts radix or naive whenever the requested capacity
+is allowed by the public geometry and rebuild API. Restoration uses the capacity
+at client start: starting at 24 and testing 20 restores 24; the coordinator may then
+explicitly restore the server's original default of 4.
 
 Capacity evidence is either a positive `state_slot_stops` delta or more than 32
 short-draft rounds (lengths 1..7). For four N8 requests, the final eight output tokens
