@@ -4,7 +4,8 @@ The existing `--cuda-graph-max-bs` controls this path. `0` keeps eager execution
 `32` captures every real batch size from 1 through 32 when
 `--max-running-requests 32` is set, including all intermediate tail batches.
 The capture limit is the smaller of these two settings and 32. Supported SD
-configurations are single-GPU Qwen3 MoE BF16 with the offload backend, FlashInfer attention,
+configurations use the migrated Qwen3 or Qwen3.5/3.6 MoE components on a single GPU,
+BF16 experts with the offload backend, and FlashInfer attention,
 page size 1, legacy scheduling, any draft K, and at most eight proposed tokens. Draft
 residency may be `off` or `router`. With speculation enabled and CUDA Graph
 requested, any other configuration (for example fused or quantized experts)

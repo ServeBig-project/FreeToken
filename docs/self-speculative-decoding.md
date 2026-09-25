@@ -1,19 +1,23 @@
-# Self-speculative decoding: first complete serving version
+# Self-speculative decoding
 
 ## Scope
 
-This phase adds self-assisted speculative decoding to FreeToken for the
-Qwen3 MoE architecture, with Qwen3-30B-A3B as the real-model acceptance target,
-on one RTX 4090. Qwen3.5 MoE (Gated DeltaNet hybrids such as Qwen3.6-35B-A3B)
-is supported as described in [Gated DeltaNet models](#gated-deltanet-models). Draft and target use the same checkpoint. Drafting activates
-fewer routed experts; target verification retains the checkpoint's original
-routing.
+The shared SD runtime currently has migrations for Qwen3 MoE and Qwen3.5/3.6
+MoE (including Qwen3-30B-A3B and Qwen3.6-35B-A3B). Draft and target use the same
+checkpoint. Drafting activates fewer routed experts; target verification keeps
+the checkpoint's original routing. The component refactor's real-model acceptance
+is tracked separately; the presence of an implementation does not establish a new
+quality or performance result.
 
-The first version includes stochastic sampling, concurrent requests, streaming,
-request termination, and cancellation. It is not a greedy-only demonstration.
-The supported scheduling policy for this phase is `legacy`; unsupported model
-architectures, multi-GPU execution, and other policy combinations must fail at
-startup with a clear explanation when speculation is enabled.
+Support is determined by the configured routing, attention/state and expert
+execution components, not the checkpoint's name. A checkpoint using the migrated
+components reuses the same SD loop. Other model-owned routers or unsupported
+attention/state components fail with a component-specific startup error; this
+migration does not add their SD support.
+
+The interface includes stochastic sampling, concurrent requests, streaming,
+request termination and cancellation. The scheduling policy is `legacy`, on a
+single GPU. Unsupported policy/execution combinations fail at startup.
 
 Enabled speculation supports GPU-resident experts (`--moe-backend fused`) and
 GPU expert execution with CPU weight offload (`--moe-backend offload`). `auto`
@@ -121,27 +125,32 @@ for ordinary serving with the same checkpoint.
 
 ## Gated DeltaNet models
 
-Qwen3.5 MoE keeps a per-request recurrent state in every linear-attention layer,
-updated in place. A speculative round therefore cannot simply rewind a KV
-pointer after rejected drafts; it keeps one state per verified position:
+Qwen3.5/3.6 MoE has linear-attention state that must agree with the retained
+computed prefix. Drafting and verification keep temporary states. Only after
+EOS, stop strings and output limits determine the retained output is the matching
+state committed for continuation or prefix reuse. Cancellation discards the
+round's temporary state and keeps the previously committed prefix.
 
-- Before drafting, each request's live state (conv and recurrent, all GDN
-  layers) is copied to a scratch slot of the `LinearStatePool`; every draft
-  step reads and advances that copy, never the live slot.
-- Verification runs the single-token recurrence once per position instead of
-  the chunked prefill kernel. Position 0 starts from the live state, position
-  `j` from the scratch state written at `j-1`; each position writes its own
-  scratch slot.
-- After rejection sampling accepts `a` drafts, the live slot is overwritten
-  with the scratch state of position `a` (position 0 when every draft was
-  rejected: the token that was the ordinary decode query). The copy is
-  stream-ordered and the scratch slots return to the pool immediately.
+State allocation uses the current round's admitted lengths, including shorter
+calibration rounds and request tails. A request drafting N > 0 tokens needs N + 2
+temporary slots; a zero-draft tail in a verifying batch needs one. If capacity is
+short, free and evictable prefix-state slots are considered first, then the draft
+ceiling is shortened. If even one step for the current batch cannot fit, the
+whole batch uses ordinary generation. This does not split batches, enlarge the
+state pool or take memory from experts or KV.
 
-Cost: `speculative_num_steps + 2` pool slots per request in the round, i.e.
-`(N + 2) x bytes_per_slot` (Qwen3.6-35B-A3B: about 60 MiB per slot). When the
-pool has fewer free slots than that, the round falls back to ordinary decoding
-and `state_slot_stops` in the speculative statistics counts it; size the pool
-with `--max-running-requests` accordingly. Speculative CUDA graphs are not built
-for these models (they run eagerly); the draft routing and the three adaptive
-controls behave as on Qwen3 MoE and still need BF16 experts with
-`--moe-backend offload`. The legacy policy remains the only supported one.
+`state_slot_stops` counts whole-batch fallbacks due to state capacity.
+`draft_length_histogram` records actual request-round draft lengths, after all
+resource and cost decisions. The default state budget is not a guarantee that
+full concurrency can draft: protected prefixes also consume it. The existing idle
+cache rebuild can explicitly resize `num_mamba_slots`.
+
+With `--cache-type naive`, fixed live-state slots and the padding sink are
+reserved. The default naive pool has no temporary-state capacity, so SD legally
+falls back to ordinary generation; an explicitly enlarged pool can run SD.
+Rebuild and Graph capture preserve those ownership boundaries.
+
+Draft and verification CUDA Graphs are implemented for the migrated Gated
+DeltaNet models under the same BF16/offload/FlashInfer/page-size-1 conditions.
+Requesting unsupported Graph components fails at startup; explicit
+`--cuda-graph-max-bs 0` remains the way to choose eager execution.
