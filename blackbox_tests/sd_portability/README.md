@@ -6,6 +6,7 @@ server separately; the client neither imports server code nor launches a GPU pro
 ```sh
 python blackbox_tests/sd_portability/run_http.py \
   --url http://127.0.0.1:8000 --mode graph --expected-steps 3 \
+  --public-tokenizer /data1/lmcache_kv/models/Qwen3.6-35B-A3B \
   --resources --lifecycle --output reports/sd-http-qwen36-n3.json
 ```
 
@@ -43,13 +44,18 @@ the explicit HTTP 400 rejection of token-ID input followed by successful service
 `--only eos prompt-input` rechecks just these behaviors without repeating core,
 stop, cancellation or concurrent generation.
 
-`--only generated-prefix` tests the stricter generated-prefix requirement separately.
+`--only generated-prefix --public-tokenizer /path/to/checkpoint` tests the stricter
+generated-prefix requirement separately, using only public tokenizer data.
 Each stop/EOS/cancellation source gets a fresh cache group; the follow-up includes its
 retained output and is compared with the same complete request in another fresh group.
-Stop is placed after retained text, and cancellation waits for a retained text segment.
+Stop uses a single public-tokenizer token after retained text; its follow-up includes
+the marker and observed seed continuation. EOS uses the original rendered template
+plus returned output and the public EOS spelling. Cancellation waits for retained
+text and extends it with observed seed continuation before the follow-up.
 Coverage requires public `usage.prompt_tokens_details.cached_tokens` greater than the
-source prompt's token count. Missing counters or hits confined to the original prompt
-remain uncovered. The original same-input tests establish recovery and comparisons,
+source prompt's token count. These services must enable cache reporting: absent details
+then means zero hits. Zero hits or hits confined to the original prompt remain uncovered.
+The original same-input tests establish recovery and comparisons,
 but cannot on their own prove reuse of previously generated content. Lifecycle mode
 also includes these probes (at most 544 requested tokens plus a cancelled stream).
 
