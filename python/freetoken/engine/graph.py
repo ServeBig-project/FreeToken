@@ -12,6 +12,8 @@ from freetoken.utils import init_logger, mem_GB
 from freetoken.utils.progress import emit_progress
 from tqdm import tqdm
 
+from .model_forward import forward_model
+
 if TYPE_CHECKING:
     from freetoken.attention import BaseAttnBackend
     from freetoken.models import BaseLLMModel
@@ -206,11 +208,11 @@ class GraphRunner:
             # gather/scatter touches scratch rather than a request-owned slot.
             self._set_dummy_linear_slots(bs)
             with get_global_ctx().forward_batch(batch):
-                self.buffer.logits[:bs] = model.forward()
+                self.buffer.logits[:bs] = forward_model(model)
                 # Keep the offload cache warmed for capture. Resetting here forces
                 # CUDA graph capture to replay cold-cache expert copies.
                 with torch.cuda.graph(graph, pool=pool, stream=self.stream):
-                    self.buffer.logits[:bs] = model.forward()
+                    self.buffer.logits[:bs] = forward_model(model)
                 self._reset_moe_offload_cache()
             if pool is None:
                 pool = graph.pool()  # reuse cuda graph handle to reduce memory

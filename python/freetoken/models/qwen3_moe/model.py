@@ -77,11 +77,7 @@ class Qwen3MoeForCausalLM(ResidualLayerGroupCausalLM):
 
     def forward(self) -> torch.Tensor:
         output = self.model.forward(get_global_ctx().batch.input_ids)
-        logits = self.lm_head.forward(output)
-        cost = get_global_ctx().speculative_cost
-        if cost is not None and cost.prefetch is not None:
-            cost.prefetch.finish_forward(cost.phase(get_global_ctx().batch))
-        return logits
+        return self.lm_head.forward(output)
 
 
 __all__ = ["Qwen3MoeForCausalLM"]

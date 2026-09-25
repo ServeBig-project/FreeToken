@@ -5,6 +5,7 @@ import torch
 
 from freetoken.core import Batch, get_global_ctx
 from .graph import GraphCaptureBuffer
+from .model_forward import forward_model
 
 
 class SpeculativeGraphs:
@@ -99,9 +100,9 @@ class SpeculativeGraphs:
         graph = torch.cuda.CUDAGraph()
         with get_global_ctx().forward_batch(batch):
             # Admission reads GPU state on replay, so warmups can retain expert residency.
-            self.buffer.logits[:tokens] = model.forward()
+            self.buffer.logits[:tokens] = forward_model(model)
             with torch.cuda.graph(graph, pool=runner.pool, stream=runner.stream):
-                self.buffer.logits[:tokens] = model.forward()
+                self.buffer.logits[:tokens] = forward_model(model)
         self.graphs[(phase, bs, tokens)] = graph
 
     def _key(self, batch):

@@ -22,6 +22,7 @@ from freetoken.utils import align_ceil, init_logger, is_sm90_family, is_sm100_fa
 from .config import EngineConfig
 from .graph import GraphRunner, get_free_memory
 from .sample import BatchSamplingArgs, Sampler
+from .model_forward import forward_model
 from freetoken.kvcache import create_kv_pool, resolve_pool_class
 from freetoken.kvcache.base import CacheRebuildRejected
 from freetoken.kvcache.cache_status import _supports_swa_ratio
@@ -971,7 +972,7 @@ class Engine:
             if self.graph_runner.can_use_cuda_graph(batch):
                 logits = self.graph_runner.replay(batch)
             else:
-                logits = self.model.forward()
+                logits = forward_model(self.model)
         if self.speculative_cost is not None:
             self.speculative_cost.end_model(batch)
         if self.cpu_moe_executor is not None:
@@ -1270,7 +1271,7 @@ class Engine:
                 batch.out_loc = dummy_row[:length]
                 self.attn_backend.prepare_metadata(batch)
                 with self.ctx.forward_batch(batch):
-                    self.model.forward()
+                    forward_model(self.model)
         finally:
             dummy_row.fill_(dummy_slot)
             if self.moe_offload_cache is not None:
