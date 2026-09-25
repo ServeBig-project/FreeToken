@@ -1,11 +1,9 @@
 """Stop/cancellation reuse and mixed concurrency through public requests only."""
 
 from concurrent.futures import ThreadPoolExecutor
-import json
 import time
-import urllib.request
 
-from http_client import check, compare, complete, idle, request, usage_check
+from http_client import cancel_stream, check, compare, complete, idle, request, usage_check
 
 
 def stop_and_eos(run, args):
@@ -38,30 +36,7 @@ def cancel(run, args):
     original = run["samples"]["prefix_first"]
     body = dict(original["input"], max_tokens=512, stream=True,
                 stream_options={"include_usage": True})
-    event = {"path": "/v1/completions", "input": body, "raw": "", "cancelled": False}
-    run["http"].append(event)
-    started = time.monotonic()
-    req = urllib.request.Request(run["url"] + event["path"],
-                                 data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=run["timeout"]) as response:
-        event["status"] = response.status
-        check(run, "cancellation stream opens", response.status == 200)
-        for raw in response:
-            line = raw.decode("utf-8")
-            event["raw"] += line
-            if not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            packet = json.loads(data)
-            if any(choice.get("text") for choice in packet.get("choices", [])):
-                stats = request(run, "/v1/stats")
-                event["active_at_close"] = stats["requests"]["active"]
-                event["cancelled"] = True
-                break
-    event["seconds"] = time.monotonic() - started
+    event = cancel_stream(run, body, min_chars=1)
     check(run, "client closed an active generation", event["cancelled"] and
           event.get("active_at_close", 0) > 0, event, status="uncovered")
     run["after_cancel"] = idle(run)
@@ -132,3 +107,5 @@ def lifecycle(run, args):
     cancel(run, args)
     concurrency(run, args)
     prompt_input(run, args)
+    from prefix_reuse import generated_prefix
+    generated_prefix(run, args)

@@ -62,7 +62,7 @@ def complete(run, name, prompt, group, count=48, stream=False, chat=False,
             "top_k": 1, "top_p": 1, "ignore_eos": ignore_eos, "cache_group": group,
             "stream": stream}
     if chat:
-        body["messages"] = [{"role": "user", "content": prompt}]
+        body["messages"] = prompt if isinstance(prompt, list) else [{"role": "user", "content": prompt}]
         if chat_kwargs is not None:
             body["chat_template_kwargs"] = chat_kwargs
     else:
@@ -110,3 +110,33 @@ def complete(run, name, prompt, group, count=48, stream=False, chat=False,
 def compare(run, name, left, right):
     check(run, name, left == right, {"left": left, "right": right},
           status="investigate")
+
+
+def cancel_stream(run, body, min_chars):
+    event = {"path": "/v1/completions", "input": body, "raw": "", "cancelled": False,
+             "retained_text": ""}
+    run["http"].append(event)
+    started = time.monotonic()
+    req = urllib.request.Request(run["url"] + event["path"],
+                                 data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=run["timeout"]) as response:
+        event["status"] = response.status
+        check(run, "cancellation stream opens", response.status == 200)
+        for raw in response:
+            line = raw.decode("utf-8")
+            event["raw"] += line
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            packet = json.loads(data)
+            event["retained_text"] += "".join(choice.get("text") or ""
+                                              for choice in packet.get("choices", []))
+            if len(event["retained_text"]) >= min_chars:
+                event["active_at_close"] = request(run, "/v1/stats")["requests"]["active"]
+                event["cancelled"] = True
+                break
+    event["seconds"] = time.monotonic() - started
+    return event

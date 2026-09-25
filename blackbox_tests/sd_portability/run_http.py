@@ -154,7 +154,7 @@ def main():
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--resources", action="store_true", help="Exercise public cache rebuild")
     parser.add_argument("--lifecycle", action="store_true", help="Stop, EOS, cancellation, mixed concurrency")
-    parser.add_argument("--only", nargs="+", choices=("eos", "prompt-input"),
+    parser.add_argument("--only", nargs="+", choices=("eos", "prompt-input", "generated-prefix"),
                         help="Recheck only the selected public behavior")
     parser.add_argument("--state-slots", type=int, help="State capacity within the public limits")
     parser.add_argument("--reference", help="Earlier report from the same public requests")
@@ -167,9 +167,11 @@ def main():
     try:
         if args.only:
             from lifecycle import eos, prompt_input
+            from prefix_reuse import generated_prefix
             prepare(run, args)
+            selected = {"eos": eos, "prompt-input": prompt_input, "generated-prefix": generated_prefix}
             for name in args.only:
-                (eos if name == "eos" else prompt_input)(run, args)
+                selected[name](run, args)
             run["after_targeted"] = idle(run)
         else:
             core(run, args)

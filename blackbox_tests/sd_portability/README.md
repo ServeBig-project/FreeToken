@@ -43,6 +43,16 @@ the explicit HTTP 400 rejection of token-ID input followed by successful service
 `--only eos prompt-input` rechecks just these behaviors without repeating core,
 stop, cancellation or concurrent generation.
 
+`--only generated-prefix` tests the stricter generated-prefix requirement separately.
+Each stop/EOS/cancellation source gets a fresh cache group; the follow-up includes its
+retained output and is compared with the same complete request in another fresh group.
+Stop is placed after retained text, and cancellation waits for a retained text segment.
+Coverage requires public `usage.prompt_tokens_details.cached_tokens` greater than the
+source prompt's token count. Missing counters or hits confined to the original prompt
+remain uncovered. The original same-input tests establish recovery and comparisons,
+but cannot on their own prove reuse of previously generated content. Lifecycle mode
+also includes these probes (at most 544 requested tokens plus a cancelled stream).
+
 ## Fixed task quality
 
 ```sh
