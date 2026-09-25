@@ -42,6 +42,30 @@ not actually happen remain uncovered. Use `--tokenizer /path/to/public/checkpoin
 this option to test real token-ID prompts; this optional check needs the `tokenizers`
 package and reads only that checkpoint's tokenizer.json.
 
+## Fixed task quality
+
+```sh
+python blackbox_tests/sd_portability/quality.py \
+  --url http://127.0.0.1:8000 --mode graph --expected-steps 0 --output reports/quality-ar.json
+python blackbox_tests/sd_portability/quality.py \
+  --url http://127.0.0.1:8001 --mode graph --expected-steps 8 \
+  --reference reports/quality-ar.json --output reports/quality-sd.json
+```
+
+Both servers must expose the same model id. The eight fixed tasks comprise two
+arithmetic answers, two JSON transformations, two Python execution results and two
+short functions checked on fixed examples. JSON answers must parse in full. Function
+answers may have a single Markdown code fence; the generated functions run in a
+separate Python process with a two-second limit. Each generation allows at most 256
+tokens. Public `geometry.reasoning.kwargs.off` fixes the checkpoint's thinking-off
+template settings identically for AR and SD; the EOS lifecycle check also uses them.
+
+The report records each task's complete request, output, usage and boolean score.
+Task failures are visible even in the AR reference. A previously correct task becoming
+wrong is a regression (exit 1). Any remaining incorrect task gives exit 4; complete
+text differences still give exit 2 even when every task is correct. No partial-credit
+or text-similarity threshold is used. At most 2,048 tokens are requested per quality run.
+
 Runtime depends on model throughput. The normal phase generates 288 output tokens;
 resource checks add 80 tokens and two cache rebuilds. Lifecycle checks request at most
 718 tokens plus a stream closed after its first output; token-ID checks add 48 tokens.

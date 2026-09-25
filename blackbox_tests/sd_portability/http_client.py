@@ -57,12 +57,14 @@ def usage_check(run, name, usage, count, exact):
 
 
 def complete(run, name, prompt, group, count=48, stream=False, chat=False,
-             ignore_eos=True, stop=None):
+             ignore_eos=True, stop=None, chat_kwargs=None):
     body = {"model": run["model"], "max_tokens": count, "temperature": 0,
             "top_k": 1, "top_p": 1, "ignore_eos": ignore_eos, "cache_group": group,
             "stream": stream}
     if chat:
         body["messages"] = [{"role": "user", "content": prompt}]
+        if chat_kwargs is not None:
+            body["chat_template_kwargs"] = chat_kwargs
     else:
         body["prompt"] = prompt
     if stream:
@@ -108,4 +110,3 @@ def complete(run, name, prompt, group, count=48, stream=False, chat=False,
 def compare(run, name, left, right):
     check(run, name, left == right, {"left": left, "right": right},
           status="investigate")
-
