@@ -2,11 +2,10 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import json
-from pathlib import Path
 import time
 import urllib.request
 
-from http_client import check, compare, complete, idle, request
+from http_client import check, compare, complete, idle, request, usage_check
 
 
 def stop_and_eos(run, args):
@@ -20,6 +19,10 @@ def stop_and_eos(run, args):
               run["samples"][name]["finish_reason"] == "stop", status="uncovered")
         after = complete(run, f"after_{name}", prompt, args.group_a)
         compare(run, f"prefix reuse after {name}", original["text"], after)
+    eos(run, args)
+
+
+def eos(run, args):
     eos_prompt = "Reply with exactly the word Done and nothing else."
     off = run["geometry_before"]["reasoning"]["kwargs"]["off"]
     first = complete(run, "eos", eos_prompt, args.group_b, count=160,
@@ -103,19 +106,29 @@ def concurrency(run, args):
                   any(item["batch_size"] in (2, 3) for item in live), live, status="uncovered")
 
 
-def token_input(run, args):
-    from tokenizers import Tokenizer
-    tokenizer = Tokenizer.from_file(str(Path(args.tokenizer) / "tokenizer.json"))
-    prompt = "Explain why the sky appears blue.\nAnswer:"
-    tokens = tokenizer.encode(prompt, add_special_tokens=False).ids
-    first = complete(run, "token_prompt", tokens, args.group_a, count=24)
-    repeated = complete(run, "token_prompt_repeat", tokens, args.group_a, count=24)
-    compare(run, "token input prefix reuse", first, repeated)
+def prompt_input(run, args):
+    body = {"model": run["model"], "prompt": [1, 2, 3], "max_tokens": 8,
+            "temperature": 0, "top_k": 1, "top_p": 1, "ignore_eos": True,
+            "cache_group": args.group_a, "stream": False}
+    error = request(run, "/v1/completions", body, expected=400)
+    check(run, "token-ID rejection explains unsupported input", "not supported" in
+          error["error"]["message"].lower(), error)
+    complete(run, "after_token_rejection", "Name the four seasons.\nAnswer:", args.group_a,
+             count=16)
+    body = dict(body, prompt=["The first three letters of the alphabet are",
+                              "The first three numbers are"])
+    output = request(run, "/v1/completions", body)
+    choices = output["choices"]
+    check(run, "text-list returns one choice per prompt", len(choices) == 2)
+    check(run, "text-list choice indices", sorted(choice["index"] for choice in choices) == [0, 1])
+    for choice in choices:
+        check(run, "text-list finishes each requested output", choice["finish_reason"] == "length"
+              and bool(choice["text"]), choice)
+    usage_check(run, "text-list", output["usage"], 16, exact=True)
 
 
 def lifecycle(run, args):
     stop_and_eos(run, args)
     cancel(run, args)
     concurrency(run, args)
-    if args.tokenizer:
-        token_input(run, args)
+    prompt_input(run, args)

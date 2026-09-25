@@ -8,7 +8,7 @@ import time
 from http_client import check, compare, complete, idle, request
 
 
-def core(run, args):
+def prepare(run, args):
     health = request(run, "/health")
     check(run, "health ready", health["status"] == "ok", health)
     models = request(run, "/v1/models")["data"]
@@ -23,6 +23,10 @@ def core(run, args):
           sd["max_draft_steps"])
     check(run, "effective Graph setting", run["before"]["cuda_graph"]["enabled"] ==
           (args.mode == "graph"), run["before"]["cuda_graph"])
+
+
+def core(run, args):
+    prepare(run, args)
     prompt = ("The Moon reflects sunlight. Its visible illuminated portion changes as it "
               "orbits Earth. Explain the phases of the Moon in plain language.\nAnswer:")
     first = complete(run, "prefix_first", prompt, args.group_a)
@@ -150,7 +154,8 @@ def main():
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--resources", action="store_true", help="Exercise public cache rebuild")
     parser.add_argument("--lifecycle", action="store_true", help="Stop, EOS, cancellation, mixed concurrency")
-    parser.add_argument("--tokenizer", help="Public checkpoint tokenizer.json directory for token input")
+    parser.add_argument("--only", nargs="+", choices=("eos", "prompt-input"),
+                        help="Recheck only the selected public behavior")
     parser.add_argument("--state-slots", type=int, help="State capacity within the public limits")
     parser.add_argument("--reference", help="Earlier report from the same public requests")
     args = parser.parse_args()
@@ -160,7 +165,14 @@ def main():
            "checks": [], "http": [], "samples": {}, "reference_only": args.expected_steps == 0}
     started = time.monotonic()
     try:
-        core(run, args)
+        if args.only:
+            from lifecycle import eos, prompt_input
+            prepare(run, args)
+            for name in args.only:
+                (eos if name == "eos" else prompt_input)(run, args)
+            run["after_targeted"] = idle(run)
+        else:
+            core(run, args)
         if args.resources:
             resources(run, args)
         if args.lifecycle:
