@@ -201,3 +201,46 @@ def _build_track_metadata(reqs, cu_host, device, pin):
 
 
 __all__ = ["FLAMetadata", "FLAPathMetadata", "build_fla_metadata"]
+
+
+class FLASpeculativeGraphs:
+    """Stable state-index views for draft and position-by-position verify replay."""
+
+    def __init__(self, pool, max_batch, query_width, device):
+        self.pool, self.query_width, self.device = pool, query_width, device
+        shape = (query_width, max_batch)
+        self.rows, self.write, self.prev = (
+            torch.zeros(shape, dtype=torch.int64, device=device) for _ in range(3))
+        self.dst = torch.zeros(shape, dtype=torch.int32, device=device)
+        self.cu = torch.arange(max_batch + 1, dtype=torch.int32, device=device)
+        self.draft_slots = torch.zeros(max_batch, dtype=torch.int32, device=device)
+
+    def prepare_capture(self, batch, lengths, tokens):
+        bs = batch.size
+        if not batch.is_speculative_verify:
+            self.draft_slots[:bs].fill_(self.pool.padding_slot)
+            batch.fla_metadata = FLAMetadata(decode=FLAPathMetadata(
+                cu_seqlens=self.cu[:bs + 1], cache_indices=self.draft_slots[:bs]))
+            return
+        offsets, offset = [], 0
+        for length in lengths:
+            offsets.append(offset)
+            offset += length
+        self.rows[:, :bs] = torch.tensor(offsets, device=self.device)
+        self.write[:, :bs] = tokens
+        self.prev[:, :bs] = self.pool.padding_slot
+        self.dst[:, :bs] = self.pool.padding_slot
+        batch.fla_metadata = FLAMetadata(verify=[FLAVerifyStep(
+            rows=self.rows[j, :bs], write=self.write[j, :bs], prev=self.prev[j, :bs],
+            path=FLAPathMetadata(cu_seqlens=self.cu[:bs + 1], cache_indices=self.dst[j, :bs]))
+            for j in range(self.query_width)])
+
+    def prepare_replay(self, batch, physical_tokens):
+        bs = batch.size
+        if not batch.is_speculative_verify:
+            self.draft_slots[:bs].copy_(batch.linear_table_idx, non_blocking=True)
+            return
+        host = verify_layout(batch.prefill_reqs, batch.speculative_states, self.pool.padding_slot,
+                             physical_tokens, self.query_width, {"device": "cpu", "pin_memory": True})
+        for buffer, tensor in zip((self.rows, self.write, self.prev, self.dst), host, strict=True):
+            buffer[:, :bs].copy_(tensor, non_blocking=True)

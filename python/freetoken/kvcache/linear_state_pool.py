@@ -77,6 +77,11 @@ class LinearStatePool:
         self.padding_slot = 0
         self._free_slots: list[int] = list(range(1, num_slots))
 
+    def create_speculative_graphs(self, max_batch, query_width, device):
+        from freetoken.attention.linear import FLASpeculativeGraphs
+
+        return FLASpeculativeGraphs(self, max_batch, query_width, device)
+
     @property
     def num_free_slots(self) -> int:
         return len(self._free_slots)

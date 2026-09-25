@@ -75,6 +75,9 @@ class BaseAttnBackend(ABC):
     @abstractmethod
     def prepare_for_replay(self, batch: Batch) -> None: ...
 
+    def create_speculative_graphs(self, max_seq_len: int):
+        raise ValueError(f"{type(self).__name__} has no speculative Graph plan")
+
     def prepare_for_layer_range_capture(self, batch: Batch) -> None:
         del batch
         raise RuntimeError("attention backend does not support layer-range graphs")

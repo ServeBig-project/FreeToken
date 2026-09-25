@@ -563,6 +563,9 @@ class FlashInferBackend(BaseAttnBackend):
         metadata.decode.wrapper = self.graph_wrappers[bs]
         self._ensure_metadata_plans(metadata)
 
+    def create_speculative_graphs(self, max_seq_len: int):
+        return FISpeculativeGraphs(self, max_seq_len)
+
     def create_verify_graph_wrapper(self, batch_size: int, max_seq_len: int):
         from flashinfer import BatchPrefillWithPagedKVCacheWrapper
         def zeros(size):
@@ -592,3 +595,22 @@ class FlashInferBackend(BaseAttnBackend):
             path = batch.attn_metadata.prefill if verify else batch.attn_metadata.decode
             path.wrapper = wrapper
         self._ensure_metadata_plans(batch.attn_metadata)
+
+
+class FISpeculativeGraphs:
+    def __init__(self, backend, max_seq_len):
+        self.backend, self.max_seq_len = backend, max_seq_len
+        self.verify = {}
+
+    def _wrapper(self, batch):
+        if not batch.is_speculative_verify:
+            return self.backend.graph_wrappers[batch.size]
+        if batch.size not in self.verify:
+            self.verify[batch.size] = self.backend.create_verify_graph_wrapper(batch.size, self.max_seq_len)
+        return self.verify[batch.size]
+
+    def prepare_capture(self, batch, page_table):
+        self.backend.prepare_speculative_graph(batch, self._wrapper(batch), page_table)
+
+    def prepare_replay(self, batch):
+        self.backend.prepare_speculative_graph(batch, self._wrapper(batch))

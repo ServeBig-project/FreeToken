@@ -153,12 +153,17 @@ class EngineConfig:
 
     @property
     def speculative_graphs(self) -> bool:
+        from freetoken.attention import attention_backend_info
+
+        backend = self.attention_backend
+        graph_attention = (backend != "auto" and "," not in backend
+                           and attention_backend_info(backend).speculative_graphs)
         return bool(
             0 < self.speculative_num_steps <= 8
             and self.dtype == torch.bfloat16
             and self.model_config.expert_quant == "none" and not self.nowag_expert_path
             and self.model_config.moe_weight_format in (None, "bf16")
-            and self.attention_backend == "fi" and self.moe_backend == "offload"
+            and graph_attention and self.moe_backend == "offload"
             and self.page_size == 1 and self.tp_info.size == 1
             and getattr(self, "batching_policy", "legacy") == "legacy"
             and self.cuda_graph_max_bs != 0 and self.cuda_graph_bs != []
