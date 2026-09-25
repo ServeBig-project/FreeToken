@@ -84,20 +84,6 @@ class SpeculativeDecoder:
             pages -= div_ceil(req.device_len + length, page_size) - first_page
         return lengths
 
-    def _commit_states(self, pool, states, accepted: torch.Tensor, slots: list[int]) -> None:
-        """Live slot <- the scratch state after the last accepted token (position 0 when every
-        draft was rejected: the token that was the ordinary decode query). Stream-ordered, so the
-        slots can go back to the pool right away."""
-        device = accepted.device
-        scratch = torch.tensor([s[1] for s in states], dtype=torch.int64, device=device)
-        src = scratch.gather(1, accepted[:, None]).squeeze(1)
-        live = torch.tensor([s[0] for s in states], dtype=torch.int64, device=device)
-        for layer in range(pool.num_linear_layers):
-            rec, cv = pool.recurrent_states[layer], pool.conv_states[layer]
-            rec.index_copy_(0, live, rec.index_select(0, src))
-            cv.index_copy_(0, live, cv.index_select(0, src))
-        pool.free(slots)
-
     def _logits(self, batch: Batch) -> torch.Tensor:
         batch.padded_reqs = batch.reqs
         forward_input = self.prepare(batch)
@@ -140,23 +126,14 @@ class SpeculativeDecoder:
         starts = [req.device_len for req in batch.reqs]
         ends = [start + length for start, length in zip(starts, lengths, strict=True)]
         views = [copy(req) for req in batch.reqs]
-        # GDN models: drafts advance a copy of each live state; verification keeps one state
-        # per position so the commit can pick the accepted one. Slots come from the pool.
-        pool, states, slots = engine.linear_state_pool, None, None
-        if pool is not None:
-            per_request = engine.config.speculative_num_steps + 2
-            if pool.num_free_slots < per_request * batch.size:
+        state = None
+        if engine.linear_state_pool is not None:
+            state = engine.linear_state_pool.begin_speculation(
+                batch.reqs, views, engine.config.speculative_num_steps)
+            if state is None:
                 self.state_slot_stops += 1
                 self._record_lengths([0] * batch.size)
                 return engine.forward_batch(batch, forward_input.sample_args)
-            slots = pool.alloc(per_request * batch.size)
-            states = []
-            for i, (req, view) in enumerate(zip(batch.reqs, views, strict=True)):
-                live = req.linear_slot_idx if req.linear_slot_idx is not None else req.table_idx
-                own = slots[i * per_request : (i + 1) * per_request]
-                pool.copy_from(live, own[0])
-                view.linear_slot_idx = own[0]
-                states.append((live, own[1:]))
         # The ordinary decode query is already allocated. Reserve only the extra
         # span; the same physical slots serve drafting and target verification.
         for req, start, end in zip(views, starts, ends, strict=True):
@@ -203,10 +180,8 @@ class SpeculativeDecoder:
         for req, start, length in zip(views, starts, lengths, strict=True):
             req.cached_len, req.device_len = start - 1, start + length
         verify = Batch(views, is_speculative_verify=True)
-        if states is not None:
-            verify.speculative_states = [
-                (live, scratch[: length + 1]) for (live, scratch), length in zip(states, lengths, strict=True)
-            ]
+        if state is not None:
+            state.prepare_verify(verify, lengths)
         logits = self._logits(verify)
         target_probs = sampler.probabilities(
             logits, sampler.prepare(verify, repeats=[length + 1 for length in lengths])
@@ -214,7 +189,6 @@ class SpeculativeDecoder:
         self.verify_steps += 1
         output = torch.full_like(proposals, -1)
         accepted_lengths = torch.empty(batch.size, dtype=torch.int64, device=engine.device) if self.cost is not None else None
-        accepted_all = []
         offset = 0
         for i, length in enumerate(lengths):
             p = target_probs[offset : offset + length + 1]
@@ -224,7 +198,6 @@ class SpeculativeDecoder:
             q_chosen = q[:length].gather(1, candidates[:, None]).flatten()
             uniform = torch.rand(length, device=engine.device, generator=self.generator)
             accepted = (uniform * q_chosen < p_chosen).to(torch.int32).cumprod(0).sum(0, keepdim=True)
-            accepted_all.append(accepted)
             if accepted_lengths is not None:
                 accepted_lengths[i : i + 1] = accepted
             # The zero q row after the last draft makes the all-accepted case
@@ -242,10 +215,8 @@ class SpeculativeDecoder:
 
         if accepted_lengths is not None:
             self.cost.observe_acceptance(lengths, accepted_lengths)
-        if states is not None:
-            self._commit_states(pool, states, torch.cat(accepted_all).long(), slots)
 
         host = output.to("cpu", non_blocking=True)
         ready = torch.cuda.Event()
         ready.record(engine.stream)
-        return ForwardOutput(output, host, ready, speculative_ends=ends)
+        return ForwardOutput(output, host, ready, speculative_ends=ends, speculative_state=state)

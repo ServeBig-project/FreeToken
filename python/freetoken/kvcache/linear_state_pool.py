@@ -77,6 +77,12 @@ class LinearStatePool:
         self.padding_slot = 0
         self._free_slots: list[int] = list(range(1, num_slots))
 
+    def begin_speculation(self, reqs, views, steps):
+        required = (steps + 2) * len(reqs)
+        if self.num_free_slots < required:
+            return None
+        return LinearSpeculativeState(self, reqs, views, steps)
+
     def create_speculative_graphs(self, max_batch, query_width, device):
         from freetoken.attention.linear import FLASpeculativeGraphs
 
@@ -239,3 +245,36 @@ def _linear_pool_min_slots(config) -> int:
     if config.cache_type != "hybrid_radix":
         return mr + 1
     return 4 * mr + 1
+
+
+class LinearSpeculativeState:
+    """Own temporary draft/verify states until the host decides what output is retained."""
+
+    def __init__(self, pool, reqs, views, steps):
+        self.pool = pool
+        width = steps + 2
+        self.slots = pool.alloc(width * len(reqs))
+        self.states = []
+        for i, (req, view) in enumerate(zip(reqs, views, strict=True)):
+            live = req.linear_slot_idx if req.linear_slot_idx is not None else req.table_idx
+            own = self.slots[i * width:(i + 1) * width]
+            pool.copy_from(live, own[0])
+            view.linear_slot_idx = own[0]
+            self.states.append((live, own[1:]))
+
+    def prepare_verify(self, batch, lengths):
+        batch.speculative_states = [(live, scratch[:length + 1])
+                                    for (live, scratch), length in zip(self.states, lengths, strict=True)]
+
+    def commit(self, retained):
+        # Output token j was sampled after computing position j. A stop at output j
+        # therefore commits scratch[j], not the last algorithmically accepted position.
+        selected = [(live, scratch[n - 1]) for (live, scratch), n in
+                    zip(self.states, retained, strict=True) if n]
+        if selected:
+            live, src = (torch.tensor(xs, dtype=torch.int64, device=self.pool.device)
+                         for xs in zip(*selected))
+            for layer in range(self.pool.num_linear_layers):
+                for tensor in (self.pool.recurrent_states[layer], self.pool.conv_states[layer]):
+                    tensor.index_copy_(0, live, tensor.index_select(0, src))
+        self.pool.free(self.slots)

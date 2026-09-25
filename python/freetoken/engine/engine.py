@@ -290,6 +290,7 @@ class ForwardOutput(NamedTuple):
     next_tokens_cpu: torch.Tensor
     copy_done_event: torch.cuda.Event
     speculative_ends: list[int] | None = None
+    speculative_state: object | None = None
 
 
 class Engine:

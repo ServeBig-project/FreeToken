@@ -982,6 +982,8 @@ class Scheduler(SchedulerIOMixin):
         output.copy_done_event.synchronize()
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
+        retained = [0] * batch.size
+        completed = []
         with self.cache_manager.lazy_free_region():
             for i, req in enumerate(batch.reqs):
                 if isinstance(req, ChunkedReq):
@@ -998,9 +1000,9 @@ class Scheduler(SchedulerIOMixin):
                     # Aborted while this final-chunk prefill / decode step was in flight: free
                     # here (the forward is drained) and finish the request. No DetokenizeMsg --
                     # the abort ack flushed after this method stays the uid's terminal reply.
-                    self.decode_manager.remove_req(req)
-                    self._free_req_resources(req)
-                    new_finished_reqs.add(req)
+                    if output.speculative_ends is not None:
+                        self.cache_manager.release_speculative(req, output.speculative_ends[i])
+                    completed.append((i, req, True))
                     continue
                 if req in suppressed_finished_reqs:
                     # Overlap scheduling launched one more decode step for a request that
@@ -1050,10 +1052,16 @@ class Scheduler(SchedulerIOMixin):
                     )
                     if finished:
                         break
+                retained[i] = j + 1
                 if output.speculative_ends is not None:
                     self.cache_manager.release_speculative(req, output.speculative_ends[i])
                     self.speculative.accepted_draft_tokens += min(j + 1, len(tokens) - 1)
 
+                completed.append((i, req, finished))
+
+            if output.speculative_state is not None:
+                output.speculative_state.commit(retained)
+            for i, req, finished in completed:
                 # NOTE: overlap scheduling may make the request freed twice, skip second free
                 if finished and req not in suppressed_finished_reqs:
                     self.decode_manager.remove_req(req)
