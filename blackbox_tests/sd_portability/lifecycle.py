@@ -21,12 +21,13 @@ def stop_and_eos(run, args):
         after = complete(run, f"after_{name}", prompt, args.group_a)
         compare(run, f"prefix reuse after {name}", original["text"], after)
     eos_prompt = "Reply with exactly the word Done and nothing else."
+    off = run["geometry_before"]["reasoning"]["kwargs"]["off"]
     first = complete(run, "eos", eos_prompt, args.group_b, count=160,
-                     chat=True, ignore_eos=False)
+                     chat=True, ignore_eos=False, chat_kwargs=off)
     check(run, "EOS actually observed", run["samples"]["eos"]["finish_reason"] == "stop",
           status="uncovered")
     repeated = complete(run, "eos_prefix_repeat", eos_prompt, args.group_b, count=160,
-                        chat=True, ignore_eos=False)
+                        chat=True, ignore_eos=False, chat_kwargs=off)
     compare(run, "prefix reuse after EOS", first, repeated)
 
 
