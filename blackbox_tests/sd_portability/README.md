@@ -38,9 +38,10 @@ does not claim the full configuration matrix.
 requests, closes a live stream and verifies subsequent service, and sends four concurrent
 requests of 8/21/48/65 tokens. It reports whether all four were actually active and
 whether Graph replayed both full and uneven batches. Stop, EOS or cancellation that did
-not actually happen remain uncovered. Use `--tokenizer /path/to/public/checkpoint` with
-this option to test real token-ID prompts; this optional check needs the `tokenizers`
-package and reads only that checkpoint's tokenizer.json.
+not actually happen remain uncovered. This phase also checks text-list prompts and
+the explicit HTTP 400 rejection of token-ID input followed by successful service.
+`--only eos prompt-input` rechecks just these behaviors without repeating core,
+stop, cancellation or concurrent generation.
 
 ## Fixed task quality
 
@@ -68,5 +69,5 @@ or text-similarity threshold is used. At most 2,048 tokens are requested per qua
 
 Runtime depends on model throughput. The normal phase generates 288 output tokens;
 resource checks add 80 tokens and two cache rebuilds. Lifecycle checks request at most
-718 tokens plus a stream closed after its first output; token-ID checks add 48 tokens.
+718 tokens plus a stream closed after its first output; prompt input checks add 32 tokens.
 Request timeout defaults to 180 s.
