@@ -40,10 +40,10 @@ def idle(run):
     deadline = time.monotonic() + min(run["timeout"], 30)
     while True:
         stats = request(run, "/v1/stats")
-        if stats["requests"]["active"] == 0:
+        if stats["requests"]["active"] == 0 or time.monotonic() >= deadline:
+            check(run, "requests eventually become idle", stats["requests"]["active"] == 0,
+                  stats["requests"])
             return stats
-        check(run, "requests eventually become idle", time.monotonic() < deadline,
-              stats["requests"])
         time.sleep(0.25)
 
 

@@ -142,3 +142,20 @@ instead of `--state-slots`. This mode never rebuilds or adds capacity. It requir
 all four outputs to complete through AR, explicit state-capacity stops, batch-four
 Graph activity, and unchanged capacity/budget. Each mode generates 1,024 tokens;
 request timeout defaults to 300 seconds. No token-similarity quality claim is made.
+
+## On-demand snapshot lifecycle
+
+`snapshot_lifecycle.py --url URL --public-tokenizer CHECKPOINT --mode sd|ar --output
+REPORT.json` uses approximately 900 input tokens, 32-token C4 waves, actual generated
+prefix hits, cache-group isolation, cancellation and same-size cache rebuilds. Launch
+with context/KV 4096, prefill 256, Graph and cache reporting enabled. The same client
+supports legacy SD, legacy AR overlap and layered AR; it never compares output text.
+`--small-pool` selects the published minimum (including when above 16), then restores
+the starting capacity. Without it, capacity stays fixed. Idle `mamba.used_slots` is
+not asserted because those statistics may be stale; no live-only slot count is inferred
+without a retained-snapshot counter. Completion after repeated waves and resets,
+public geometry, real hits and Graph/SD activity provide the lifecycle evidence.
+C16 throughput and whether actual N exceeds one use the separate frozen benchmark.
+There is one shared-prefix wave and one post-rebuild wave (384 requested output tokens
+plus a cancelled stream). The AR overlap run may also select the small pool, avoiding
+an additional full run solely for capacity coverage.

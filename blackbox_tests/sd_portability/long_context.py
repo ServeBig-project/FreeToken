@@ -9,12 +9,12 @@ import time
 from http_client import check, compare, complete, idle, request
 
 
-def make_prompt(tokenizer):
+def make_prompt(tokenizer, target_tokens=32768):
     prefix = "Read this reference archive. The archive access word is ORCHID.\n"
     unit = "This archive note records a routine weather observation and does not change the access word.\n"
     suffix = "\nWhat is the archive access word? Reply with that single word only.\nAccess word:"
     count = lambda text: len(tokenizer.encode(text, add_special_tokens=False))
-    repeats = (32768 - count(prefix + suffix)) // count(unit)
+    repeats = (target_tokens - count(prefix + suffix)) // count(unit)
     prompt = prefix + unit * repeats + suffix
     return prompt, count(prompt), count(unit)
 
