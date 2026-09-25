@@ -102,11 +102,11 @@ class VerifyPrefetch:
         self.probe_left = torch.full((), -1, dtype=torch.int32, device=device)
         self.pending_layer = None
 
-    def predict(self, layer, ids, logits):
+    def predict(self, layer, ids, scores):
         predicted = torch.zeros_like(self.marks[layer]).scatter_(0, ids.flatten().long(), True)
         self.cost.predicted[layer] |= predicted
         self.stats[0] += self.cost.predicted[layer].sum()
-        self.scores[layer] += logits.float().softmax(dim=-1).sum(dim=0)
+        self.scores[layer] += scores.sum(dim=0)
 
     def start_step(self):
         self.probe_left.fill_(1 if not self.cost.expert_sample_rows else 0)

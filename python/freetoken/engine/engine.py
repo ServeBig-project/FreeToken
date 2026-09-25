@@ -1809,16 +1809,12 @@ def _adjust_config(config: EngineConfig):
 
     if config.speculative_num_steps and config.cuda_graph_max_bs != 0 and config.cuda_graph_bs != []:
         # Never fall back silently: eager SD is far slower and would mislead comparisons.
-        if not config.speculative_graphs and model_config.model_type == "qwen3_moe":
+        if not config.speculative_graphs:
             raise ValueError(
-                "SD CUDA Graph requires BF16 Qwen3 MoE experts with --moe-backend offload, "
+                "SD CUDA Graph requires BF16 experts with --moe-backend offload, "
                 "FlashInfer attention, page size 1 and at most 8 draft steps; "
                 "pass --cuda-graph-max-bs 0 to run speculation eagerly"
             )
-        if not config.speculative_graphs:
-            # No speculative graphs exist for this architecture: drafts and verification run
-            # eagerly while ordinary decode keeps its graphs.
-            logger.info("speculative decoding runs eagerly on %s", model_config.model_type)
         limit = min(config.cuda_graph_max_bs, config.max_running_req, 32)
         override("cuda_graph_bs", list(range(1, limit + 1)))
     elif config.speculative_num_steps:

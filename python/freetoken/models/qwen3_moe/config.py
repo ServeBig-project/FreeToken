@@ -45,6 +45,7 @@ def parse_config(hf_config: Any) -> ModelConfig:
         ),
         num_experts_per_tok=getattr(hf_config, "num_experts_per_tok", 0),
         moe_intermediate_size=getattr(hf_config, "moe_intermediate_size", 0),
+        moe_router="softmax",
         norm_topk_prob=bool(getattr(hf_config, "norm_topk_prob", False)),
         model_type=getattr(hf_config, "model_type", "qwen3_moe"),
         architectures=getattr(hf_config, "architectures", ["Qwen3MoeForCausalLM"]),

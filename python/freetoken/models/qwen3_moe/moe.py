@@ -3,8 +3,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from freetoken.layers import BaseOP, LinearReplicated, make_moe_layer
-from freetoken.core import get_global_ctx
-from freetoken.moe.resident_draft import draft_routing
 
 if TYPE_CHECKING:
     import torch
@@ -26,9 +24,6 @@ class Qwen3MoeMLP(BaseOP):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         router_logits = self.gate.forward(hidden_states)
-        draft = draft_routing(get_global_ctx(), self.layer_id, self.experts, hidden_states, router_logits)
-        if draft is not None:
-            return self.experts.routed_forward(hidden_states, *draft)
         final_hidden_states = self.experts.forward(
             hidden_states=hidden_states,
             router_logits=router_logits,

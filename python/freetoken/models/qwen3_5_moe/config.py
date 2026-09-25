@@ -244,6 +244,7 @@ def parse_config(hf_config: Any) -> ModelConfig:
         num_experts_per_tok=getattr(text, "num_experts_per_tok", 0),
         moe_intermediate_size=getattr(text, "moe_intermediate_size", 0),
         shared_expert_intermediate_size=getattr(text, "shared_expert_intermediate_size", 0),
+        moe_router="softmax",
         norm_topk_prob=bool(getattr(text, "norm_topk_prob", False)),
         moe_enabled=moe_enabled,
         use_qk_norm=True,

@@ -41,6 +41,7 @@ class MoELayer(BaseOP):
     ):
         super().__init__()
 
+        self.router = None
         self.num_experts = num_experts
         self.top_k = top_k
         self.hidden_size = hidden_size
@@ -163,11 +164,24 @@ class MoELayer(BaseOP):
         out = self._resident_gemm(hidden_states, topk_weights, topk_ids)
         return self._maybe_all_reduce(out)
 
+    def route(self, hidden_states, router_logits):
+        if self.router is not None:
+            from freetoken.moe.routing import route_experts
+
+            return route_experts(self, hidden_states, router_logits)
+        batch = get_global_ctx().batch
+        padding = (batch.num_token_non_padded
+                   if not batch.uses_extend_path or batch.is_speculative_verify else None)
+        return fused_topk(hidden_states, router_logits, self.top_k, self.renormalize,
+                          num_token_non_padded=padding)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor | None = None,
     ):
+        if self.router is not None and get_global_ctx().batch.draft_experts is not None:
+            return self.routed_forward(hidden_states, *self.route(hidden_states, router_logits))
         if self.weight_format != "bf16":
             # Quantized resident experts: generic softmax router + format kernel.
             # The bf16 path below stays on ctx.moe_backend byte-for-byte.
@@ -254,32 +268,11 @@ class OffloadMoELayer(MoELayer):
             out = self._decode_routed(hidden_states, topk_weights, topk_ids)
         return self._maybe_all_reduce(out)
 
-    def decode_forward(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor | None = None,
-    ):
-        topk_weights, topk_ids = fused_topk(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            topk=self.top_k,
-            renormalize=self.renormalize,
-            num_token_non_padded=get_global_ctx().batch.num_token_non_padded,
-        )
-        return self._decode_routed(hidden_states, topk_weights, topk_ids)
+    def decode_forward(self, hidden_states, router_logits=None):
+        return self._decode_routed(hidden_states, *self.route(hidden_states, router_logits))
 
-    def prefill_forward(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor | None = None,
-    ):
-        topk_weights, topk_ids = fused_topk(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            topk=self.top_k,
-            renormalize=self.renormalize,
-        )
-        return self._prefill_routed(hidden_states, topk_weights, topk_ids)
+    def prefill_forward(self, hidden_states, router_logits=None):
+        return self._prefill_routed(hidden_states, *self.route(hidden_states, router_logits))
 
     # ------------------------------------------------------------------
     # Data movement -- one decision tree for every quant format (the banks
@@ -732,6 +725,11 @@ def make_moe_layer(
     else:
         kwargs["weight_format"] = weight_format
     layer = layer_cls(**kwargs)
+    layer.layer_id = layer_id
+    if config.moe_router is not None:
+        from freetoken.moe.routing import ROUTERS
+
+        layer.router = ROUTERS[config.moe_router](layer.top_k, layer.renormalize)
     if offload and getattr(config, "expert_quant", "none") == "nowag":
         from freetoken.moe.nowag import get_nowag_model_rule
 

@@ -217,6 +217,8 @@ class ModelConfig:
     moe_backend: str = "fused"
     # ----- optional, model-specific extensions (default keeps other models intact) -----
     moe_enabled: bool = False
+    # Actual routing component used by the shared MoE layer; None for model-owned routing.
+    moe_router: str | None = None
     # Weight quantization of the MoE experts only. "none" keeps the default BF16
     # offload/fused path; "nvfp4" stores experts as packed FP4 + block scales;
     # "fp8_block" is DeepSeek-V3-style 128x128 block-fp8 (weight fp8-e4m3 +

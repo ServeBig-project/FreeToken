@@ -119,8 +119,17 @@ class EngineConfig:
             raise ValueError("self-speculative decoding requires a single GPU (tp_size=1)")
         if getattr(self, "batching_policy", "legacy") != "legacy":
             raise ValueError("self-speculative decoding requires --batching-policy legacy")
-        if self.hf_config.architectures[0] not in ("Qwen3MoeForCausalLM", "Qwen3_5MoeForConditionalGeneration"):
-            raise ValueError("self-speculative decoding supports only Qwen3 MoE and Qwen3.5 MoE")
+        from freetoken.attention.base import AttnType
+        from freetoken.moe.routing import ROUTERS
+
+        model = self.model_config
+        if not model.num_experts or model.moe_router not in ROUTERS:
+            raise ValueError("self-speculative decoding requires a shared MoE router component")
+        unsupported = {model.attn_type_for_layer(i) for i in range(model.num_layers)} - {
+            AttnType.FULL, AttnType.LINEAR,
+        }
+        if unsupported:
+            raise ValueError(f"self-speculative state handling is unavailable for {unsupported}")
         if self.speculative_draft_experts > self.model_config.num_experts_per_tok:
             raise ValueError(
                 "speculative_draft_experts must not exceed the target's experts per token "
@@ -146,7 +155,7 @@ class EngineConfig:
     def speculative_graphs(self) -> bool:
         return bool(
             0 < self.speculative_num_steps <= 8
-            and self.dtype == torch.bfloat16 and self.model_config.model_type in ("qwen3_moe", "qwen3_5_moe")
+            and self.dtype == torch.bfloat16
             and self.model_config.expert_quant == "none" and not self.nowag_expert_path
             and self.model_config.moe_weight_format in (None, "bf16")
             and self.attention_backend == "fi" and self.moe_backend == "offload"

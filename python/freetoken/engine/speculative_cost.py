@@ -72,11 +72,11 @@ class SpeculativeCost:
         valid_rows = (ids[:, 0] >= 0).sum().clamp_min(1)
         self.use[0 if phase == 1 else 1, layer].lerp_(row.float() / valid_rows, 0.1)
 
-    def record_prediction(self, layer, ids, logits):
+    def record_prediction(self, layer, ids, scores):
         if self.prefetch is None:
             self.predicted[layer].scatter_(0, ids.flatten().long(), True)
         else:
-            self.prefetch.predict(layer, ids, logits)
+            self.prefetch.predict(layer, ids, scores)
         if layer == 0:
             self.predicted_positions.add_(ids.shape[0])
 

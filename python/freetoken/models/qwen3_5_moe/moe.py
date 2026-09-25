@@ -3,8 +3,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
-from freetoken.core import get_global_ctx
-from freetoken.moe.resident_draft import draft_routing
 from freetoken.layers import (
     BaseOP,
     LinearColParallelMerged,
@@ -89,11 +87,7 @@ class Qwen3_5MoE(BaseOP):
         router_logits = self.gate.forward(hidden_states)
         shared = self.shared_expert.forward(hidden_states)
         shared = shared * torch.sigmoid(self.shared_expert_gate.forward(hidden_states))
-        draft = draft_routing(get_global_ctx(), self.layer_id, self.experts, hidden_states, router_logits)
-        if draft is not None:
-            routed = self.experts.routed_forward(hidden_states, *draft)
-        else:
-            routed = self.experts.forward(hidden_states=hidden_states, router_logits=router_logits)
+        routed = self.experts.forward(hidden_states=hidden_states, router_logits=router_logits)
         return (routed + shared).view(num_tokens, hidden_dim)
 
 
