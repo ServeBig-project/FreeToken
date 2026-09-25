@@ -156,6 +156,7 @@ def main():
     parser.add_argument("--lifecycle", action="store_true", help="Stop, EOS, cancellation, mixed concurrency")
     parser.add_argument("--only", nargs="+", choices=("eos", "prompt-input", "generated-prefix"),
                         help="Recheck only the selected public behavior")
+    parser.add_argument("--public-tokenizer", help="Public checkpoint directory for exact prefix text")
     parser.add_argument("--state-slots", type=int, help="State capacity within the public limits")
     parser.add_argument("--reference", help="Earlier report from the same public requests")
     args = parser.parse_args()
