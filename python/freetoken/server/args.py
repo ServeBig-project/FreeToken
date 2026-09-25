@@ -258,7 +258,7 @@ def parse_args(
         "--speculative-draft-experts",
         type=_positive_int,
         default=ServerArgs.speculative_draft_experts,
-        help="Routed experts per draft token (Qwen3 MoE, single GPU, legacy scheduling).",
+        help="Routed experts per draft token, up to the target router top-k (single GPU, legacy scheduling).",
     )
 
     parser.add_argument(
