@@ -167,9 +167,9 @@ def verify_layout(reqs, states, dummy_slot, dummy_row, positions, pin):
 def _build_track_metadata(reqs, cu_host, device, pin):
     """Hybrid-radix (extra_buffer): for each request that crosses a ×CHUNK boundary this
     prefill forward, snapshot its GDN state at the deepest mid-chunk boundary into its current
-    ping-pong slot. Returns (track_dst, track_h_row, track_conv_src) device int64 tensors, or
+    private snapshot slot. Returns (track_dst, track_h_row, track_conv_src) device int64 tensors, or
     (None, None, None) when no request tracks (non-hybrid, or all extends < CHUNK+1)."""
-    if not any(r.mamba_ping_pong is not None for r in reqs):
+    if not any(r.mamba_snapshot_slot is not None for r in reqs):
         return None, None, None
     from freetoken.core import get_global_ctx
     from freetoken.kernel.fla.chunk import CHUNK_SIZE
@@ -179,7 +179,7 @@ def _build_track_metadata(reqs, cu_host, device, pin):
     boh = prepare_chunk_offsets(cu_host, CHUNK_SIZE).tolist()
     dst, h_row, conv_src = [], [], []
     for i, r in enumerate(reqs):
-        if r.mamba_ping_pong is None:
+        if r.mamba_snapshot_slot is None:
             continue
         # deepest mid-chunk boundary strictly inside the extend (h has the per-chunk state;
         # the exact extend-end / aligned-final state lives in the live slot -> finish-donate).
@@ -188,11 +188,10 @@ def _build_track_metadata(reqs, cu_host, device, pin):
             continue
         off = int(cu_host[i])
         boundary = r.cached_len + c * CHUNK_SIZE
-        dst.append(r.mamba_ping_pong[r.mamba_next_track_idx])
+        dst.append(r.mamba_snapshot_slot)
         h_row.append(boh[i] + c)
         conv_src.append([off + c * CHUNK_SIZE - km1 + j for j in range(km1)])
         r.mamba_last_track_seqlen = boundary
-        r.mamba_next_track_idx = 1 - r.mamba_next_track_idx
     if not dst:
         return None, None, None
     to = lambda xs, **kw: torch.tensor(xs, **pin, **kw).to(device, non_blocking=True)

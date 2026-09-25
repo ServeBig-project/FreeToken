@@ -230,23 +230,18 @@ def state_pool_bytes(config, num_slots: int | None = None) -> int:
 
 
 def _linear_pool_num_slots(config) -> int:
-    """LinearStatePool slot count. Hybrid-radix non-evictable peak is 4 slots per running request
-    (1 live + 2 ping-pong + 1 committed snapshot locked through decode), plus a cross-request
-    snapshot cache and a padding sink; naive GDN keeps the old (max_running_req + 1)."""
+    """Keep the existing state byte budget; on-demand snapshots share its free slots
+    with live states, reusable public prefixes and speculative scratch."""
     mr = config.max_running_req
     if config.cache_type != "hybrid_radix":
         return mr + 1  # live + dummy/padding
     ratio = config.linear_state_cache_ratio
     n_cache = max(4, int(ratio * mr))
-    return 4 * mr + n_cache + 1  # live + 2 ping-pong + locked committed snapshot + cache + padding
+    return 4 * mr + n_cache + 1
 
 
 def _linear_pool_min_slots(config) -> int:
-    """Floor on LinearStatePool slots that still runs: the non-evictable working set with a
-    zero snapshot cache. Hybrid-radix needs 4 per running request (1 live + 2 ping-pong + 1
-    committed snapshot locked through decode) + the padding sink; naive needs 1 per request +
-    padding. Below this, a full max_running_req batch can't get its slots and admission
-    deadlocks -- so a runtime rebuild rejects a smaller request."""
+    """Keep the existing conservative rebuild floor while changing slot ownership only."""
     mr = config.max_running_req
     if config.cache_type != "hybrid_radix":
         return mr + 1

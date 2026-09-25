@@ -1075,7 +1075,7 @@ class Scheduler(SchedulerIOMixin):
                     # instead of freeing them (handled above), so a freed request should
                     # never reach this commit -- but if a future path frees one early, skip
                     # rather than re-read the freed page-table row (and on hybrid, deref the
-                    # None'd GDN ping-pong slots).
+                    # released GDN state slots).
                     self.cache_manager.cache_req(req, finished=False)
 
         if commit_finished_reqs:
@@ -1525,6 +1525,8 @@ class Scheduler(SchedulerIOMixin):
         # Polymorphic page allocation: DSV4 allocates window pages + cmp/idx blocks into its
         # slot maps; the generic manager allocates KV pages into the page table.
         self.cache_manager.allocate_paged(batch.reqs)
+        if batch.has_prefill and not batch.is_speculative_verify:
+            self.cache_manager.prepare_prefill_snapshots(batch.prefill_reqs)
 
     def _prepare_resident_group_decode_batch(
         self,

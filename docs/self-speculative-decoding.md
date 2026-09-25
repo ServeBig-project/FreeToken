@@ -131,6 +131,16 @@ EOS, stop strings and output limits determine the retained output is the matchin
 state committed for continuation or prefix reuse. Cancellation discards the
 round's temporary state and keeps the previously committed prefix.
 
+A hybrid-cache request initially owns one private live state. A reusable prefill
+checkpoint or tool-call checkpoint gets a separate private snapshot only when it
+will be produced. Donation transfers that snapshot to the public prefix cache;
+no replacement is reserved. Deduplicated or unused snapshots are freed. If no
+free or evictable slot exists, the optional new checkpoint is skipped while the
+request continues; finishing can still donate its live state. Intermediate
+prefill chunks do not create snapshots that the cache never consumes.
+The configured state-pool byte budget stays unchanged, and draft scratch remains
+separate from immutable public prefix states.
+
 State allocation uses the current round's admitted lengths, including shorter
 calibration rounds and request tails. A request drafting N > 0 tokens needs N + 2
 temporary slots; a zero-draft tail in a verifying batch needs one. If capacity is
