@@ -77,7 +77,8 @@ class LinearStatePool:
 
     @staticmethod
     def speculative_size(lengths):
-        return sum(length + 1 + (length > 0) for length in lengths)
+        # Verify needs at least as many slots as the one-per-active-request draft phase.
+        return sum(length + 1 for length in lengths)
 
     def limit_speculation(self, lengths, available):
         for limit in range(max(lengths), 0, -1):
@@ -253,21 +254,26 @@ class LinearSpeculativeState:
 
     def __init__(self, pool, reqs, views, lengths):
         self.pool = pool
-        self.slots = pool.alloc(pool.speculative_size(lengths))
-        self.states, offset = [], 0
-        for req, view, length in zip(reqs, views, lengths, strict=True):
-            live = req.linear_slot_idx if req.linear_slot_idx is not None else req.table_idx
+        self.slots = pool.alloc(sum(length > 0 for length in lengths))
+        self.live_slots = [req.linear_slot_idx if req.linear_slot_idx is not None else req.table_idx
+                           for req in reqs]
+        draft_slots = iter(self.slots)
+        for live, view, length in zip(self.live_slots, views, lengths, strict=True):
             if length:
-                pool.copy_from(live, self.slots[offset])
-                view.linear_slot_idx = self.slots[offset]
-                offset += 1
-            scratch = self.slots[offset:offset + length + 1]
-            self.states.append((live, scratch))
-            offset += length + 1
+                slot = next(draft_slots)
+                pool.copy_from(live, slot)
+                view.linear_slot_idx = slot
 
     def prepare_verify(self, batch, lengths):
-        batch.speculative_states = [(live, scratch[:length + 1])
-                                    for (live, scratch), length in zip(self.states, lengths, strict=True)]
+        # Draft and verify are ordered on the engine stream; returning indices does
+        # not free tensor storage, and verify overwrites them only after draft finishes.
+        self.pool.free(self.slots)
+        self.slots = self.pool.alloc(self.pool.speculative_size(lengths))
+        self.states, offset = [], 0
+        for live, length in zip(self.live_slots, lengths, strict=True):
+            self.states.append((live, self.slots[offset:offset + length + 1]))
+            offset += length + 1
+        batch.speculative_states = self.states
 
     def commit(self, retained):
         # Output token j was sampled after computing position j. A stop at output j

@@ -142,8 +142,11 @@ The configured state-pool byte budget stays unchanged, and draft scratch remains
 separate from immutable public prefix states.
 
 State allocation uses the current round's admitted lengths, including shorter
-calibration rounds and request tails. A request drafting N > 0 tokens needs N + 2
-temporary slots; a zero-draft tail in a verifying batch needs one. If capacity is
+calibration rounds and request tails. Drafting uses one mutable working slot per
+active request. Before verification, those slots return to the pool and the actual
+N + 1 verification snapshots are allocated. The temporary peak is therefore
+sum(N_i + 1) across the batch, including one slot for each zero-draft tail; draft
+and verification no longer reserve their slots simultaneously. If capacity is
 short, free and evictable prefix-state slots are considered first, then the draft
 ceiling is shortened. If even one step for the current batch cannot fit, the
 whole batch uses ordinary generation. This does not split batches, enlarge the
