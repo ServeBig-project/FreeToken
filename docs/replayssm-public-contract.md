@@ -128,6 +128,45 @@ q/k归一化、q缩放、门控转换、卷积和dtype规则由生产入口的�
 
 若入口契约尚未公布，暂停该部分测试编写并向协调者索取契约，不读取实现源码补齐。
 
+### 5.1 已公布的生产入口
+
+```python
+from freetoken.kernel.triton.gdn_replay import gdn_replay, gdn_replay_fold, gdn_replay_conv
+```
+
+记号：H个key头、HV个value头（HV整除H，value头j使用key头`j // (HV/H)`），头维K、V；R为记录环长度（2的幂）；m为请求记录行；slot为完整状态槽。每个value头的状态S是V×K矩阵，`y = S @ q`，`state[slot, j]`按行v、列k存放。
+
+记录按**绝对输入位置**p存放在环中：`u[m, j, p & (R-1), :]`（长度V）、`k[m, h, p & (R-1), :]`（归一化后的key，长度K）、`g[m, j, p & (R-1)]`（fp32）。位置p指已消费输入的序号：p之前的输入已经进入状态。
+
+**`gdn_replay(qkv, a, b, A_log, dt_bias, state, u, k, g, cu_seqlens, slots, cursors, scale) -> out`**
+
+| 参数 | 形状／dtype | 说明 |
+| --- | --- | --- |
+| qkv | [tokens, 2·H·K + HV·V]，激活dtype | 卷积＋silu之后的每个token依次为q(H×K)、k(H×K)、v(HV×V)；最后一维连续，行stride可更大 |
+| a, b | [tokens, HV]，激活dtype | 原始门控输入；最后一维连续 |
+| A_log, dt_bias | [HV] fp32 | |
+| state | [slots, HV, V, K] 连续，默认fp32 | 只读 |
+| u / k / g | [rows, HV, R, V] / [rows, H, R, K] / [rows, HV, R]；u、k为激活dtype，g为fp32，连续 | 记录 |
+| cu_seqlens | [n+1] int32 | 序列i的输入为`[cu[i], cu[i+1])`，长度T |
+| slots | [n] int32 | 序列i的完整状态槽 |
+| cursors | [n, 3] int32 | `(m, b, p)`：记录行、完整状态所在位置b、本次第一个输入的位置p |
+
+语义（序列i）：起始状态＝`state[slot]`依次叠加位置`[b, p)`的记录；随后对T个输入逐个执行
+`q̂ = q/√(Σq²+1e-6)·scale`，`k̂ = k/√(Σk²+1e-6)`，`g = -exp(A_log)·softplus(a+dt_bias)`（x>20时softplus(x)=x），`β = sigmoid(b)`，`S ← e^g·S`，`u = β(v − S k̂)`，`S ← S + u k̂ᵀ`，`y = S q̂`。
+返回`out[tokens, HV, V]`（qkv的dtype），并写入位置`[p, p+T)`的记录`(u, k̂, g)`。不修改state、其他位置或其他行的记录。要求`0 ≤ p−b`且`p+T−b ≤ R`；同一次调用中各序列的记录行互不相同。`m < 0`表示padding：输出行为0，不写任何记录。
+
+**`gdn_replay_fold(state, u, k, g, plan) -> None`**
+
+state为[L, slots, HV, V, K]，u/k/g为带层维的[L, rows, …]；`plan`为[n, 5] int32，每行`(源slot, 目标slot, m, b, count)`，`count ≤ R`。对每一层写入`state[l, 目标] =` 源状态（位于位置b）依次叠加位置`[b, b+count)`的记录后的完整状态，即长度为`b+count`的前缀对应的状态。目标可以等于源（原地合并）；记录不被修改；各行的目标互不相同且不等于其他行的源。
+
+**`gdn_replay_conv(x, weight, window, cu_seqlens, cursors) -> out`**
+
+x为[tokens, D]的原始卷积输入（激活dtype），weight为[D, KW]，window为[rows, W, D]，按绝对位置存原始卷积输入：`window[m, q % W]`为位置q的输入。调用前须保证位置`[p−KW+1, p)`的输入已在窗口中。输出`out_t = silu(Σ_j weight[:, j]·x(p+t−KW+1+j))`（fp32累加，输出x的dtype），其中`q ≥ p`的输入取自x，`q < p`的取自窗口；之后`window[m, (p+t) % W] = x_t`。要求`W ≥ KW−1+T`；`m < 0`时输出0、不写窗口。cursors的b列不使用。
+
+精度：所有乘加在fp32中完成（矩阵乘为IEEE fp32）；u、k按激活dtype存储，g为fp32，完整状态保持其存储dtype。单次调用内部的逐token递推使用未舍入的fp32 u、k，因此与普通逐token递推相比，只有此前调用写入的u、k记录存在舍入。
+
+模型中的用法：每个GDN层先做卷积（target AR沿用原有逐token卷积并原地更新卷积状态；draft和verify使用`gdn_replay_conv`），再以该层的state／记录视图调用`gdn_replay`；`gdn_replay_fold`用于合并记录和导出完整状态。`state`在模型中是状态池的一层视图，K=V时与上表布局一致。
+
 ## 6. 最小服务验收集合
 
 不做所有参数的全笛卡尔积。每个case必须说明会检测什么实际失败，失败后改变什么交付结论。
