@@ -279,6 +279,22 @@ def parse_args(
         help="Prefetch predicted verification experts into the shared cache while drafting.",
     )
     parser.add_argument(
+        "--enable-gdn-replayssm", action="store_true",
+        help="GatedDeltaNet state as checkpoint + update records for target decode, draft and verify.",
+    )
+    parser.add_argument(
+        "--gdn-replay-buffer-len",
+        type=_positive_int,
+        default=ServerArgs.gdn_replay_buffer_len,
+        help="Update records per active request (power of two, > the SD draft length).",
+    )
+    parser.add_argument(
+        "--gdn-state-budget-bytes",
+        type=_positive_int,
+        default=ServerArgs.gdn_state_budget_bytes,
+        help="Startup bytes for all GDN state storage (default: the replay-off state pool's bytes).",
+    )
+    parser.add_argument(
         "--max-seq-len-override",
         type=int,
         default=ServerArgs.max_seq_len_override,

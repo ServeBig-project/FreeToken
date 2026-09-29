@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 from freetoken.distributed import get_tp_info
 from freetoken.env import ENV
@@ -20,13 +22,22 @@ def ssm_state_dtype() -> torch.dtype:
 
 def _linear_local_dims(
     group: LinearGatedDeltaGroupConfig, tp_size: int
-) -> tuple[int, int, int]:
-    """TP-local ``(n_layers, conv_dim, v_heads)`` for the GDN state tensors -- the single
-    source of the sharding math shared by the pool allocation and the byte estimate."""
+) -> tuple[int, int, int, int]:
+    """TP-local ``(n_layers, conv_dim, v_heads, k_heads)`` for the GDN state tensors -- the
+    single source of the sharding math shared by the pool allocation and the byte estimate."""
     local_k_heads = div_even(group.num_key_heads, tp_size, allow_replicate=True)
     local_v_heads = div_even(group.num_value_heads, tp_size, allow_replicate=True)
     local_conv_dim = 2 * local_k_heads * group.key_head_dim + local_v_heads * group.value_head_dim
-    return len(group.layer_ids), local_conv_dim, local_v_heads
+    return len(group.layer_ids), local_conv_dim, local_v_heads, local_k_heads
+
+
+def _replay_shapes(group, tp_size, dtype, records):
+    """ReplaySSM buffers for ``records = (rows, ring, draft_steps)``."""
+    from .gdn_replay import replay_shapes
+
+    n_layers, conv_dim, v_heads, k_heads = _linear_local_dims(group, tp_size)
+    return replay_shapes(n_layers, conv_dim, v_heads, k_heads, group.key_head_dim,
+                         group.value_head_dim, group.conv_kernel_dim, dtype, *records)
 
 
 class LinearStatePool:
@@ -45,6 +56,7 @@ class LinearStatePool:
         device: torch.device,
         tp_size: int | None = None,
         fixed_slots: int = 0,
+        records: tuple[int, int, int] | None = None,
     ) -> None:
         if tp_size is None:
             tp_size = get_tp_info().size
@@ -54,7 +66,7 @@ class LinearStatePool:
         self._device = device
         self._conv_dtype = dtype
 
-        n_layers, local_conv_dim, local_v_heads = _linear_local_dims(group, tp_size)
+        n_layers, local_conv_dim, local_v_heads, _ = _linear_local_dims(group, tp_size)
 
         # conv left-context: the last (kernel-1) timesteps of the conv input stream.
         self.conv_states = torch.zeros(
@@ -74,13 +86,39 @@ class LinearStatePool:
         # Naive live slots belong to TableManager, so they must never enter this allocator.
         self.padding_slot = fixed_slots
         self._free_slots: list[int] = list(range(self.padding_slot + 1, num_slots))
+        # ReplaySSM: each live slot is a checkpoint completed by its request's update records.
+        self.replay = None
+        if records is not None:
+            from .gdn_replay import GdnReplay
 
-    @staticmethod
-    def speculative_size(lengths):
+            self.replay = GdnReplay(self, _replay_shapes(group, tp_size, dtype, records), device)
+
+    def can_export(self, req, position: int) -> bool:
+        """Whether the complete state after ``position`` inputs can still be produced."""
+        if self.replay is not None:
+            return self.replay.can_export(req, position)
+        return position == req.cached_len
+
+    def export(self, req, position: int, dst: int) -> None:
+        if self.replay is not None:
+            self.replay.export(req, position, dst)
+        else:
+            self.copy_from(req.linear_slot_idx, dst)
+
+    def materialize(self, req) -> None:
+        """Make the request's own slot its complete current state."""
+        if self.replay is not None:
+            self.replay.materialize(req)
+
+    def speculative_size(self, lengths):
+        if self.replay is not None:
+            return 0  # records replace draft and verify slots
         # Verify needs at least as many slots as the one-per-active-request draft phase.
         return sum(length + 1 for length in lengths)
 
     def limit_speculation(self, lengths, available):
+        if self.replay is not None:
+            return lengths
         for limit in range(max(lengths), 0, -1):
             capped = [min(length, limit) for length in lengths]
             if self.speculative_size(capped) <= available:
@@ -88,11 +126,15 @@ class LinearStatePool:
         return [0] * len(lengths)
 
     def begin_speculation(self, reqs, views, lengths):
+        if self.replay is not None:
+            return self.replay.begin_round(reqs, lengths)
         return LinearSpeculativeState(self, reqs, views, lengths)
 
     def create_speculative_graphs(self, max_batch, query_width, device):
-        from freetoken.attention.linear import FLASpeculativeGraphs
+        from freetoken.attention.linear import FLASpeculativeGraphs, ReplaySpeculativeGraphs
 
+        if self.replay is not None:
+            return ReplaySpeculativeGraphs(self, max_batch, device)
         return FLASpeculativeGraphs(self, max_batch, query_width, device)
 
     @property
@@ -207,7 +249,7 @@ def linear_state_bytes_per_req(
     dtype: torch.dtype,
 ) -> int:
     """Linear-state bytes for one request across all linear layers (TP-local)."""
-    n_layers, local_conv_dim, local_v_heads = _linear_local_dims(group, tp_size)
+    n_layers, local_conv_dim, local_v_heads, _ = _linear_local_dims(group, tp_size)
 
     conv_elems = local_conv_dim * (group.conv_kernel_dim - 1)
     rec_elems = local_v_heads * group.key_head_dim * group.value_head_dim
@@ -220,25 +262,57 @@ __all__ = ["LinearStatePool", "linear_state_bytes_per_req"]
 
 
 def state_pool_bytes(config, num_slots: int | None = None) -> int:
-    """Total GDN state-pool bytes at ``num_slots`` PHYSICAL slots (default: the startup
-    slot count). The engine adds this to the KV family's fixed cost when budgeting --
-    the state pool is a sibling pool, not a KV tier."""
+    """Total GDN state bytes at ``num_slots`` PHYSICAL slots (default: the startup slot
+    count), including the fixed ReplaySSM buffers. The engine adds this to the KV family's
+    fixed cost when budgeting -- the state pool is a sibling pool, not a KV tier."""
     linear_group = config.model_config.linear_attention_group()
     if linear_group is None:
         return 0
     slots = num_slots if num_slots is not None else _linear_pool_num_slots(config)
-    return linear_state_bytes_per_req(linear_group, config.tp_info.size, config.dtype) * slots
+    per_slot = linear_state_bytes_per_req(linear_group, config.tp_info.size, config.dtype)
+    return per_slot * slots + replay_buffer_bytes(config)
+
+
+def replay_records(config) -> tuple[int, int, int] | None:
+    """``(rows, ring, draft_steps)`` of the ReplaySSM buffers, None when not active."""
+    if not config.enable_gdn_replayssm or config.model_config.linear_attention_group() is None:
+        return None
+    return config.max_running_req, config.gdn_replay_buffer_len, config.speculative_num_steps
+
+
+def replay_buffer_bytes(config) -> int:
+    records = replay_records(config)
+    if records is None:
+        return 0
+    shapes = _replay_shapes(config.model_config.linear_attention_group(), config.tp_info.size,
+                            config.dtype, records)
+    return sum(math.prod(shape) * dtype.itemsize for shape, dtype in shapes.values())
 
 
 def _linear_pool_num_slots(config) -> int:
-    """Keep the existing state byte budget; on-demand snapshots share its free slots
-    with live states, reusable public prefixes and speculative scratch."""
+    """Full-state slots that fit the GDN state budget next to the fixed ReplaySSM buffers.
+    Without an explicit budget it is the replay-off pool's bytes: on-demand snapshots share
+    its free slots with live states, reusable public prefixes and speculative scratch."""
     mr = config.max_running_req
     if config.cache_type != "hybrid_radix":
-        return mr + 1  # live + dummy/padding
-    ratio = config.linear_state_cache_ratio
-    n_cache = max(4, int(ratio * mr))
-    return 4 * mr + n_cache + 1
+        slots = mr + 1  # live + dummy/padding
+    else:
+        ratio = config.linear_state_cache_ratio
+        slots = 4 * mr + max(4, int(ratio * mr)) + 1
+    if config.gdn_state_budget_bytes is None and replay_records(config) is None:
+        return slots
+    per_slot = linear_state_bytes_per_req(
+        config.model_config.linear_attention_group(), config.tp_info.size, config.dtype)
+    budget = config.gdn_state_budget_bytes or slots * per_slot
+    fixed = replay_buffer_bytes(config)
+    slots = (budget - fixed) // per_slot
+    if slots < _linear_pool_min_slots(config):
+        raise ValueError(
+            f"GDN state budget {budget} bytes holds {max(slots, 0)} full states after "
+            f"{fixed} bytes of replay buffers; at least {_linear_pool_min_slots(config)} "
+            f"states of {per_slot} bytes are needed, raise --gdn-state-budget-bytes"
+        )
+    return slots
 
 
 def _linear_pool_min_slots(config) -> int:

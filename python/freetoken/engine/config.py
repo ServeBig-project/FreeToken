@@ -25,6 +25,12 @@ class EngineConfig:
     speculative_adaptive_cost: bool = False
     speculative_draft_load_missing: bool = False
     speculative_verify_prefetch: bool = False
+    # GDN ReplaySSM: target AR, draft and verify read checkpoint + per-position update records.
+    enable_gdn_replayssm: bool = False
+    gdn_replay_buffer_len: int = 32  # records per active request (ring), incl. the draft/verify tail
+    # Bytes for all GDN state storage (full states, records, conv windows); None keeps the
+    # replay-off pool's bytes.
+    gdn_state_budget_bytes: int | None = None
     attention_backend: str = "auto"
     moe_backend: str = "auto"
     # NVFP4 routed-expert GEMM backend (--nvfp4-backend): auto|marlin|flashinfer|triton.
@@ -102,6 +108,16 @@ class EngineConfig:
             raise ValueError("speculative_num_steps must be >= 0")
         if self.speculative_draft_experts < 1:
             raise ValueError("speculative_draft_experts must be >= 1")
+        ring = self.gdn_replay_buffer_len
+        if ring < 4 or ring & (ring - 1):
+            raise ValueError("--gdn-replay-buffer-len must be a power of two >= 4")
+        if self.enable_gdn_replayssm and ring < self.speculative_num_steps + 1:
+            raise ValueError(
+                f"--gdn-replay-buffer-len {ring} cannot hold a verify window of "
+                f"{self.speculative_num_steps + 1} inputs"
+            )
+        if self.gdn_state_budget_bytes is not None and self.gdn_state_budget_bytes <= 0:
+            raise ValueError("--gdn-state-budget-bytes must be positive")
         if (self.speculative_adaptive_cost or self.speculative_draft_load_missing
                 or self.speculative_verify_prefetch):
             if not 1 <= self.speculative_num_steps <= 8:

@@ -38,9 +38,12 @@ class GraphCaptureBuffer:
     table_idx: torch.Tensor  # per-request slot id for GatedDeltaNet state gather/scatter
     # Decode GDN query indptr = arange(bs+1); a constant per captured bs, filled once.
     fla_cu_seqlens: torch.Tensor
+    # ReplaySSM decode cursors (GdnReplay.cursors) for target-decode graphs; padding rows -1.
+    fla_cursors: torch.Tensor | None
 
     @classmethod
-    def init(cls, bs: int, vocab_size: int, device: torch.device) -> GraphCaptureBuffer:
+    def init(cls, bs: int, vocab_size: int, device: torch.device,
+             replay: bool = False) -> GraphCaptureBuffer:
         return GraphCaptureBuffer(
             input_ids=torch.zeros(bs, dtype=torch.int32, device=device),
             out_loc=torch.zeros(bs, dtype=torch.int32, device=device),
@@ -48,6 +51,8 @@ class GraphCaptureBuffer:
             logits=torch.empty(bs, vocab_size, dtype=torch.float32, device=device),
             table_idx=torch.zeros(bs, dtype=torch.int32, device=device),
             fla_cu_seqlens=torch.arange(bs + 1, dtype=torch.int32, device=device),
+            fla_cursors=(torch.full((bs, 3), -1, dtype=torch.int32, device=device)
+                         if replay else None),
         )
 
     def set_batch(self, batch: Batch) -> None:
@@ -65,6 +70,7 @@ class GraphCaptureBuffer:
             decode=FLAPathMetadata(
                 cu_seqlens=self.fla_cu_seqlens[: bs + 1],
                 cache_indices=self.table_idx[_slice],
+                cursors=self.fla_cursors[_slice] if self.fla_cursors is not None else None,
             )
         )
 
@@ -76,6 +82,8 @@ class GraphCaptureBuffer:
         self.positions[_slice] = batch.positions
         if batch.linear_table_idx is not None:
             self.table_idx[_slice] = batch.linear_table_idx
+        if self.fla_cursors is not None:
+            self.fla_cursors[_slice] = batch.fla_metadata.decode.cursors
 
 
 def _determine_cuda_graph_bs(
@@ -183,7 +191,9 @@ class GraphRunner:
         free_memory = get_free_memory(self.device)
         logger.info_rank0(f"Free GPU memory before capturing CUDA graphs: {mem_GB(free_memory)}")
 
-        self.buffer = GraphCaptureBuffer.init(self.max_graph_bs, vocab_size, self.device)
+        pool = get_global_ctx().linear_state_pool
+        self.buffer = GraphCaptureBuffer.init(self.max_graph_bs, vocab_size, self.device,
+                                              replay=pool is not None and pool.replay is not None)
         # MoE-only rebuild preserves real prefix KV, so capture must write the dummy slot.
         self.buffer.out_loc[:] = get_global_ctx().page_table[self.dummy_req.table_idx, 0]
         self._reset_moe_offload_cache()
@@ -359,6 +369,8 @@ class GraphRunner:
 
     def _set_dummy_linear_slots(self, bs: int) -> None:
         self.buffer.table_idx[:bs].fill_(self._dummy_state_slot())
+        if self.buffer.fla_cursors is not None:
+            self.buffer.fla_cursors[:bs].fill_(-1)
 
     def can_use_cuda_graph(self, batch: Batch) -> bool:
         if batch.draft_experts is not None or batch.is_speculative_verify:

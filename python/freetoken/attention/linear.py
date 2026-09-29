@@ -38,6 +38,12 @@ class FLAPathMetadata:
     track_h_row: torch.Tensor | None = None      # [nt] int64 row into h (boh_i + aligned//CHUNK)
     track_conv_src: torch.Tensor | None = None   # [nt, kernel-1] int64 conv-input token positions
 
+    # --- ReplaySSM: [n, 3] int32 (record row, checkpoint position, first input position) per
+    # request (see GdnReplay.cursors); None runs the recurrent-state kernels. Speculative rows
+    # (draft and verify) convolve through the replay window, never the target conv state.
+    cursors: torch.Tensor | None = None
+    speculative: bool = False
+
 
 @dataclass
 class FLAVerifyStep:
@@ -59,7 +65,8 @@ class FLAMetadata:
 
     Decode and prefill use different kernels. A mixed forward therefore carries one
     metadata view for each sub-batch instead of forcing its one-token decode sequences
-    through the chunked prefill path.
+    through the chunked prefill path. A ReplaySSM verify batch is a single ``decode`` view
+    whose sequences are the verify windows.
     """
 
     decode: FLAPathMetadata | None = None
@@ -83,12 +90,16 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
     def gdn_slot(r):
         return r.linear_slot_idx if r.linear_slot_idx is not None else r.table_idx
 
-    def build_decode(reqs, cache_indices=None):
+    replay = get_global_ctx().linear_state_pool.replay
+    to = lambda xs: torch.tensor(xs, dtype=torch.int32, **pin).to(device, non_blocking=True)
+
+    def build_decode(reqs, cache_indices=None, speculative=False):
         cu_seqlens = torch.arange(len(reqs) + 1, dtype=torch.int32, device=device)
         if cache_indices is None:
-            idx_host = torch.tensor([gdn_slot(r) for r in reqs], dtype=torch.int32, **pin)
-            cache_indices = idx_host.to(device, non_blocking=True)
-        return FLAPathMetadata(cu_seqlens=cu_seqlens, cache_indices=cache_indices)
+            cache_indices = to([gdn_slot(r) for r in reqs])
+        cursors = to(replay.cursors(reqs)) if replay is not None else None
+        return FLAPathMetadata(cu_seqlens=cu_seqlens, cache_indices=cache_indices,
+                               cursors=cursors, speculative=speculative)
 
     def build_prefill(reqs):
         lens = [r.extend_len for r in reqs]
@@ -117,9 +128,16 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
     if batch.is_decode_only:
         # the scheduler stages linear_table_idx from gdn_slot (decode), reused as-is here
         assert batch.linear_table_idx is not None
-        return FLAMetadata(
-            decode=build_decode(batch.padded_reqs, batch.linear_table_idx)
-        )
+        return FLAMetadata(decode=build_decode(
+            batch.padded_reqs, batch.linear_table_idx, batch.draft_experts is not None))
+    if replay is not None and batch.is_speculative_verify:
+        # Every verify window reads its request's target records and rewrites the draft tail.
+        reqs = batch.reqs
+        cu_seqlens = to([0, *(r.extend_len for r in reqs)]).cumsum_(0)
+        cursors = to(replay.cursors(reqs))
+        return FLAMetadata(decode=FLAPathMetadata(
+            cu_seqlens=cu_seqlens, cache_indices=to([gdn_slot(r) for r in reqs]),
+            cursors=cursors, speculative=True))
 
     decode = build_decode(batch.decode_reqs) if batch.has_decode else None
     prefill = build_prefill(batch.prefill_reqs) if batch.has_prefill else None
@@ -243,3 +261,32 @@ class FLASpeculativeGraphs:
                              physical_tokens, self.query_width, {"device": "cpu", "pin_memory": True})
         for buffer, tensor in zip((self.rows, self.write, self.prev, self.dst), host, strict=True):
             buffer[:, :bs].copy_(tensor, non_blocking=True)
+
+
+class ReplaySpeculativeGraphs:
+    """Stable ReplaySSM views for draft steps and ragged verify windows."""
+
+    def __init__(self, pool, max_batch, device):
+        self.pool = pool
+        self.arange = torch.arange(max_batch + 1, dtype=torch.int32, device=device)
+        self.cu = torch.zeros(max_batch + 1, dtype=torch.int32, device=device)
+        self.slots = torch.zeros(max_batch, dtype=torch.int32, device=device)
+        self.cursors = torch.zeros(max_batch, 3, dtype=torch.int32, device=device)
+
+    def prepare_capture(self, batch, lengths, tokens):
+        bs = batch.size
+        self.slots[:bs].fill_(self.pool.padding_slot)
+        self.cursors[:bs].fill_(-1)  # capture never touches records
+        verify = batch.is_speculative_verify
+        if verify:
+            self.cu[: bs + 1] = torch.tensor([0, *lengths], device=self.cu.device).cumsum(0)
+        batch.fla_metadata = FLAMetadata(decode=FLAPathMetadata(
+            cu_seqlens=(self.cu if verify else self.arange)[: bs + 1],
+            cache_indices=self.slots[:bs], cursors=self.cursors[:bs], speculative=True))
+
+    def prepare_replay(self, batch, physical_tokens):
+        bs, source = batch.size, batch.fla_metadata.decode
+        if batch.is_speculative_verify:
+            self.cu[: bs + 1].copy_(source.cu_seqlens)
+        self.slots[:bs].copy_(source.cache_indices)
+        self.cursors[:bs].copy_(source.cursors)

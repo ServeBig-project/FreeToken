@@ -27,7 +27,7 @@ from freetoken.kvcache import create_kv_pool, resolve_pool_class
 from freetoken.kvcache.base import CacheRebuildRejected
 from freetoken.kvcache.cache_status import _supports_swa_ratio
 from freetoken.kvcache.linear_state_pool import (
-    _linear_pool_min_slots, _linear_pool_num_slots, state_pool_bytes,
+    _linear_pool_min_slots, _linear_pool_num_slots, replay_records, state_pool_bytes,
 )
 
 logger = init_logger(__name__)
@@ -391,6 +391,7 @@ class Engine:
                 dtype=self.dtype,
                 device=self.device,
                 tp_size=config.tp_info.size,
+                records=replay_records(config),
             )
             self.ctx.linear_state_pool = self.linear_state_pool
         else:

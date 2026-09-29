@@ -9,6 +9,8 @@ from freetoken.layers import BaseOP, LinearColParallelMerged
 from freetoken.kernel.triton.fp8_block_linear import Fp8BlockColMerged
 from freetoken.kernel.triton.fp8_pertensor_linear import Fp8PerTensorColMerged
 
+from freetoken.kernel.triton.gdn_replay import gdn_replay, gdn_replay_conv
+
 from .gdn_kernels import gdn_decode_fla, gdn_prefill_chunk_fla
 from .quant_linear import make_replicated_quant
 
@@ -149,6 +151,8 @@ class Qwen3_5GatedDeltaNet(BaseOP):
         pool, li: int, fla, dtype: torch.dtype,
     ) -> torch.Tensor:
         """Run the fused single-token conv and recurrence for a decode sub-batch."""
+        if fla.cursors is not None:
+            return self._run_replay(conv_in, a, b, pool, li, fla)
         mixed = self._conv_decode(conv_in, fla.cache_indices, pool)
         size = mixed.shape[0]
         qf, kf, vf = torch.split(
@@ -161,6 +165,21 @@ class Qwen3_5GatedDeltaNet(BaseOP):
             q, k, v, a, b, A_log=self.A_log, dt_bias=self.dt_bias,
             state_source=pool.recurrent_states[li], indices=fla.cache_indices,
             cu_seqlens=fla.cu_seqlens, scale=self.head_k_dim ** -0.5,
+        )
+
+    def _run_replay(self, conv_in, a, b, pool, li: int, fla) -> torch.Tensor:
+        """ReplaySSM: target decode, draft steps and verify windows share one recurrence from
+        each request's checkpoint plus records; only draft/verify use the replay conv window."""
+        replay = pool.replay
+        if fla.speculative:
+            mixed = gdn_replay_conv(conv_in, self._conv_weight(), replay.window[li],
+                                    fla.cu_seqlens, fla.cursors)
+        else:
+            mixed = self._conv_decode(conv_in, fla.cache_indices, pool)
+        return gdn_replay(
+            mixed, a, b, self.A_log, self.dt_bias, pool.recurrent_states[li], replay.u[li],
+            replay.k[li], replay.g[li], fla.cu_seqlens, fla.cache_indices, fla.cursors,
+            self.head_k_dim ** -0.5,
         )
 
     def _run_verify(
@@ -246,11 +265,10 @@ class Qwen3_5GatedDeltaNet(BaseOP):
 
         if fla.verify is not None:
             core_out = self._run_verify(conv_in, a, b, pool, li, fla.verify, dtype)
-        elif batch.is_decode_only:
+        elif fla.prefill is None:
             assert fla.decode is not None
             core_out = self._run_decode(conv_in, a, b, pool, li, fla.decode, dtype)
-        elif batch.is_mixed:
-            assert fla.decode is not None and fla.prefill is not None
+        elif fla.decode is not None:
             split = batch.decode_size
             decode_out = self._run_decode(
                 conv_in[:split], a[:split], b[:split], pool, li, fla.decode, dtype
@@ -260,7 +278,6 @@ class Qwen3_5GatedDeltaNet(BaseOP):
             )
             core_out = torch.cat((decode_out, prefill_out), dim=0)
         else:
-            assert fla.prefill is not None
             core_out = self._run_prefill(conv_in, a, b, pool, li, fla.prefill, dtype)
 
         core_out = core_out.reshape(-1, self.head_v_dim)
