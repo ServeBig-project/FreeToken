@@ -58,6 +58,7 @@ class UserReply(BaseFrontendMsg):
     matched_stop: str | None = None
     speculative: dict | None = None
     cuda_graph: dict | None = None
+    gdn_replayssm: dict | None = None
 
 
 @dataclass
@@ -70,3 +71,4 @@ class CacheRebuildReply(BaseFrontendMsg):
     mamba_slots: int = 0
     num_swa_pages: int = 0
     error: str | None = None
+    gdn_replayssm: dict | None = None

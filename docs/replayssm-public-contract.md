@@ -72,6 +72,8 @@ reserved_bytes          上述各存储项之和
 
 关闭路径的新增记录、额外卷积及专用元数据为0；无GDN时全部GDN存储为0。最小padding和对齐按实际字节计入，不能只报有效载荷。
 
+已实现：字段名与上表一致，没有别名。`checkpoint_bytes`为全部完整状态槽（含padding）的递推状态与卷积状态；`conv_workspace_bytes`只在启用SD时非0；每次forward的游标随批次上传，没有常驻的专用元数据或其他工作区，因此`metadata_bytes`与`state_workspace_bytes`为0。`state_budget_bytes`在状态槽数等于启动值时为启动预算（显式M，否则为关闭Replay时的状态池字节），重建成其他槽数后为该次重建的实际定价`reserved_bytes`。重建结果返回后立即更新；`limits.mamba_slots.max`已扣除记录与卷积窗口字节。
+
 ### 3.2 动态方法证据
 
 建议`/v1/stats.gdn_replayssm`至少提供：
@@ -83,6 +85,8 @@ flushes, flushed_records, snapshot_exports
 ```
 
 token计数按真实逻辑位置计一次，不按GDN层数／head数或Graph填充重复计数；AR项只计target decode，不混入prefill。flushes和snapshot_exports按请求级操作计数。已有SD长度直方图、接受数、Graph回放形状继续复用。
+
+已实现：`active`取自静态几何；其余计数随每批生成结果回报更新，是上一次回报时的值。`flushes`／`flushed_records`为合并进请求自身状态槽的次数与记录条数（包括请求结束捐献前的合并）；`snapshot_exports`为把完整状态导出到另一个槽的次数（工具调用位置快照）。token计数覆盖legacy、mixed与layered策略下经整模型forward执行的解码；joint／layered-pipeline驻留波次中的解码不计入。
 
 统计允许按现有生成回报时机更新，不承诺任意时刻的强同步读数；应注明采样时机。不得仅因idle后的`mamba.used_slots`非零判泄漏，公共缓存可能持有状态，该字段也可能是上一批的快照。
 

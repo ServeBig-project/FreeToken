@@ -969,6 +969,8 @@ class Engine:
         assert torch.cuda.current_stream() == self.stream
         if self.speculative_cost is not None:
             self.speculative_cost.begin_model(batch)
+        if self.linear_state_pool is not None and self.linear_state_pool.replay is not None:
+            self.linear_state_pool.replay.observe(batch)
         with self.ctx.forward_batch(batch):
             if self.graph_runner.can_use_cuda_graph(batch):
                 logits = self.graph_runner.replay(batch)

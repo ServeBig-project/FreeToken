@@ -289,21 +289,30 @@ def replay_buffer_bytes(config) -> int:
     return sum(math.prod(shape) * dtype.itemsize for shape, dtype in shapes.values())
 
 
-def _linear_pool_num_slots(config) -> int:
-    """Full-state slots that fit the GDN state budget next to the fixed ReplaySSM buffers.
-    Without an explicit budget it is the replay-off pool's bytes: on-demand snapshots share
-    its free slots with live states, reusable public prefixes and speculative scratch."""
+def _default_pool_slots(config) -> int:
+    """Replay-off slots: on-demand snapshots share the free slots with live states,
+    reusable public prefixes and speculative scratch."""
     mr = config.max_running_req
     if config.cache_type != "hybrid_radix":
-        slots = mr + 1  # live + dummy/padding
-    else:
-        ratio = config.linear_state_cache_ratio
-        slots = 4 * mr + max(4, int(ratio * mr)) + 1
-    if config.gdn_state_budget_bytes is None and replay_records(config) is None:
-        return slots
+        return mr + 1  # live + dummy/padding
+    ratio = config.linear_state_cache_ratio
+    return 4 * mr + max(4, int(ratio * mr)) + 1
+
+
+def gdn_state_budget(config) -> int:
+    """Startup GDN state bytes: the explicit budget, else the replay-off pool's bytes."""
     per_slot = linear_state_bytes_per_req(
         config.model_config.linear_attention_group(), config.tp_info.size, config.dtype)
-    budget = config.gdn_state_budget_bytes or slots * per_slot
+    return config.gdn_state_budget_bytes or _default_pool_slots(config) * per_slot
+
+
+def _linear_pool_num_slots(config) -> int:
+    """Full-state slots that fit the GDN state budget next to the fixed ReplaySSM buffers."""
+    if config.gdn_state_budget_bytes is None and replay_records(config) is None:
+        return _default_pool_slots(config)
+    per_slot = linear_state_bytes_per_req(
+        config.model_config.linear_attention_group(), config.tp_info.size, config.dtype)
+    budget = gdn_state_budget(config)
     fixed = replay_buffer_bytes(config)
     slots = (budget - fixed) // per_slot
     if slots < _linear_pool_min_slots(config):

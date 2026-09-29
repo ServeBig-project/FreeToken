@@ -184,6 +184,33 @@ def compute_cache_pools(engine: "Engine") -> Dict[str, int]:
     return pools
 
 
+def compute_gdn_state_geometry(engine: "Engine") -> Dict[str, Any]:
+    """GDN state storage by kind, with the budget it was planned against: the startup budget
+    while the pool keeps its startup slot count, else the priced bytes of the rebuilt pool."""
+    from .linear_state_pool import _linear_pool_num_slots, gdn_state_budget
+
+    geo: Dict[str, Any] = {"active": False, "buffer_len": 0, "request_capacity": 0}
+    geo.update(dict.fromkeys((
+        "state_budget_bytes", "checkpoint_bytes", "record_bytes", "conv_workspace_bytes",
+        "metadata_bytes", "state_workspace_bytes", "reserved_bytes"), 0))
+    pool = engine.linear_state_pool
+    if pool is None:
+        return geo
+    size = lambda t: t.numel() * t.element_size()
+    geo["checkpoint_bytes"] = size(pool.conv_states) + size(pool.recurrent_states)
+    replay = pool.replay
+    if replay is not None:
+        geo.update(active=True, buffer_len=replay.ring, request_capacity=replay.rows,
+                   record_bytes=size(replay.u) + size(replay.k) + size(replay.g),
+                   conv_workspace_bytes=size(replay.window) if replay.window is not None else 0)
+    geo["reserved_bytes"] = (geo["checkpoint_bytes"] + geo["record_bytes"]
+                             + geo["conv_workspace_bytes"])
+    startup = pool.num_slots == _linear_pool_num_slots(engine.config)
+    geo["state_budget_bytes"] = (gdn_state_budget(engine.config) if startup
+                                 else geo["reserved_bytes"])
+    return geo
+
+
 def compute_cache_status_meta(engine: "Engine") -> Dict[str, Any]:
     """Full readiness ("meta", …) payload for the desktop cache panel: the per-unit VRAM costs
     (compute_cache_unit_bytes) plus the post-weights pre-pool free-VRAM baseline (the sliders'
@@ -195,6 +222,7 @@ def compute_cache_status_meta(engine: "Engine") -> Dict[str, Any]:
     meta["floors"] = compute_cache_floors(engine)
     meta["pools"] = compute_cache_pools(engine)
     meta["cuda_graph"] = engine.graph_runner.stats_snapshot()
+    meta["gdn_replayssm"] = compute_gdn_state_geometry(engine)
     # Current window/full reuse ratio (the tunable knob), for DSV4 and radix-SWA; 0.0 otherwise.
     cfg = engine.config
     has_swa_ratio = cfg is not None and _supports_swa_ratio(cfg)

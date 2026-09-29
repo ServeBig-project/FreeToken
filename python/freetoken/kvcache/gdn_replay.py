@@ -44,6 +44,18 @@ class GdnReplay:
         self.start = [0] * self.rows
         # (first, last) positions whose conv state the window still holds after a commit.
         self.window_span: list[tuple[int, int] | None] = [None] * self.rows
+        # Logical positions per role and request-level folds, for /v1/stats.
+        self.counts = dict.fromkeys(("ar_tokens", "draft_tokens", "verify_tokens", "flushes",
+                                     "flushed_records", "snapshot_exports"), 0)
+
+    def observe(self, batch) -> None:
+        """Count the real positions a forward runs through the records."""
+        if batch.is_speculative_verify:
+            self.counts["verify_tokens"] += sum(req.extend_len for req in batch.reqs)
+        elif batch.draft_experts is not None:
+            self.counts["draft_tokens"] += batch.size
+        else:
+            self.counts["ar_tokens"] += batch.decode_size
 
     @staticmethod
     def _slot(req) -> int:
@@ -82,6 +94,12 @@ class GdnReplay:
             pool = self.pool
             gdn_replay_fold(pool.recurrent_states, self.u, self.k, self.g,
                             _device(plan, pool.device))
+        for src, dst, _, _, count in plan:
+            if src == dst:
+                self.counts["flushes"] += 1
+                self.counts["flushed_records"] += count
+            else:
+                self.counts["snapshot_exports"] += 1
 
     def can_export(self, req, position: int) -> bool:
         row = req.table_idx
