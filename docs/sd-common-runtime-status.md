@@ -1,6 +1,8 @@
-# 公共 SD 基座：2026-09-25 状态
+# 公共 SD 基座：当前状态
 
 Qwen3 MoE 与 Qwen3.6-35B-A3B 已使用公共SD流程。按需前缀快照、draft／verify临时槽复用已完成本轮资源与生命周期验收；**ReplaySSM尚未实现，质量等价尚未成立**。
+
+2026-09-29已整理下一阶段的[ReplaySSM实现协议](replayssm-implementation-protocol.md)与[公开验收契约](replayssm-public-contract.md)。最终设计是AR／draft／verify全部使用Replay、按阶段复用记录尾部；旧target-only草案不再适用。下列生产结果仍来自2026-09-25的已完成阶段。
 
 ## 当前实现
 
