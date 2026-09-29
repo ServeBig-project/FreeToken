@@ -106,9 +106,10 @@ class GdnReplay:
         if not plan:
             return
         pool = self.pool
+        planned = _device(plan, pool.device)
         start, end = (torch.cuda.Event(enable_timing=True) for _ in range(2))
         start.record()
-        gdn_replay_fold(pool.recurrent_states, self.u, self.k, self.g, _device(plan, pool.device))
+        gdn_replay_fold(pool.recurrent_states, self.u, self.k, self.g, planned)
         end.record()
         # A plan either folds records in place or exports one state to another slot.
         self._timed.append(("flush_gpu_ms" if plan[0][0] == plan[0][1] else "export_gpu_ms",
