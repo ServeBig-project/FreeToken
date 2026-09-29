@@ -43,7 +43,12 @@ class SpeculativeCost:
         # External record nodes publish fresh timestamps on every graph replay.
         self.copy_events = [[self._events(True) for _ in range(self.layers)] for _ in self.phases]
         self.gemm_events = [[self._events(True) for _ in range(self.layers)] for _ in self.phases]
-        self.gpu_ms = dict.fromkeys((*self.phases, "moe_compute", "demand_copy", "prefetch_copy", "prefetch_wait"), 0.0)
+        self.gpu_ms = dict.fromkeys((*self.phases, "state", "moe_compute", "demand_copy", "prefetch_copy", "prefetch_wait"), 0.0)
+        # Round state work outside the model forwards: 0 = begin (state setup, folds), 1 = commit.
+        self.state_events = [self._events(), self._events()]
+        self.state_pending = [None, None]
+        self.state_ms = torch.zeros(2, batches, device=device)
+        self.state_ms_cpu = {}
         self.transfer_predictions = {p: dict(predicted_experts=0.0, actual_experts=0,
                                               abs_error_experts=0.0) for p in self.phases}
         self.control_ms = 0.0
@@ -99,6 +104,24 @@ class SpeculativeCost:
         if graphs.can_use_cuda_graph(batch):
             physical = (graphs.speculative._key(batch)[2] if phase else batch.padded_size)
         self.pending[phase] = (batch.size, physical, batch.positions.numel())
+
+    def begin_state(self, part):
+        """Time one part of a round's state work; the previous sample of that part is read
+        only if its events already completed, so this never waits on the GPU."""
+        batch_size = self.state_pending[part]
+        start, end = self.state_events[part]
+        if batch_size is not None and end.query():
+            ms = start.elapsed_time(end)
+            self.gpu_ms["state"] += ms
+            key = (part, batch_size)
+            self.state_ms_cpu[key] = 0.8 * self.state_ms_cpu.get(key, ms) + 0.2 * ms
+            self.state_ms[part, batch_size].fill_(self.state_ms_cpu[key])
+        self.state_pending[part] = None
+        start.record()
+
+    def end_state(self, part, batch_size):
+        self.state_events[part][1].record()
+        self.state_pending[part] = batch_size
 
     def _collect(self, phase, rows, predicted, prefetch_rows=None):
         pending = self.pending.pop(phase, None)
@@ -218,7 +241,8 @@ class SpeculativeCost:
         else:
             ar = self._estimate(0, batch_size, batch_size)
             survival = self._survival(batch_size)
-            draft_cost = torch.zeros_like(ar)
+            # A round pays its state setup and commit once, whatever depth it drafts to.
+            draft_cost = self.state_ms[:, batch_size].sum()
             best = torch.zeros((), dtype=torch.bool, device=self.engine.device)
             expected = torch.ones_like(ar)
             for step in range(max(lengths)):

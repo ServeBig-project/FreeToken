@@ -86,7 +86,7 @@ flushes, flushed_records, snapshot_exports
 
 token计数按真实逻辑位置计一次，不按GDN层数／head数或Graph填充重复计数；AR项只计target decode，不混入prefill。flushes和snapshot_exports按请求级操作计数。已有SD长度直方图、接受数、Graph回放形状继续复用。
 
-已实现：`active`取自静态几何；其余计数随每批生成结果回报更新，是上一次回报时的值。`flushes`／`flushed_records`为合并进请求自身状态槽的次数与记录条数（包括请求结束捐献前的合并）；`snapshot_exports`为把完整状态导出到另一个槽的次数（工具调用位置快照）。token计数覆盖legacy、mixed与layered策略下经整模型forward执行的解码；joint／layered-pipeline驻留波次中的解码不计入。
+已实现：`active`取自静态几何；其余计数随每批生成结果回报更新，是上一次回报时的值。`flushes`／`flushed_records`为合并进请求自身状态槽的次数与记录条数（包括请求结束捐献前的合并）；`snapshot_exports`为把完整状态导出到另一个槽的次数（工具调用位置快照）。token计数覆盖legacy、mixed与layered策略下经整模型forward执行的解码；joint／layered-pipeline驻留波次中的解码不计入。`flush_gpu_ms`／`export_gpu_ms`为已完成的合并／导出kernel的GPU时间（事件计时，不做同步，未完成的计入下一次回报）。开启`--speculative-adaptive-cost`或`--speculative-verify-prefetch`时，`speculative.cost_gpu_ms.state`为每轮在模型forward之外的状态工作（起草前准备，包括其中的合并，以及提交）的GPU时间，与`flush_gpu_ms`有重叠，不能相加；`ar`／`draft`／`verify`仍只计模型forward。
 
 统计允许按现有生成回报时机更新，不承诺任意时刻的强同步读数；应注明采样时机。不得仅因idle后的`mamba.used_slots`非零判泄漏，公共缓存可能持有状态，该字段也可能是上一批的快照。
 
@@ -167,7 +167,7 @@ state为[L, slots, HV, V, K]，u/k/g为带层维的[L, rows, …]；`plan`为[n,
 
 x为[tokens, D]的原始卷积输入（激活dtype），weight为[D, KW]，window为[rows, W, D]，按绝对位置存原始卷积输入：`window[m, q % W]`为位置q的输入。调用前须保证位置`[p−KW+1, p)`的输入已在窗口中。输出`out_t = silu(Σ_j weight[:, j]·x(p+t−KW+1+j))`（fp32累加，输出x的dtype），其中`q ≥ p`的输入取自x，`q < p`的取自窗口；之后`window[m, (p+t) % W] = x_t`。要求`W ≥ KW−1+T`；`m < 0`时输出0、不写窗口。cursors的b列不使用。
 
-精度：所有乘加在fp32中完成（矩阵乘为IEEE fp32）；u、k按激活dtype存储，g为fp32，完整状态保持其存储dtype。单次调用内部的逐token递推使用未舍入的fp32 u、k，因此与普通逐token递推相比，只有此前调用写入的u、k记录存在舍入。
+精度：所有乘加在fp32中完成，其中记录叠加进状态的矩阵乘使用3×TF32（误差接近fp32）；u、k按激活dtype存储，g为fp32，完整状态保持其存储dtype。单次调用内部的逐token递推使用未舍入的fp32 u、k，因此与普通逐token递推相比，只有此前调用写入的u、k记录存在舍入。
 
 模型中的用法：每个GDN层先做卷积（target AR沿用原有逐token卷积并原地更新卷积状态；draft和verify使用`gdn_replay_conv`），再以该层的state／记录视图调用`gdn_replay`；`gdn_replay_fold`用于合并记录和导出完整状态。`state`在模型中是状态池的一层视图，K=V时与上表布局一致。
 

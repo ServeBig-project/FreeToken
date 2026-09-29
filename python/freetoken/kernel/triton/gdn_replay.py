@@ -14,9 +14,10 @@ moves data. The state after the records ``[b, b + n)`` is
 
     S = exp(sum g) * S_b + sum_i exp(sum of the g after i) * u_i k_i^T.
 
-Precision: every product and accumulation runs in fp32 (``tl.dot`` uses IEEE fp32). The
-records u and k are stored in the activation dtype and g in fp32; the checkpoint keeps its
-storage dtype. Within one call the recurrence over the call's own inputs uses the unrounded
+Precision: every product and accumulation runs in fp32; the one matrix product (records
+into the state) uses 3xTF32, whose error is close to fp32 and which runs ~18x faster than
+IEEE fp32 dots on the 4090. The records u and k are stored in the activation dtype and g in
+fp32; the checkpoint keeps its storage dtype. Within one call the recurrence over the call's own inputs uses the unrounded
 fp32 u and k, so the only rounding relative to the plain recurrent kernel is the stored
 u/k of earlier calls.
 """
@@ -47,7 +48,7 @@ def _replayed_state(state, u, k, g, slot, row, start, count, i_hv, i_h, o_v, o_k
                   mask=mask_v[:, None] & valid[None, :], other=0.0).to(tl.float32)
     b_k = tl.load(k + row * stride_k + (i_h * R + ring[:, None]) * K + o_k[None, :],
                   mask=valid[:, None] & mask_k[None, :], other=0.0).to(tl.float32)
-    return S * tl.exp(total) + tl.dot(b_u * coef[None, :], b_k, input_precision="ieee")
+    return S * tl.exp(total) + tl.dot(b_u * coef[None, :], b_k, input_precision="tf32x3")
 
 
 @triton.jit

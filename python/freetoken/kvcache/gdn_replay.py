@@ -44,9 +44,22 @@ class GdnReplay:
         self.start = [0] * self.rows
         # (first, last) positions whose conv state the window still holds after a commit.
         self.window_span: list[tuple[int, int] | None] = [None] * self.rows
-        # Logical positions per role and request-level folds, for /v1/stats.
+        # Logical positions per role, request-level folds and their GPU time, for /v1/stats.
         self.counts = dict.fromkeys(("ar_tokens", "draft_tokens", "verify_tokens", "flushes",
                                      "flushed_records", "snapshot_exports"), 0)
+        self.counts.update(flush_gpu_ms=0.0, export_gpu_ms=0.0)
+        self._timed: list[tuple[str, torch.cuda.Event, torch.cuda.Event]] = []
+
+    def snapshot(self) -> dict:
+        """Counters, adding the GPU time of every fold that has already completed."""
+        pending = []
+        for key, start, end in self._timed:
+            if end.query():
+                self.counts[key] += start.elapsed_time(end)
+            else:
+                pending.append((key, start, end))
+        self._timed = pending
+        return dict(self.counts)
 
     def observe(self, batch) -> None:
         """Count the real positions a forward runs through the records."""
@@ -90,10 +103,16 @@ class GdnReplay:
         self._fold(plan)
 
     def _fold(self, plan) -> None:
-        if plan:
-            pool = self.pool
-            gdn_replay_fold(pool.recurrent_states, self.u, self.k, self.g,
-                            _device(plan, pool.device))
+        if not plan:
+            return
+        pool = self.pool
+        start, end = (torch.cuda.Event(enable_timing=True) for _ in range(2))
+        start.record()
+        gdn_replay_fold(pool.recurrent_states, self.u, self.k, self.g, _device(plan, pool.device))
+        end.record()
+        # A plan either folds records in place or exports one state to another slot.
+        self._timed.append(("flush_gpu_ms" if plan[0][0] == plan[0][1] else "export_gpu_ms",
+                            start, end))
         for src, dst, _, _, count in plan:
             if src == dst:
                 self.counts["flushes"] += 1

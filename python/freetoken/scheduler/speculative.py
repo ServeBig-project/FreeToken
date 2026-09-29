@@ -130,7 +130,11 @@ class SpeculativeDecoder:
         starts = [req.device_len for req in batch.reqs]
         ends = [start + length for start, length in zip(starts, lengths, strict=True)]
         views = [copy(req) for req in batch.reqs]
+        if self.cost is not None:
+            self.cost.begin_state(0)
         state = self.cache.begin_speculation(batch.reqs, views, lengths)
+        if self.cost is not None:
+            self.cost.end_state(0, batch.size)
         # The ordinary decode query is already allocated. Reserve only the extra
         # span; the same physical slots serve drafting and target verification.
         for req, start, end in zip(views, starts, ends, strict=True):

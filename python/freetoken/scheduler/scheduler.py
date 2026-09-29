@@ -1060,7 +1060,12 @@ class Scheduler(SchedulerIOMixin):
                 completed.append((i, req, finished))
 
             if output.speculative_state is not None:
+                cost = self.speculative.cost
+                if cost is not None:
+                    cost.begin_state(1)
                 output.speculative_state.commit(retained)
+                if cost is not None:
+                    cost.end_state(1, batch.size)
             for i, req, finished in completed:
                 # NOTE: overlap scheduling may make the request freed twice, skip second free
                 if finished and req not in suppressed_finished_reqs:
@@ -1089,7 +1094,7 @@ class Scheduler(SchedulerIOMixin):
             reply[-1].cuda_graph = self.engine.graph_runner.stats_snapshot()
             pool = self.engine.linear_state_pool
             if pool is not None and pool.replay is not None:
-                reply[-1].gdn_replayssm = dict(pool.replay.counts)
+                reply[-1].gdn_replayssm = pool.replay.snapshot()
             if self.speculative is not None and (batch.has_decode or self.speculative.cost is not None):
                 reply[-1].speculative = self.speculative.snapshot()
             mem = self._gpu_mem_bytes()
