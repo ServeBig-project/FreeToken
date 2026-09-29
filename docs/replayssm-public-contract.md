@@ -72,7 +72,7 @@ reserved_bytes          上述各存储项之和
 
 关闭路径的新增记录、额外卷积及专用元数据为0；无GDN时全部GDN存储为0。最小padding和对齐按实际字节计入，不能只报有效载荷。
 
-已实现：字段名与上表一致，没有别名。`checkpoint_bytes`为全部完整状态槽（含padding）的递推状态与卷积状态；`conv_workspace_bytes`只在启用SD时非0；每次forward的游标随批次上传，没有常驻的专用元数据或其他工作区，因此`metadata_bytes`与`state_workspace_bytes`为0。`state_budget_bytes`在状态槽数等于启动值时为启动预算（显式M，否则为关闭Replay时的状态池字节），重建成其他槽数后为该次重建的实际定价`reserved_bytes`。重建结果返回后立即更新；`limits.mamba_slots.max`已扣除记录与卷积窗口字节。
+已实现：字段名与上表一致，没有别名。`checkpoint_bytes`为全部完整状态槽（含padding）的递推状态与卷积状态；`conv_workspace_bytes`只在启用SD时非0；`metadata_bytes`为CUDA Graph读取的Replay专用固定buffer（每行游标、状态槽号和查询偏移，按最大可捕获batch分配）；每次forward的游标先随批次上传再复制进这些buffer；没有其他专用工作区，`state_workspace_bytes`为0。`state_budget_bytes`在状态槽数等于启动值时为启动预算（显式M，否则为关闭Replay时的状态池字节），重建成其他槽数后为该次重建的实际定价`reserved_bytes`。重建结果返回后立即更新；`limits.mamba_slots.max`已扣除记录与卷积窗口字节。
 
 ### 3.2 动态方法证据
 

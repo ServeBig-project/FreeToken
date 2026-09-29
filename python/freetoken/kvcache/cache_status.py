@@ -200,11 +200,14 @@ def compute_gdn_state_geometry(engine: "Engine") -> Dict[str, Any]:
     geo["checkpoint_bytes"] = size(pool.conv_states) + size(pool.recurrent_states)
     replay = pool.replay
     if replay is not None:
+        graph = [t for t in (replay.graph_cursors, replay.graph_slots, replay.graph_cu)
+                 if t is not None]
         geo.update(active=True, buffer_len=replay.ring, request_capacity=replay.rows,
                    record_bytes=size(replay.u) + size(replay.k) + size(replay.g),
-                   conv_workspace_bytes=size(replay.window) if replay.window is not None else 0)
+                   conv_workspace_bytes=size(replay.window) if replay.window is not None else 0,
+                   metadata_bytes=sum(size(t) for t in graph))
     geo["reserved_bytes"] = (geo["checkpoint_bytes"] + geo["record_bytes"]
-                             + geo["conv_workspace_bytes"])
+                             + geo["conv_workspace_bytes"] + geo["metadata_bytes"])
     startup = pool.num_slots == _linear_pool_num_slots(engine.config)
     geo["state_budget_bytes"] = (gdn_state_budget(engine.config) if startup
                                  else geo["reserved_bytes"])

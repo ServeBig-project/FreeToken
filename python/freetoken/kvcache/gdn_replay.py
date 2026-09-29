@@ -6,7 +6,7 @@ from freetoken.kernel.triton.gdn_replay import gdn_replay_fold
 
 
 def replay_shapes(n_layers, conv_dim, v_heads, k_heads, key_dim, value_dim, kernel, dtype,
-                  rows, ring, draft_steps) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
+                  rows, ring, draft_steps, graph_rows) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
     """Shape and dtype of every ReplaySSM buffer; allocation and byte budgets both use it."""
     shapes = {
         "u": ((n_layers, rows, v_heads, ring, value_dim), dtype),
@@ -17,6 +17,12 @@ def replay_shapes(n_layers, conv_dim, v_heads, k_heads, key_dim, value_dim, kern
         # Raw conv inputs by absolute position: the target's kernel-1 inputs before a round
         # plus the round's draft/verify inputs.
         shapes["window"] = ((n_layers, rows, kernel - 1 + draft_steps + 1, conv_dim), dtype)
+    if graph_rows:
+        # Fixed per-row cursors, slots and offsets that captured graphs read; decode, draft and
+        # verify replays run in stream order, each staging its own values right before replay.
+        shapes["graph_cursors"] = ((graph_rows, 3), torch.int32)
+        shapes["graph_slots"] = ((graph_rows,), torch.int32)
+        shapes["graph_cu"] = ((graph_rows + 1,), torch.int32)
     return shapes
 
 
@@ -40,6 +46,9 @@ class GdnReplay:
                    for name, (shape, dtype) in shapes.items()}
         self.u, self.k, self.g = buffers["u"], buffers["k"], buffers["g"]
         self.window = buffers.get("window")
+        self.graph_cursors = buffers.get("graph_cursors")
+        self.graph_slots = buffers.get("graph_slots")
+        self.graph_cu = buffers.get("graph_cu")
         self.rows, self.ring = self.u.shape[1], self.u.shape[3]
         self.start = [0] * self.rows
         # (first, last) positions whose conv state the window still holds after a commit.

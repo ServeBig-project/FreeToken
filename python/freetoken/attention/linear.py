@@ -264,29 +264,25 @@ class FLASpeculativeGraphs:
 
 
 class ReplaySpeculativeGraphs:
-    """Stable ReplaySSM views for draft steps and ragged verify windows."""
+    """Stable ReplaySSM views for draft steps and ragged verify windows, on the replay
+    component's fixed graph buffers."""
 
-    def __init__(self, pool, max_batch, device):
+    def __init__(self, pool):
+        replay = pool.replay
         self.pool = pool
-        self.arange = torch.arange(max_batch + 1, dtype=torch.int32, device=device)
-        self.cu = torch.zeros(max_batch + 1, dtype=torch.int32, device=device)
-        self.slots = torch.zeros(max_batch, dtype=torch.int32, device=device)
-        self.cursors = torch.zeros(max_batch, 3, dtype=torch.int32, device=device)
+        self.cu, self.slots, self.cursors = replay.graph_cu, replay.graph_slots, replay.graph_cursors
 
     def prepare_capture(self, batch, lengths, tokens):
         bs = batch.size
         self.slots[:bs].fill_(self.pool.padding_slot)
         self.cursors[:bs].fill_(-1)  # capture never touches records
-        verify = batch.is_speculative_verify
-        if verify:
-            self.cu[: bs + 1] = torch.tensor([0, *lengths], device=self.cu.device).cumsum(0)
+        self.cu[: bs + 1] = torch.tensor([0, *lengths], device=self.cu.device).cumsum(0)
         batch.fla_metadata = FLAMetadata(decode=FLAPathMetadata(
-            cu_seqlens=(self.cu if verify else self.arange)[: bs + 1],
-            cache_indices=self.slots[:bs], cursors=self.cursors[:bs], speculative=True))
+            cu_seqlens=self.cu[: bs + 1], cache_indices=self.slots[:bs],
+            cursors=self.cursors[:bs], speculative=True))
 
     def prepare_replay(self, batch, physical_tokens):
         bs, source = batch.size, batch.fla_metadata.decode
-        if batch.is_speculative_verify:
-            self.cu[: bs + 1].copy_(source.cu_seqlens)
+        self.cu[: bs + 1].copy_(source.cu_seqlens)
         self.slots[:bs].copy_(source.cache_indices)
         self.cursors[:bs].copy_(source.cursors)

@@ -43,7 +43,7 @@ class GraphCaptureBuffer:
 
     @classmethod
     def init(cls, bs: int, vocab_size: int, device: torch.device,
-             replay: bool = False) -> GraphCaptureBuffer:
+             cursors: torch.Tensor | None = None) -> GraphCaptureBuffer:
         return GraphCaptureBuffer(
             input_ids=torch.zeros(bs, dtype=torch.int32, device=device),
             out_loc=torch.zeros(bs, dtype=torch.int32, device=device),
@@ -51,8 +51,7 @@ class GraphCaptureBuffer:
             logits=torch.empty(bs, vocab_size, dtype=torch.float32, device=device),
             table_idx=torch.zeros(bs, dtype=torch.int32, device=device),
             fla_cu_seqlens=torch.arange(bs + 1, dtype=torch.int32, device=device),
-            fla_cursors=(torch.full((bs, 3), -1, dtype=torch.int32, device=device)
-                         if replay else None),
+            fla_cursors=cursors[:bs] if cursors is not None else None,
         )
 
     def set_batch(self, batch: Batch) -> None:
@@ -192,8 +191,9 @@ class GraphRunner:
         logger.info_rank0(f"Free GPU memory before capturing CUDA graphs: {mem_GB(free_memory)}")
 
         pool = get_global_ctx().linear_state_pool
-        self.buffer = GraphCaptureBuffer.init(self.max_graph_bs, vocab_size, self.device,
-                                              replay=pool is not None and pool.replay is not None)
+        self.buffer = GraphCaptureBuffer.init(
+            self.max_graph_bs, vocab_size, self.device,
+            cursors=pool.replay.graph_cursors if pool is not None and pool.replay is not None else None)
         # MoE-only rebuild preserves real prefix KV, so capture must write the dummy slot.
         self.buffer.out_loc[:] = get_global_ctx().page_table[self.dummy_req.table_idx, 0]
         self._reset_moe_offload_cache()

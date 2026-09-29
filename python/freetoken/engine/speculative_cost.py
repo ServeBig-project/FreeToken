@@ -105,19 +105,24 @@ class SpeculativeCost:
             physical = (graphs.speculative._key(batch)[2] if phase else batch.padded_size)
         self.pending[phase] = (batch.size, physical, batch.positions.numel())
 
-    def begin_state(self, part):
-        """Time one part of a round's state work; the previous sample of that part is read
-        only if its events already completed, so this never waits on the GPU."""
+    def _collect_state(self, part):
+        # Read a finished sample only; an unfinished one is dropped when its events are reused.
         batch_size = self.state_pending[part]
         start, end = self.state_events[part]
-        if batch_size is not None and end.query():
-            ms = start.elapsed_time(end)
-            self.gpu_ms["state"] += ms
-            key = (part, batch_size)
-            self.state_ms_cpu[key] = 0.8 * self.state_ms_cpu.get(key, ms) + 0.2 * ms
-            self.state_ms[part, batch_size].fill_(self.state_ms_cpu[key])
+        if batch_size is None or not end.query():
+            return
+        ms = start.elapsed_time(end)
+        self.gpu_ms["state"] += ms
+        key = (part, batch_size)
+        self.state_ms_cpu[key] = 0.8 * self.state_ms_cpu.get(key, ms) + 0.2 * ms
+        self.state_ms[part, batch_size].fill_(self.state_ms_cpu[key])
         self.state_pending[part] = None
-        start.record()
+
+    def begin_state(self, part):
+        """Time one part of a round's state work without waiting on the GPU."""
+        self._collect_state(part)
+        self.state_pending[part] = None
+        self.state_events[part][0].record()
 
     def end_state(self, part, batch_size):
         self.state_events[part][1].record()
@@ -299,6 +304,8 @@ class SpeculativeCost:
     def snapshot(self):
         started = time.perf_counter()
         self.collect_ready()
+        for part in range(2):
+            self._collect_state(part)
         self.control_ms += (time.perf_counter() - started) * 1000
         result = {"cost_ar_requests": self.ar_requests, "cost_stopped_requests": self.stopped_requests,
                 "cost_probe_requests": self.probe_requests, "cost_control_ms": self.control_ms,

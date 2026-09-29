@@ -32,7 +32,7 @@ def _linear_local_dims(
 
 
 def _replay_shapes(group, tp_size, dtype, records):
-    """ReplaySSM buffers for ``records = (rows, ring, draft_steps)``."""
+    """ReplaySSM buffers for ``records = (rows, ring, draft_steps, graph_rows)``."""
     from .gdn_replay import replay_shapes
 
     n_layers, conv_dim, v_heads, k_heads = _linear_local_dims(group, tp_size)
@@ -56,7 +56,7 @@ class LinearStatePool:
         device: torch.device,
         tp_size: int | None = None,
         fixed_slots: int = 0,
-        records: tuple[int, int, int] | None = None,
+        records: tuple[int, int, int, int] | None = None,
     ) -> None:
         if tp_size is None:
             tp_size = get_tp_info().size
@@ -134,7 +134,7 @@ class LinearStatePool:
         from freetoken.attention.linear import FLASpeculativeGraphs, ReplaySpeculativeGraphs
 
         if self.replay is not None:
-            return ReplaySpeculativeGraphs(self, max_batch, device)
+            return ReplaySpeculativeGraphs(self)
         return FLASpeculativeGraphs(self, max_batch, query_width, device)
 
     @property
@@ -273,11 +273,17 @@ def state_pool_bytes(config, num_slots: int | None = None) -> int:
     return per_slot * slots + replay_buffer_bytes(config)
 
 
-def replay_records(config) -> tuple[int, int, int] | None:
-    """``(rows, ring, draft_steps)`` of the ReplaySSM buffers, None when not active."""
+def replay_records(config) -> tuple[int, int, int, int] | None:
+    """``(rows, ring, draft_steps, graph_rows)`` of the ReplaySSM buffers, None when not
+    active. ``graph_rows`` bounds every batch size GraphRunner may capture."""
     if not config.enable_gdn_replayssm or config.model_config.linear_attention_group() is None:
         return None
-    return config.max_running_req, config.gdn_replay_buffer_len, config.speculative_num_steps
+    if config.cuda_graph_bs is not None:
+        graph_rows = max(config.cuda_graph_bs, default=0)
+    else:
+        graph_rows = 256 if config.cuda_graph_max_bs is None else max(config.cuda_graph_max_bs, 0)
+    return (config.max_running_req, config.gdn_replay_buffer_len, config.speculative_num_steps,
+            graph_rows)
 
 
 def replay_buffer_bytes(config) -> int:
