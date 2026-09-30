@@ -15,6 +15,7 @@ class SpeculativeGraphs:
         self.router = (config.speculative_draft_residency == "router"
                        and not config.speculative_draft_load_missing)
         self.graphs = {}
+        self.verify_sizes: dict[int, list[int]] = {}  # captured verify token counts per batch size
         self.attention = runner.attn_backend.create_speculative_graphs(max_seq_len)
         ctx = get_global_ctx()
         kv = ctx.kv_cache
@@ -50,11 +51,14 @@ class SpeculativeGraphs:
                 if bs > max_tokens:
                     continue
                 self._capture(model, "draft", [1] * bs)
-                # The first plan sets FlashInfer's maximum total query-row bound.
                 limit = min(bs * self.query_width, max_tokens)
-                # Exact shapes only where the policy could flip; larger counts pad to the limit.
-                counts = sorted({limit, *range(bs, min(limit, self.exact_tokens) + 1)}, reverse=True)
-                for tokens in counts:
+                # Exact shapes where the admission policy could flip; above it every multiple of
+                # the batch size, so a round replays at the smallest shape that holds it.
+                sizes = sorted({*range(bs, min(limit, self.exact_tokens) + 1),
+                                *(min(k * bs, limit) for k in range(1, self.query_width + 1))})
+                self.verify_sizes[bs] = sizes
+                # The first (largest) plan sets FlashInfer's maximum total query-row bound.
+                for tokens in reversed(sizes):
                     remaining = tokens - bs
                     lengths = []
                     for _ in range(bs):
@@ -105,10 +109,16 @@ class SpeculativeGraphs:
                 self.buffer.logits[:tokens] = forward_model(model)
         self.graphs[(phase, bs, tokens)] = graph
 
+    def verify_tokens(self, batch_size, tokens):
+        """Physical size a verify batch of ``tokens`` queries replays at, shared by replay and
+        the SD cost model: the smallest captured shape that holds it, else eager ``tokens``."""
+        return next((size for size in self.verify_sizes.get(batch_size, ()) if size >= tokens),
+                    tokens)
+
     def _key(self, batch):
         tokens = batch.positions.numel()
-        if batch.is_speculative_verify and tokens > self.exact_tokens:
-            tokens = min(batch.size * self.query_width, self.max_tokens)
+        if batch.is_speculative_verify:
+            tokens = self.verify_tokens(batch.size, tokens)
         return ("verify" if batch.is_speculative_verify else "draft", batch.size, tokens)
 
     def can_replay(self, batch) -> bool:

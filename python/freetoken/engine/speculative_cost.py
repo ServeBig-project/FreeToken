@@ -194,9 +194,7 @@ class SpeculativeCost:
 
     def _physical_verify(self, batch_size, logical):
         graphs = self.engine.graph_runner.speculative
-        if graphs is not None and logical > graphs.exact_tokens:
-            return min(batch_size * graphs.query_width, graphs.max_tokens)
-        return logical
+        return graphs.verify_tokens(batch_size, logical) if graphs is not None else logical
 
     def _expected_misses(self, phase, batch_size, logical):
         cold = self.cache.slot_for_id < 0
