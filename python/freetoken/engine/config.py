@@ -20,6 +20,7 @@ class EngineConfig:
     dtype: torch.dtype
     max_running_req: int = 4
     speculative_num_steps: int = 0
+    speculative_draft_model_path: str | None = None
     speculative_draft_experts: int = 3
     speculative_draft_residency: str = "off"
     speculative_adaptive_cost: bool = False
@@ -100,6 +101,15 @@ class EngineConfig:
     num_token_override: int | None = None
 
     def __post_init__(self) -> None:
+        external_draft = self.speculative_draft_model_path is not None
+        if external_draft:
+            if not 1 <= self.speculative_num_steps <= 8:
+                raise ValueError("DFlash requires 1..8 draft tokens")
+            if (self.speculative_draft_residency != "off" or self.speculative_draft_load_missing
+                    or self.speculative_verify_prefetch):
+                raise ValueError("DFlash does not use target-expert residency, missing loads or route prefetch")
+            if self.dtype != torch.bfloat16 or self.page_size != 1:
+                raise ValueError("DFlash requires BF16 and page size 1")
         if self.speculative_draft_residency not in ("off", "router"):
             raise ValueError("speculative_draft_residency must be off or router")
         if self.speculative_draft_residency != "off" and self.speculative_num_steps <= 0:
@@ -139,14 +149,14 @@ class EngineConfig:
         from freetoken.moe.routing import ROUTERS
 
         model = self.model_config
-        if not model.num_experts or model.moe_router not in ROUTERS:
+        if not external_draft and (not model.num_experts or model.moe_router not in ROUTERS):
             raise ValueError("self-speculative decoding requires a shared MoE router component")
         unsupported = {model.attn_type_for_layer(i) for i in range(model.num_layers)} - {
             AttnType.FULL, AttnType.LINEAR,
         }
         if unsupported:
             raise ValueError(f"self-speculative state handling is unavailable for {unsupported}")
-        if self.speculative_draft_experts > self.model_config.num_experts_per_tok:
+        if not external_draft and self.speculative_draft_experts > self.model_config.num_experts_per_tok:
             raise ValueError(
                 "speculative_draft_experts must not exceed the target's experts per token "
                 f"({self.model_config.num_experts_per_tok})"

@@ -193,6 +193,7 @@ def tokenize_worker(
                             num_swa_pages=m.num_swa_pages,
                             error=m.error,
                             gdn_replayssm=m.gdn_replayssm,
+                            dflash=m.dflash,
                         )
                     )
             n_control = sum(

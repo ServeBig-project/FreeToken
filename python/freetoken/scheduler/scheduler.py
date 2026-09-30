@@ -1337,7 +1337,7 @@ class Scheduler(SchedulerIOMixin):
         req.table_idx = -1
 
     def _reply_rebuild(self, request_id: str, status: str, error: str | None = None) -> None:
-        from freetoken.kvcache.cache_status import compute_gdn_state_geometry
+        from freetoken.kvcache.cache_status import compute_dflash_geometry, compute_gdn_state_geometry
 
         # Single source of truth with the rollback snapshot (_current_cache_geometry): mamba is
         # usable slots (padding sink excluded, matching the status-bar gauge), and num_swa_pages
@@ -1354,6 +1354,7 @@ class Scheduler(SchedulerIOMixin):
                     num_swa_pages=geo["num_swa_pages"] or 0,
                     error=error,
                     gdn_replayssm=compute_gdn_state_geometry(self.engine),
+                    dflash=compute_dflash_geometry(self.engine),
                 )
             ]
         )

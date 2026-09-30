@@ -214,6 +214,9 @@ class Qwen3_5GatedDeltaNet(BaseOP):
         pool, li: int, fla, dtype: torch.dtype,
     ) -> torch.Tensor:
         """Run varlen conv and chunked recurrence for a prefill sub-batch."""
+        if fla.track_start_dst is not None:
+            for states in (pool.recurrent_states[li], pool.conv_states[li]):
+                states.index_copy_(0, fla.track_start_dst, states.index_select(0, fla.track_start_src))
         mixed = self._conv_prefill(
             conv_in, pool, fla.cu_seqlens, fla.cache_indices, fla.has_initial_state
         )

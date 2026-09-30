@@ -29,14 +29,13 @@ class FLAPathMetadata:
     has_initial_state: torch.Tensor | None = None
     fresh_state_indices: torch.Tensor | None = None
 
-    # --- hybrid-radix track-checkpoint (extra_buffer) fields; all None when not caching ---
-    # For each request crossing a chunk-aligned (×CHUNK) boundary this forward, snapshot its
-    # recurrent + conv state into a donatable pool slot, written on the forward stream by the
-    # GDN op (see Qwen3_5GatedDeltaNet._write_track_snapshot). Built by the scheduler in P2;
-    # left None by build_fla_metadata so the existing path is unchanged.
+    # Public snapshots are written during prefill, before overlapped decode advances live
+    # state. A short final chunk retains its initial state; longer chunks retain a boundary.
     track_dst: torch.Tensor | None = None        # [nt] int64 dst pool slot per tracked req
     track_h_row: torch.Tensor | None = None      # [nt] int64 row into h (boh_i + aligned//CHUNK)
     track_conv_src: torch.Tensor | None = None   # [nt, kernel-1] int64 conv-input token positions
+    track_start_dst: torch.Tensor | None = None  # [ns] int64 snapshot slots
+    track_start_src: torch.Tensor | None = None  # [ns] int64 live slots before prefill
 
     # --- ReplaySSM: [n] int32 record row per request (-1 = padding); None runs the
     # recurrent-state kernels. Positions come from the batch and checkpoint positions from the
@@ -111,7 +110,7 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
         )
         fresh = [gdn_slot(r) for r in reqs if r.cached_len == 0]
         fresh_host = torch.tensor(fresh, dtype=torch.int64, **pin) if fresh else None
-        track_dst, track_h_row, track_conv_src = _build_track_metadata(
+        track_dst, track_h_row, track_conv_src, track_start_dst, track_start_src = _build_track_metadata(
             reqs, cu_host, device, pin
         )
         return FLAPathMetadata(
@@ -124,6 +123,8 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
             track_dst=track_dst,
             track_h_row=track_h_row,
             track_conv_src=track_conv_src,
+            track_start_dst=track_start_dst,
+            track_start_src=track_start_src,
         )
 
     if batch.is_decode_only:
@@ -183,12 +184,13 @@ def verify_layout(reqs, states, dummy_slot, dummy_row, positions, pin):
 
 
 def _build_track_metadata(reqs, cu_host, device, pin):
-    """Hybrid-radix (extra_buffer): for each request that crosses a ×CHUNK boundary this
-    prefill forward, snapshot its GDN state at the deepest mid-chunk boundary into its current
-    private snapshot slot. Returns (track_dst, track_h_row, track_conv_src) device int64 tensors, or
-    (None, None, None) when no request tracks (non-hybrid, or all extends < CHUNK+1)."""
+    """Freeze the deepest internal chunk boundary, or the final short chunk's initial state.
+
+    A repeated prompt must reprocess its last token, so its final state cannot be reused as
+    a prefix. The caller allocates only snapshots newer than the existing public prefix.
+    """
     if not any(r.mamba_snapshot_slot is not None for r in reqs):
-        return None, None, None
+        return None, None, None, None, None
     from freetoken.core import get_global_ctx
     from freetoken.kernel.fla.chunk import CHUNK_SIZE
     from freetoken.kernel.fla.index import prepare_chunk_offsets
@@ -196,6 +198,7 @@ def _build_track_metadata(reqs, cu_host, device, pin):
     km1 = get_global_ctx().linear_state_pool.conv_states.shape[-1]  # conv_kernel_dim - 1
     boh = prepare_chunk_offsets(cu_host, CHUNK_SIZE).tolist()
     dst, h_row, conv_src = [], [], []
+    start_dst, start_src = [], []
     for i, r in enumerate(reqs):
         if r.mamba_snapshot_slot is None:
             continue
@@ -203,6 +206,9 @@ def _build_track_metadata(reqs, cu_host, device, pin):
         # the exact extend-end / aligned-final state lives in the live slot -> finish-donate).
         c = (r.extend_len - 1) // CHUNK_SIZE
         if c < 1:
+            start_dst.append(r.mamba_snapshot_slot)
+            start_src.append(r.linear_slot_idx if r.linear_slot_idx is not None else r.table_idx)
+            r.mamba_last_track_seqlen = r.cached_len
             continue
         off = int(cu_host[i])
         boundary = r.cached_len + c * CHUNK_SIZE
@@ -210,11 +216,8 @@ def _build_track_metadata(reqs, cu_host, device, pin):
         h_row.append(boh[i] + c)
         conv_src.append([off + c * CHUNK_SIZE - km1 + j for j in range(km1)])
         r.mamba_last_track_seqlen = boundary
-    if not dst:
-        return None, None, None
-    to = lambda xs, **kw: torch.tensor(xs, **pin, **kw).to(device, non_blocking=True)
-    return (to(dst, dtype=torch.int64), to(h_row, dtype=torch.int64),
-            to(conv_src, dtype=torch.int64))
+    to = lambda xs: torch.tensor(xs, dtype=torch.int64, **pin).to(device, non_blocking=True) if xs else None
+    return tuple(to(xs) for xs in (dst, h_row, conv_src, start_dst, start_src))
 
 
 __all__ = ["FLAMetadata", "FLAPathMetadata", "build_fla_metadata"]

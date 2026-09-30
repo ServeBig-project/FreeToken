@@ -1,0 +1,165 @@
+{
+  "source": "/data2/servebig-envs/replayssm_ab_20260929b_gpu2/new-sd8-adaptive/http.json",
+  "requests": [
+    {
+      "prompt": "Write Python binary search for a sorted integer list, returning the matching index or -1, and explain its invariant:",
+      "temperature": 0,
+      "max_tokens": 64,
+      "ignore_eos": true,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    {
+      "prompt": "Explain how a randomized controlled experiment distinguishes causation from correlation, using a concrete example:",
+      "temperature": 0,
+      "max_tokens": 64,
+      "ignore_eos": true,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    {
+      "prompt": "Implement a shortest path search in an unweighted graph using Python and a queue, with an example:",
+      "temperature": 0,
+      "max_tokens": 64,
+      "ignore_eos": true,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    {
+      "prompt": "Explain when a database optimizer should choose an index scan instead of a full table scan:",
+      "temperature": 0,
+      "max_tokens": 64,
+      "ignore_eos": true,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    {
+      "prompt": "Implement a small Python LRU cache with get and put operations, and explain how eviction works:",
+      "temperature": 0,
+      "max_tokens": 64,
+      "ignore_eos": true,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    {
+      "prompt": "Explain how to interpret a confidence interval for a population mean, including a common misconception:",
+      "temperature": 0,
+      "max_tokens": 64,
+      "ignore_eos": true,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    {
+      "prompt": "Write Python code that maintains a moving average over the latest five values of an incoming stream:",
+      "temperature": 0,
+      "max_tokens": 64,
+      "ignore_eos": true,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    {
+      "prompt": "Explain why a causal attention mask is needed when a transformer predicts the next token:",
+      "temperature": 0,
+      "max_tokens": 64,
+      "ignore_eos": true,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    {
+      "prompt": "Write a Python CSV line parser that handles commas inside quoted fields and doubled quotation marks:",
+      "temperature": 0,
+      "max_tokens": 64,
+      "ignore_eos": true,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    {
+      "prompt": "Explain eventual consistency with two replicated counters, including what a reader may observe during replication:",
+      "temperature": 0,
+      "max_tokens": 64,
+      "ignore_eos": true,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    {
+      "prompt": "Write Python code to merge overlapping closed intervals, and explain the sorting and merging steps:",
+      "temperature": 0,
+      "max_tokens": 64,
+      "ignore_eos": true,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    {
+      "prompt": "Explain how a catalyst changes reaction rates and why it does not change chemical equilibrium:",
+      "temperature": 0,
+      "max_tokens": 64,
+      "ignore_eos": true,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    {
+      "prompt": "Show Python asyncio code that runs two independent operations with a timeout and cleans up cancelled tasks:",
+      "temperature": 0,
+      "max_tokens": 64,
+      "ignore_eos": true,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    {
+      "prompt": "Explain why adding calibrated noise to aggregate statistics can protect individual privacy, with an example:",
+      "temperature": 0,
+      "max_tokens": 64,
+      "ignore_eos": true,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    {
+      "prompt": "Implement a fixed capacity circular buffer in Python and explain how its read and write indices wrap:",
+      "temperature": 0,
+      "max_tokens": 64,
+      "ignore_eos": true,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    {
+      "prompt": "Explain how an astronomical spectrum reveals the chemical composition and motion of a distant star:",
+      "temperature": 0,
+      "max_tokens": 64,
+      "ignore_eos": true,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      }
+    }
+  ]
+}

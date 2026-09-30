@@ -72,3 +72,4 @@ class CacheRebuildReply(BaseFrontendMsg):
     num_swa_pages: int = 0
     error: str | None = None
     gdn_replayssm: dict | None = None
+    dflash: dict | None = None

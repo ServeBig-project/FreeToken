@@ -223,6 +223,33 @@ class SpeculativeCost:
         # The compute term has its measured transfers removed; charge misses once.
         return other * physical + experts * logical + wait + cold * self.expert_ms
 
+    def begin_block_round(self, batch_size):
+        self.collect_ready()
+        for part in range(2):
+            self._collect_state(part)
+        self.predicted.zero_()
+        self.predicted_positions.zero_()
+        self.rounds += 1
+        return bool(self.samples[0][batch_size])
+
+    def block_target_costs(self, batch_size, positions):
+        state = self.state_ms[:, batch_size].sum()
+        ar = self._estimate(0, batch_size, batch_size)
+        verify = [self._estimate(2, batch_size, self._physical_verify(batch_size, n), n)
+                  for n in positions]
+        return ar, verify, state
+
+    def record_block_draft(self, batch_size, ms):
+        self.gpu_ms["draft"] += ms
+        self.samples[1][batch_size] += 1
+
+    def record_block_choice(self, eligible, width, probe, elapsed_ms):
+        if not width:
+            self.ar_requests += eligible
+        elif probe:
+            self.probe_requests += eligible
+        self.control_ms += elapsed_ms
+
     def admit(self, lengths, residency_ok):
         started = time.perf_counter()
         batch_size = len(lengths)

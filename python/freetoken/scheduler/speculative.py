@@ -4,10 +4,10 @@ from copy import copy
 from typing import TYPE_CHECKING, Callable
 
 import torch
-from flashlib.kernels.slot_cache import Stat
 
 from freetoken.core import Batch
 from freetoken.engine import ForwardOutput
+from freetoken.speculative.self_draft import SelfDrafter
 from freetoken.utils import div_ceil
 
 from .batch_composition import DecodeBatchSelector
@@ -38,29 +38,28 @@ class SpeculativeDecoder:
         # A separate seed keeps subsequent Torch draws from reusing that random stream.
         self.generator = torch.Generator(device=engine.device)
         self.generator.manual_seed((torch.cuda.initial_seed() + 1) % (1 << 64))
+        if engine.config.speculative_draft_model_path:
+            from freetoken.speculative.dflash import DFlashDrafter
+
+            self.drafter = DFlashDrafter(engine, table, self.generator)
+        else:
+            self.drafter = SelfDrafter(engine, table, self._logits, self.generator)
         self.selector = DecodeBatchSelector()
         self.draft_tokens = 0
         self.accepted_draft_tokens = 0
         self.verify_steps = 0
-        self.residency_stops = 0
         self.state_slot_stops = 0
         self.draft_length_histogram = [0] * (engine.config.speculative_num_steps + 1)
-        self.draft_loads = (
-            torch.zeros((), dtype=torch.int64, device=engine.device)
-            if engine.config.moe_collect_stats else None
-        )
 
     def snapshot(self) -> dict:
         result = {
             "draft_tokens": self.draft_tokens,
             "accepted_draft_tokens": self.accepted_draft_tokens,
             "verify_steps": self.verify_steps,
-            "residency_stops": self.residency_stops,
             "state_slot_stops": self.state_slot_stops,
             "draft_length_histogram": list(self.draft_length_histogram),
         }
-        if self.draft_loads is not None:
-            result["draft_expert_loads"] = int(self.draft_loads.item())
+        result.update(self.drafter.snapshot())
         if self.cost is not None:
             result.update(self.cost.snapshot())
         return result
@@ -102,37 +101,17 @@ class SpeculativeDecoder:
             return self.engine.forward_batch(batch, forward_input.sample_args)
 
         engine, sampler = self.engine, self.engine.sampler
-        expert_cache = engine.moe_offload_cache
-        available = None
-        resident_ok = torch.ones((), dtype=torch.bool, device=engine.device) if self.cost is not None else None
-        if (engine.config.speculative_draft_residency != "off" and expert_cache is not None
-                and not engine.config.speculative_draft_load_missing):
-            # Draft hits cannot evict or load experts, and legacy SD never interleaves
-            # target work into this loop, so this set is stable for the whole round.
-            available = expert_cache.slot_for_id >= 0
-            resident_ok = (available.sum(dim=1) >= engine.config.speculative_draft_experts).all()
-            if self.cost is None and not bool(resident_ok.item()):
-                self.residency_stops += sum(length > 0 for length in lengths)
-                self._record_lengths([0] * batch.size)
-                return engine.forward_batch(batch, forward_input.sample_args)
-        if self.cost is not None:
-            allowed, resident, limit = self.cost.admit(lengths, resident_ok)
-            if not allowed or not resident:
-                if allowed and not resident:
-                    self.residency_stops += sum(length > 0 for length in lengths)
-                self._record_lengths([0] * batch.size)
-                return engine.forward_batch(batch, forward_input.sample_args)
-            lengths = [min(length, limit) for length in lengths]
-        loads_before = (
-            expert_cache.lru_stats[:, Stat.MISS].sum()
-            if self.draft_loads is not None and expert_cache is not None else None
-        )
+        lengths = self.drafter.plan(batch, lengths)
+        if not any(lengths):
+            self._record_lengths(lengths)
+            return engine.forward_batch(batch, forward_input.sample_args)
         starts = [req.device_len for req in batch.reqs]
         ends = [start + length for start, length in zip(starts, lengths, strict=True)]
         views = [copy(req) for req in batch.reqs]
         if self.cost is not None:
             self.cost.begin_state(0)
-        state = self.cache.begin_speculation(batch.reqs, views, lengths)
+        state = self.cache.begin_speculation(
+            batch.reqs, views, lengths, draft=self.drafter.uses_target_state)
         if self.cost is not None:
             self.cost.end_state(0, batch.size)
         # The ordinary decode query is already allocated. Reserve only the extra
@@ -141,40 +120,10 @@ class SpeculativeDecoder:
             req.cached_len, req.device_len = start, end
         self.cache.allocate_paged(views)
 
-        steps = max(lengths)
-        draft_probs = torch.zeros(
-            batch.size, steps + 1, sampler.vocab_size, dtype=torch.float32, device=engine.device
-        )
-        proposals = torch.zeros(batch.size, steps + 1, dtype=torch.int32, device=engine.device)
-        for step in range(steps):
-            active = [i for i, length in enumerate(lengths) if length > step]
-            draft_reqs = [views[i] for i in active]
-            for i in active:
-                views[i].cached_len = starts[i] + step - 1
-                views[i].device_len = starts[i] + step
-            draft = Batch(
-                draft_reqs, decode_size=len(draft_reqs),
-                draft_experts=engine.config.speculative_draft_experts,
-                draft_available_experts=available,
-            )
-            logits = self._logits(draft)
-            probs = sampler.probabilities(logits, sampler.prepare(draft))
-            tokens = torch.multinomial(
-                probs, 1, generator=self.generator
-            ).flatten().to(torch.int32)
-            draft_probs[active, step] = probs
-            proposals[active, step] = tokens
-            rows = [views[i].table_idx for i in active]
-            positions = [starts[i] + step for i in active]
-            self.table.token_pool[rows, positions] = tokens
-            if self.cost is not None and step + 1 < steps:
-                if not self.cost.continue_draft(lengths, step + 1, batch.size):
-                    lengths = [min(length, step + 1) for length in lengths]
-                    break
+        draft = self.drafter.propose(batch, views, starts, lengths)
+        proposals, draft_probs, lengths = draft.tokens, draft.probabilities, draft.lengths
         self.draft_tokens += sum(lengths)
         self._record_lengths(lengths)
-        if loads_before is not None:
-            self.draft_loads += expert_cache.lru_stats[:, Stat.MISS].sum() - loads_before
 
         # Target attention overwrites every provisional query, layer by layer,
         # while retaining only the already verified prefix before the round.
@@ -215,7 +164,7 @@ class SpeculativeDecoder:
             offset += length + 1
 
         if accepted_lengths is not None:
-            self.cost.observe_acceptance(lengths, accepted_lengths)
+            self.drafter.observe_acceptance(lengths, accepted_lengths)
 
         host = output.to("cpu", non_blocking=True)
         ready = torch.cuda.Event()
