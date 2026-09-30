@@ -185,8 +185,9 @@ def test_dsv4_wrapper_keeps_fp8_roundtrips_and_clamped_swiglu(monkeypatch):
 
     calls = []
 
-    def round_input(x, block):
+    def round_input(x, block=128, output=None):
         calls.append(("input", block))
+        assert output is None
         return x + 1
 
     def round_middle(x, block):

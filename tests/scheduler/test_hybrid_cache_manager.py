@@ -161,8 +161,9 @@ def test_optional_prefill_snapshot_does_not_require_a_second_free_slot():
     pool = _pool(num_slots=2)
     pt = torch.zeros(2, 128, dtype=torch.int32)
     cm = CacheManager(128, 1, pt, "hybrid_radix", linear_state_pool=pool)
+    match = cm.match_req(_pend(list(range(70))))
     req = Req(input_ids=torch.arange(70, dtype=torch.int32), table_idx=0, cached_len=0,
-              output_len=4, uid=0, sampling_params=SamplingParams(), cache_handle=None)
+              output_len=4, uid=0, sampling_params=SamplingParams(), cache_handle=match.cuda_handle)
     req.linear_slot_idx = pool.alloc(1)[0]
 
     cm.prepare_prefill_snapshots([req])
