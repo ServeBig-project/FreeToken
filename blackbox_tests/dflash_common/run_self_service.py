@@ -51,7 +51,8 @@ def completion(result, body, cache_report=False):
 
 def geometry(payload):
     source = payload["geometry"]
-    return {key: source[key] for key in ("num_pages", "num_mamba_slots", "moe_cache_size")}
+    return {key: source[key] for key in ("num_pages", "num_mamba_slots", "moe_cache_size")
+            if key != "num_mamba_slots" or source[key] > 0}
 
 
 def main():
@@ -126,6 +127,7 @@ def main():
             result = rebuild(entry, payload, (200, 503))
             if result["status"] == 200:
                 return
+            require(result["body"].get("status") == "busy", f"Rebuild failed without being busy: {result}")
             require(time.monotonic() < deadline, "Service did not become idle before rebuild deadline")
             time.sleep(0.2)
 
