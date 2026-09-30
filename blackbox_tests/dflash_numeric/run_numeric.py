@@ -1,4 +1,4 @@
-"""CPU-only independent numerical acceptance of the public DFlash model interface."""
+"""Independent numerical acceptance of the public DFlash model interface."""
 
 import argparse
 import copy
@@ -27,7 +27,7 @@ def require(condition, message):
 
 
 def array(tensor):
-    return tensor.detach().float().numpy().astype(np.float64)
+    return tensor.detach().float().cpu().numpy().astype(np.float64)
 
 
 def metrics(actual, expected):
@@ -42,7 +42,7 @@ def metrics(actual, expected):
 def append_history(history, request_ids, positions, keys, values):
     for request_id in np.unique(request_ids):
         selected = np.flatnonzero(request_ids == request_id)
-        new = (torch.from_numpy(positions[selected].copy()), keys[selected].clone(), values[selected].clone())
+        new = (torch.tensor(positions[selected], device=keys.device), keys[selected].clone(), values[selected].clone())
         if request_id in history:
             new = tuple(torch.cat((old, added)) for old, added in zip(history[request_id], new))
         history[request_id] = new
@@ -57,7 +57,7 @@ def append_reference(history, request_ids, positions, keys, values):
         history[request_id] = new
 
 
-def scenario(model, config, parameters, dtype, lengths, block_lengths, extensions, report):
+def scenario(model, config, parameters, dtype, device, lengths, block_lengths, extensions, report):
     label = str(dtype).removeprefix("torch.")
     rounding = reference.bf16 if dtype == torch.bfloat16 else reference.ideal
     parameters = quantized(parameters, rounding)
@@ -66,7 +66,7 @@ def scenario(model, config, parameters, dtype, lengths, block_lengths, extension
     rounded_histories = [{} for _ in MODES]
     ideal_histories = [{} for _ in MODES]
     cursors = np.zeros(len(lengths), dtype=np.int64)
-    embedding = torch.tensor(random.standard_normal((47, 32)), dtype=dtype)
+    embedding = torch.tensor(random.standard_normal((47, 32)), dtype=dtype, device=device)
     embedding_copy = embedding.clone()
     head = random.standard_normal((47, 32)) / np.sqrt(32)
     alternate_head = random.standard_normal((47, 32)) / np.sqrt(32)
@@ -83,9 +83,9 @@ def scenario(model, config, parameters, dtype, lengths, block_lengths, extension
         positions = np.concatenate([np.arange(cursors[index], cursors[index] + count) for index, count in enumerate(counts)])
         permutation = random.permutation(len(positions))
         request_ids, positions = request_ids[permutation], positions[permutation]
-        features = torch.tensor(random.standard_normal((len(positions), 256)), dtype=dtype)
+        features = torch.tensor(random.standard_normal((len(positions), 256)), dtype=dtype, device=device)
         features_copy = features.clone()
-        position_tensor = torch.from_numpy(positions.copy())
+        position_tensor = torch.tensor(positions, device=device)
         expected = reference.project_context(array(features), positions, parameters, config, rounding)
         ideal = reference.project_context(array(features), positions, parameters, config)
         seen = []
@@ -95,6 +95,7 @@ def scenario(model, config, parameters, dtype, lengths, block_lengths, extension
             require(tuple(keys.shape) == (len(positions), 2, 8), "Context key shape is incorrect")
             require(tuple(values.shape) == (len(positions), 2, 8), "Context value shape is incorrect")
             require(keys.dtype == values.dtype == dtype, "Context dtype is incorrect")
+            require(keys.device.type == values.device.type == device, "Context device is incorrect")
             compare(f"round{round_index}/context/layer{index}/k", array(keys), expected[index][0])
             compare(f"round{round_index}/context/layer{index}/v", array(values), expected[index][1])
             append_history(histories[index], request_ids, positions, keys, values)
@@ -104,7 +105,7 @@ def scenario(model, config, parameters, dtype, lengths, block_lengths, extension
         model.project_context(features, position_tensor, store)
         require(sorted(seen) == list(range(6)), f"Context callbacks missing or duplicated: {seen}")
         require(torch.equal(features, features_copy), "project_context changed features")
-        require(np.array_equal(position_tensor.numpy(), positions), "project_context changed positions")
+        require(np.array_equal(position_tensor.cpu().numpy(), positions), "project_context changed positions")
         cursors[:] += counts
 
     def block(round_index):
@@ -117,7 +118,7 @@ def scenario(model, config, parameters, dtype, lengths, block_lengths, extension
         request_ids, positions, token_ids = request_ids[permutation], positions[permutation], token_ids[permutation]
         noise = embedding[token_ids].clone()
         noise_copy = noise.clone()
-        position_tensor = torch.from_numpy(positions.copy())
+        position_tensor = torch.tensor(positions, device=device)
         expected, trace = reference.forward(array(noise), positions, request_ids, rounded_histories,
                                             parameters, config, MODES, rounding)
         ideal, _ = reference.forward(array(noise), positions, request_ids, ideal_histories,
@@ -130,6 +131,7 @@ def scenario(model, config, parameters, dtype, lengths, block_lengths, extension
             require(tuple(queries.shape) == (len(positions), 8, 8), "Noise query shape is incorrect")
             require(tuple(keys.shape) == tuple(values.shape) == (len(positions), 2, 8), "Noise KV shape is incorrect")
             require(queries.dtype == keys.dtype == values.dtype == dtype, "Noise QKV dtype is incorrect")
+            require(queries.device.type == keys.device.type == values.device.type == device, "Noise QKV device is incorrect")
             output = padded_attention.attend(queries, keys, values, positions, request_ids,
                                              histories[index], model.attention_modes[index])
             if compare_callbacks:
@@ -141,6 +143,7 @@ def scenario(model, config, parameters, dtype, lengths, block_lengths, extension
         require(calls == list(range(6)), f"Forward callback order differs: {calls}")
         require(tuple(output.shape) == (len(positions), 32), "Output must be hidden states, not vocabulary logits")
         require(output.dtype == dtype, "Output dtype differs from model dtype")
+        require(output.device.type == device, "Output device differs from requested device")
         compare(f"round{round_index}/final", array(output), expected)
         compare(f"round{round_index}/ideal_fp64", array(output), ideal, enforce=False)
         compare(f"round{round_index}/external_head", array(output) @ head.T, expected @ head.T)
@@ -151,7 +154,7 @@ def scenario(model, config, parameters, dtype, lengths, block_lengths, extension
         require(torch.equal(output, repeated), "Repeated forward with unchanged public inputs changed output")
         require(torch.equal(noise, noise_copy), "forward changed supplied embeddings")
         require(torch.equal(embedding, embedding_copy), "The caller's embedding table was changed")
-        require(np.array_equal(position_tensor.numpy(), positions), "forward changed positions")
+        require(np.array_equal(position_tensor.cpu().numpy(), positions), "forward changed positions")
 
     for round_index, counts in enumerate([lengths] + extensions):
         context(np.array(counts), round_index)
@@ -163,10 +166,13 @@ def scenario(model, config, parameters, dtype, lengths, block_lengths, extension
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     args = parser.parse_args()
     torch.set_num_threads(1)
     torch.set_grad_enabled(False)
-    report = {"tolerances": TOLERANCES, "device": "cpu", "cases": [], "failures": []}
+    torch.set_float32_matmul_precision("highest")
+    report = {"tolerances": TOLERANCES, "device": args.device,
+              "float32_matmul_precision": "highest", "cases": [], "failures": []}
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python"))
     try:
         from freetoken.speculative.dflash_model import DFlashModel, read_dflash_config
@@ -199,7 +205,7 @@ def main():
         def config_contract(entry):
             loaded = read_dflash_config(directory)
             require(loaded.hidden_size == 32, "Public config reader changed hidden_size")
-            model = DFlashModel(directory, dtype=torch.float32, device="cpu")
+            model = DFlashModel(directory, dtype=torch.float32, device=args.device)
             require(model.hidden_size == 32 and model.block_size == 16 and model.mask_token_id == 46,
                     "Public model dimensions differ from checkpoint")
             require(list(model.target_layer_ids) == config["dflash_config"]["target_layer_ids"], "Target layer ordering changed")
@@ -219,10 +225,10 @@ def main():
         for dtype in (torch.float32, torch.bfloat16):
             for name, lengths, blocks, extensions in scenarios:
                 def evaluate(entry, dtype=dtype, lengths=lengths, blocks=blocks, extensions=extensions):
-                    model = DFlashModel(directory, dtype=dtype, device="cpu")
+                    model = DFlashModel(directory, dtype=dtype, device=args.device)
                     expected_bytes = parameter_count * (4 if dtype == torch.float32 else 2)
                     require(model.weight_bytes == expected_bytes, "weight_bytes does not follow loaded dtype")
-                    scenario(model, config, parameters, dtype, lengths, blocks, extensions, entry)
+                    scenario(model, config, parameters, dtype, args.device, lengths, blocks, extensions, entry)
                 case(f"{str(dtype).removeprefix('torch.')}/{name}", evaluate)
 
         def errors(entry):
@@ -240,7 +246,7 @@ def main():
                 (path / "config.json").write_text(json.dumps(altered))
                 (path / "model.safetensors").write_bytes((directory / "model.safetensors").read_bytes())
                 try:
-                    DFlashModel(path, dtype=torch.float32, device="cpu")
+                    DFlashModel(path, dtype=torch.float32, device=args.device)
                 except Exception as error:
                     entry.setdefault("public_errors", {})[name] = f"{type(error).__name__}: {error}"
                 else:
@@ -252,7 +258,7 @@ def main():
             (path / "config.json").write_text(json.dumps(config))
             save_file(weights, str(path / "model.safetensors"))
             try:
-                DFlashModel(path, dtype=torch.float32, device="cpu")
+                DFlashModel(path, dtype=torch.float32, device=args.device)
             except Exception as error:
                 entry["public_errors"]["wrong_weight_shape"] = f"{type(error).__name__}: {error}"
             else:

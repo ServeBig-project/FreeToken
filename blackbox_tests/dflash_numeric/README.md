@@ -53,9 +53,23 @@ CUDA_VISIBLE_DEVICES='' OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
 ```
 
 The runner creates its small public-format checkpoint in a temporary directory,
-uses CPU only, records component errors, and exits nonzero on a contract failure.
+defaults to CPU, records component errors, and exits nonzero on a contract failure.
 It does not validate the real BF16 checkpoint, production attention kernels,
 CUDA Graph execution, service sampling, or cache lifecycle.
+
+After the coordinator allocates an idle GPU, the same fixtures, NumPy reference,
+and fixed thresholds can run with CUDA:
+
+```sh
+CUDA_VISIBLE_DEVICES=0 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+  python blackbox_tests/dflash_numeric/run_numeric.py \
+  --device cuda --output /tmp/dflash-numeric-cuda.json
+```
+
+`--device cpu` is the unchanged default. Model inputs, stored context, callback
+attention and outputs stay on the selected device; only comparison values move
+to CPU. FP32 matrix multiplication uses `highest` precision so the FP32 test does
+not silently become a TF32 comparison. The output records the selected device.
 
 ## CPU result
 
