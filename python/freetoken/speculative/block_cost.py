@@ -16,6 +16,11 @@ class BlockDraftCost:
         self.pending = None
         self.means = {}
         self.samples = {}
+        self.accepted = {}
+        self.trials = {}
+        self.steps = (self.cost.steps if self.cost is not None else
+                      torch.arange(1, self.limit + 1, device=engine.device))
+        self.prior = self.cost.prior if self.cost is not None else 0.5 ** self.steps
         self.rounds = {}
         self.choices = [0] * (self.limit + 1)
         self.gpu_ms = 0.0
@@ -49,6 +54,25 @@ class BlockDraftCost:
         reference = min((b for b, n in self.means if n == width), key=lambda b: abs(b - batch_size))
         return self.means[reference, width] * batch_size / reference
 
+    def observe_acceptance(self, lengths, accepted):
+        key = (len(lengths), max(lengths))
+        if key not in self.trials:
+            self.accepted[key] = torch.zeros_like(self.prior)
+            self.trials[key] = torch.zeros_like(self.prior)
+        drafted = torch.tensor(lengths, device=accepted.device)
+        self.trials[key] += (drafted[:, None] >= self.steps).sum(dim=0)
+        self.accepted[key] += (accepted[:, None] >= self.steps).sum(dim=0)
+        if self.cost is not None:
+            self.cost.observe_acceptance(lengths, accepted)
+
+    def _survival(self, batch_size, width):
+        # Changing the number of mask tokens changes every draft distribution.
+        key = (batch_size, width)
+        if key not in self.trials:
+            return self.prior
+        empirical = (self.accepted[key] + 2 * self.prior) / (self.trials[key] + 2)
+        return empirical.cummin(dim=0).values
+
     def plan(self, lengths):
         started = time.perf_counter()
         self._collect()
@@ -80,13 +104,13 @@ class BlockDraftCost:
             width = missing[0] if missing else candidates[(round_no // 16 - 1) % len(candidates)]
             return self._choose(lengths, width, True, started)
 
-        survival = cost._survival(batch_size)
+        survival = torch.stack([self._survival(batch_size, width) for width in candidates])
         active = torch.tensor([
             [sum(min(length, width) > step for length in lengths) / batch_size
              for step in range(self.limit)]
             for width in candidates
         ], device=self.engine.device)
-        expected = 1 + active @ survival
+        expected = 1 + (active * survival).sum(dim=1)
         state = cost.state_ms[:, batch_size].sum()
         scores = [cost._estimate(0, batch_size, batch_size)]
         for i, width in enumerate(candidates):
