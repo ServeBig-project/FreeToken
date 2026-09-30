@@ -1,43 +1,32 @@
 # 公共 SD 基座：当前状态
 
-Qwen3 MoE 与 Qwen3.6-35B-A3B 使用公共SD流程。2026-09-29 已按[实现协议](replayssm-implementation-protocol.md)实现 GDN ReplaySSM（`--enable-gdn-replayssm`，默认关闭）。**独立黑盒验收尚未完成，不能称为达到可交付标准。**
+Qwen3 MoE 与 Qwen3.6-35B-A3B 使用公共 SD 验证、提交和缓存流程。少专家起草与 DFlash 起草已拆成独立组件；DFlash 首轮目标为 Qwen3.6-35B-A3B。本轮实现、远端部署和独立验收已完成；完整数据及统一风格的图见[性能报告](dflash-performance-20260930.md)。
 
-## 当前实现
+## 已实现
 
-- 公共流程使用实际路由、attention与状态组件，不设模型名字白名单；SD要求`legacy`调度。保留缓存路由、补缺加载、逐步成本自适应、verify专家预取和Graph。
-- 关闭Replay时沿用原路径：draft每请求一份临时状态，verify按`Σ(N_i+1)`申请验证状态，stop／EOS确定保留长度后提交。
-- 开启Replay时，请求的正式状态＝完整状态槽（checkpoint）＋按绝对位置存放的更新记录环（长度R，`--gdn-replay-buffer-len`，默认32）。target AR追加记录；draft写临时尾部；verify从target历史用完整模型重算并覆盖尾部；提交只选卷积状态。draft／verify的卷积走独立小窗口，target卷积状态只在提交时改变。不再为draft或verify分配完整状态槽。
-- 每个请求的完整状态位置存放在GPU数组中，合并（flush）由GPU判定：target AR在第一个GDN层之前对所有层合并将满的记录环并推进位置（此前融合在解码kernel中，环满时新记录会覆盖其他线程块尚未读完的旧记录，已修复）；SD每轮起草前按草稿长度判定合并。host只在prefill时重置位置，每次forward不构造游标。公共快照只从当前状态或刚提交的一轮中导出，请求结束捐献前先合并。公共前缀仍保存完整快照，命中后从空记录开始。
-- verify使用逐token递推。参考实现的整窗口矩阵算法已移植并对比：同为3×TF32时240对171 μs/层（T=9、C16）；只有窗口内降为TF32才更快（116 μs），输出相对误差3.1e-3对4.9e-5；端到端影响约0.2%，保留逐token版。AR自身flush不计入AR估价（约0.1%偏差）。
-- `--gdn-state-budget-bytes`统一计价完整状态、记录和卷积窗口；未指定时沿用关闭Replay时的状态池字节。Qwen3.6、C16、R32、N8：记录182 MiB、卷积窗口90 MiB，可用完整状态槽96→91。naive默认预算放不下Replay缓冲时启动即报错，需显式预算。
-- 公开字段见[公开契约](replayssm-public-contract.md)：`/v1/cache/status`的`geometry.gdn_replayssm`、`/v1/stats.gdn_replayssm`、自适应模式的`cost_gpu_ms.state`；数值验收入口见契约5.1节。
+- 不使用模型名字白名单。公共流程根据路由、注意力、状态和目标特征导出能力组织；模型组件处理架构差异。
+- 不指定 `--speculative-draft-model-path` 时沿用少专家 SD：缓存路由、补缺加载、逐步成本自适应、预取及 Graph 开关保持独立。
+- 指定 DFlash 目录时，用小模型并行提出整块候选，复用目标 embedding／输出层；完整目标模型仍负责验证、拒绝采样和最终提交。固定长度及按块自适应均可用，首轮最多8个草稿 token。
+- DFlash 上下文 KV 与目标 token 页共同分配和回收，使用同一公共前缀树。被拒绝位置不属于有效历史；验证重新写入完整目标模型的特征。
+- DFlash 权重、持久上下文和固定工作区从既定 GDN 状态预算中扣除，专家池和目标 KV 预算不变。Graph 可执行对象另通过进程显存观察。
+- 修复了 GDN 最后一个短 prefill 分块没有保留块起点快照的问题：544-token 输入在512处分块后，可复用前512 token；不再为每个请求预留两份快照工作槽。
 
-代码量相对`41b50c5`：生产 **+856/−45/净+811** 行。分提交净增：`a100b42`计算核心239、`39c1628`生命周期与预算354、`be6f735`服务接口88、`70d3f7e`成本与精度54、`60ccb47`计时1、`8a19c73`审计修复20、`0003e20`GPU常驻游标54（各提交之和含后续改写，故大于总差）。独立测试尚未提交，0行。
+## Replay 状态表示
 
-## 本轮性能（2026-09-29）
+- 关闭 Replay：target 当前状态保存在完整矩阵中，少专家 draft 另用工作状态，verify 需要逐位置状态。DFlash draft 不申请目标递推状态。
+- 开启 Replay：当前状态由完整检查点和长度有限的更新记录共同表示。少专家 draft 使用临时记录；target verify 覆盖临时尾部；提交只保留接受部分。记录环快满时合并到检查点。
+- 位置游标常驻 GPU；合并在写入新记录前执行，避免环覆盖竞争。公共前缀仍保存完整检查点，命中后从空记录环开始。
+- verify 保留逐 token 递推实现。此前同精度窗口矩阵算法没有测得优势；不能把这一实现描述为已复现论文全部 kernel。
 
-GPU2（4090），Qwen3.6 BF16，9 GiB专家池，GDN预算6245744640字节，Graph，k3缓存路由＋补缺，预取关闭。冻结请求：预热16 token，再两轮C16×64 token，计分2048 token。每臂单次运行，同一提交`0003e20`，开关两侧仅差`--enable-gdn-replayssm`；同卡另有≤1 GB的数值测试进程。
+## 本轮验收与比较
 
-| 臂 | 旧 token/s | 新 token/s | 差异 | 说明 |
-| --- | ---: | ---: | ---: | --- |
-| AR | 24.08 | 24.41 | +1.4% | |
-| SD 固定N4 | 26.22 | 26.87 | +2.5% | 实际平均草稿3.81／3.79 |
-| SD 固定N8 | 26.19 | 24.90 | −4.9% | 旧版受状态槽限制，B16最多80个查询；新版B16×144查询重放21次，平均草稿7.37，但接受率52%→32% |
-| SD 自适应N8 | 26.91 | 27.84 | +3.5% | 平均草稿（计分区间，审计重算）1.73→1.98 |
+基线为[远端 ReplaySSM PR #3](https://github.com/ServeBig-project/FreeToken/pull/3)的 `8422e1b`，其生产 Python 与本轮起点 `54b8ab1` 相同。新增生产代码截至 `481994f` 为 **+952／−128／净+824** 行。
 
-其余平均草稿与接受率取自整次运行的直方图与计数，含预热。`70d3f7e`的前一轮配对结果方向相同（+1.6%／+1.1%／−5.5%／+3.5%），两轮绝对值相差约7%，旧臂也同样变化。独立服务验收在`ffb2e4c`上测得AR 26.44→24.87（−5.9%）、固定N4 30.03→29.88（−0.5%），每臂两次短测、有共享负载；该提交含环满读写竞争，AR回退待修复后成对复测定位。同预算容量目标已达成；固定深起草本身不划算，短测幅度与单次波动相当，不能宣称稳定提速。
+- 独立小模型数值参考：CPU、CUDA各8/8通过，FP32／BF16误差已量化，未调整门槛。
+- 六组服务验收90/90通过：DFlash固定N8／自适应＋Replay、DFlash关闭Replay、Qwen3.6原self-SD、Qwen3原self-SD固定／自适应。覆盖C1/C4/C16、尾批、前缀、停止／取消、重建；DFlash实际执行C16×144位置Graph。
+- 同一台4090、相同专家/KV/状态＋drafter预算：DFlash固定N4的C16为35.02 token/s，当前self-SD自适应30.11，PR原路径29.83；C1暂无收益。
+- offload AR两次25.30／26.38，hybrid AR两次45.83／64.86，hybrid＋Replay两次65.48／65.06。不能将首轮hybrid差异归因于Replay；目前DFlash仍慢于hybrid AR。现有SD不支持hybrid专家执行。
+- 当前主要成本是目标验证时的专家传输；DFlash固定N4的草稿logits准备与模型计算累计约占端到端时间0.35%（不含后续采样）。8步和当前按块自适应均未超过固定4步。
+- Qwen3验收的无GDN参数和长输入样本问题已在独立测试中修复；生产代码无需因此改变。测试最终版本`c6e5bcc`。
 
-冒烟：GPU常驻游标与上一版host游标在相同精度下，AR贪心输出3/4条96 token逐字一致（第4条在同一版本两次运行间也不同）；前缀命中与冷算逐字一致；空闲重建96→80槽后公开字节即时更新并继续生成；layered AR、naive显式预算SD N4可运行。
-
-## 仍未解决的事项
-
-- 独立黑盒：数值验收（针对改为GPU游标之前的入口）与服务／性能验收正在由独立agent执行，结果未出。
-- 工具调用位置跨SD窗口的导出已实现，未经实际工具输出触发验证。
-- joint／layered-pipeline驻留波次未验证，其解码不计入`ar_tokens`；Qwen3（无GDN）回归本轮未运行。
-- 此前flush／导出计时中的数百毫秒异常来自合并kernel在服务中首次编译；现已在启动时编译，并取消按条目数的整数特化。
-- verify Graph按补齐后的物理大小回放（自适应常只需C16×3=48个位置却回放144个）；这是原有Graph策略的优化空间，不混入本轮A/B。
-- 已知旧差异保持：stop／EOS／取消后4组命中与从头计算全文差异、AR／SD质量题差异，本轮未重做。完整agent trace与分块长输入的生命周期成本未测。
-
-## 证据位置
-
-本轮配对运行：`/data2/servebig-envs/replayssm_ab_20260929b_gpu2/`（`0003e20`；`run_ab.py`、`summarize.py`、`summary.json`、各臂命令／日志／公开输出、`wy_verify_ab/`窗口算法对比），前一轮`/data2/servebig-envs/replayssm_ab_20260929_gpu2/`（`70d3f7e`）。上一阶段（状态槽阶段复用）证据：`/data2/servebig-envs/state_phase_20260925_gpu1/`、`/data2/servebig-envs/state_slots_20260925_gpu1/`。
+公开边界见 [DFlash 公开契约](dflash-public-contract.md)和 [Replay 公开契约](replayssm-public-contract.md)。旧 Replay 配对实验、窗口算法证据保留在 `/data2/servebig-envs/replayssm_ab_20260929b_gpu2/`；本轮原始结果在 `/data2/servebig-envs/dflash_integration_20260930/remote-results/`。完整长上下文 agent 任务质量不由64-token性能短测证明。

@@ -6,7 +6,7 @@
 
 - 原有 Qwen3-30B-A3B 与 Qwen3.6-35B-A3B 的少专家 SD 保留。
 - 新增 `--speculative-draft-model-path PATH`：使用指定 DFlash 草稿模型；不指定时沿用少专家 SD。目录名称不决定能力。
-- 首轮匹配的公开权重：`z-lab/Qwen3.6-35B-A3B-DFlash`，目标为 Qwen3.6-35B-A3B，BF16、单 GPU、legacy 调度。
+- 首轮匹配的公开权重：`z-lab/Qwen3.6-35B-A3B-DFlash`，目标为 Qwen3.6-35B-A3B，BF16、单 GPU、legacy 调度；本轮验收使用 offload 专家后端。沿用原 SD 的限制，CPU／hybrid 专家执行在启动时明确拒绝；hybrid AR 仅作为性能对照。
 - `--speculative-num-steps` 始终表示最多起草的 token 数，不含验证使用的已有输入；0 关闭 SD。首轮上限仍为8。
 - 固定模式沿用指定长度，在请求剩余长度、缓存容量限制下缩短。`--speculative-adaptive-cost` 开启时，DFlash 在一轮开始前按成本选择2／4／8个草稿 token（受配置上限和实际容量约束），或使用普通生成；不逐 token 重做整块起草。
 - 原有少专家模式继续使用原来的逐步自适应。
@@ -16,6 +16,7 @@
 ## 服务行为
 
 沿用现有 OpenAI 兼容接口、温度／top-k／top-p、流式响应、usage、最大输出长度、stop、EOS、取消和 cache_group。
+Completion 的 prompt 使用文本字符串；本服务明确不支持 token ID 数组。
 
 - 每轮候选经完整目标模型验证；随机采样必须使用对应 proposal 概率完成接受和修正采样。
 - 正式历史只包含实际保留的输入。被拒绝、stop 后、取消后的暂存内容不得污染后续请求。
@@ -23,6 +24,7 @@
 - 同一公共前缀可被多个请求复用，cache_group 之间隔离。
 - 冷输入、命中前缀、分块长输入、不同长度混合批次、请求终止后重新使用资源均应可运行。
 - 空闲缓存重建后继续服务；忙时拒绝重建、非法重建保留旧资源的语义不变。
+- 重建请求只指定模型实际存在的池。状态中的 `num_mamba_slots=0` 表示没有GDN池，此时省略该重建字段；503响应也可能是参数／资源错误，只有明确的 `status="busy"` 才表示忙时可重试。
 - Greedy 文本差异需报告，不自动等同于状态错误或自动豁免；数值验证与质量回归分别报告。
 
 ## 资源与可观测性
@@ -31,7 +33,9 @@
 - 不为 DFlash 起草申请目标模型的临时递推状态；目标验证仍按所选状态表示获得所需资源。
 - 权重、持久草稿缓存、工作区和 Graph 的实际占用应在报告中分开说明；进程总 GPU 占用和负载峰值是验收依据，不能仅凭 PyTorch 分配量断言没有额外占用。
 - `/v1/stats` 保留 SD 的草稿数、接受数、验证轮数、草稿长度分布以及 Graph 实际／物理输入数量。DFlash 增加可识别的起草类型及起草成本观察。
-- `/v1/cache/status` 能识别 DFlash 并报告其权重、上下文缓存与固定工作区字节，以及调整后的目标状态容量。具体新增字段在公开实现入口就绪后补充。
+- `/v1/cache/status.geometry.dflash` 报告 `active`、`weight_bytes`、`context_bytes`、`metadata_bytes` 和三项之和 `reserved_bytes`；完整状态容量为 `geometry.num_mamba_slots`。Graph 可执行对象的占用另以进程总 GPU 显存观测，不能混作上述张量字节。
+- `/v1/stats.speculative.dflash_block_gpu_ms` 是草稿logits准备与模型计算的累计CUDA计时间隔，不含后续概率过滤、采样和候选写入；`dflash_block_samples` 按 `"batch_size:实际最大草稿长度"` 计数。它不是单个草稿 token 的时间。`dflash_block_choices[0]` 记录选择 AR 的次数，其余位置记录选择对应整块长度的次数。
+- 启用 `--enable-cache-report` 时，命中数大于零才返回 `usage.prompt_tokens_details.cached_tokens`；该字段缺省表示零命中。
 
 ## 独立验收与对照
 
