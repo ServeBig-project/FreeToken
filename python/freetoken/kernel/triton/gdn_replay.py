@@ -16,7 +16,9 @@ moves data. The state after the records ``[b, b + n)`` is
 
 ``b`` lives on the GPU (``start[row]``); every fold decision reads it there. A sequence
 whose next ``width`` inputs would not fit the ring (``p + width - b > R``) folds all its
-records into the checkpoint, and ``b`` then becomes ``p``.
+records into the checkpoint, and ``b`` then becomes ``p``. Folds run as their own launch
+before any kernel appends records: an appended record reuses the ring entry of the oldest
+one, which every layer and head must have read first.
 
 Precision: every product and accumulation runs in fp32; matrix products use 3xTF32, whose
 error is close to fp32 and which runs ~18x faster than IEEE fp32 dots on the 4090. The
@@ -63,7 +65,7 @@ def _replay_kernel(qkv, a, b, A_log, dt_bias, out, state, u, k, g, start, cu_seq
                    rows, positions, scale, stride_qkv, stride_a, stride_b, stride_state,
                    stride_u, stride_k, stride_g, HV: tl.constexpr, H: tl.constexpr,
                    K: tl.constexpr, V: tl.constexpr, R: tl.constexpr, BK: tl.constexpr,
-                   BV: tl.constexpr, BC: tl.constexpr, FOLD: tl.constexpr):
+                   BV: tl.constexpr, BC: tl.constexpr):
     i_v, i_n, i_hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     row = tl.load(rows + i_n)
     if row < 0:  # padding: the output was allocated zeroed, records stay untouched
@@ -80,12 +82,6 @@ def _replay_kernel(qkv, a, b, A_log, dt_bias, out, state, u, k, g, start, cu_seq
     S = _replayed_state(state, u, k, g, slot, row, b0, pos - b0, i_hv, i_h, o_v, o_k,
                         mask_v, mask_k, stride_state, stride_u, stride_k, stride_g,
                         HV, H, K, V, R, BC)
-    if FOLD:
-        if pos + (eos - bos) - b0 > R:
-            # Every layer folds the same records; gdn_replay_advance moves b afterwards.
-            p_s = state + slot.to(tl.int64) * stride_state + i_hv * V * K
-            tl.store(p_s + o_v[:, None] * K + o_k[None, :], S.to(state.dtype.element_ty),
-                     mask=mask_v[:, None] & mask_k[None, :])
 
     neg_a = -tl.exp(tl.load(A_log + i_hv).to(tl.float32))
     bias = tl.load(dt_bias + i_hv).to(tl.float32)
@@ -120,20 +116,26 @@ def _replay_kernel(qkv, a, b, A_log, dt_bias, out, state, u, k, g, start, cu_seq
 
 
 @triton.jit
-def _fold_kernel(state, u, k, g, start, plan, num_layers, stride_state_layer, stride_state,
-                 stride_u_layer, stride_u, stride_k_layer, stride_k, stride_g_layer, stride_g,
-                 HV: tl.constexpr, H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
-                 R: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr, BC: tl.constexpr):
+def _fold_kernel(state, u, k, g, start, rows, srcs, dsts, ends, widths, num_layers,
+                 stride_state_layer, stride_state, stride_u_layer, stride_u, stride_k_layer,
+                 stride_k, stride_g_layer, stride_g, HV: tl.constexpr, H: tl.constexpr,
+                 K: tl.constexpr, V: tl.constexpr, R: tl.constexpr, BK: tl.constexpr,
+                 BV: tl.constexpr, BC: tl.constexpr, WIDTH: tl.constexpr):
     i_v, i_x, i_hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     entry, layer = i_x // num_layers, (i_x % num_layers).to(tl.int64)
-    src = tl.load(plan + entry * 5)
-    dst = tl.load(plan + entry * 5 + 1)
-    row = tl.load(plan + entry * 5 + 2)
-    end = tl.load(plan + entry * 5 + 3)
-    width = tl.load(plan + entry * 5 + 4)
+    row = tl.load(rows + entry)
+    if row < 0:
+        return
+    if WIDTH < 0:
+        width = tl.load(widths + entry)
+    else:
+        width = WIDTH
+    end = tl.load(ends + entry)
     b0 = tl.load(start + row)
     if (width > 0) & (end + width - b0 <= R):
         return  # the next ``width`` inputs still fit: nothing to fold
+    src = tl.load(srcs + entry)
+    dst = tl.load(dsts + entry)
     state = state + layer * stride_state_layer
     i_h = i_hv // (HV // H)
     o_v = i_v * BV + tl.arange(0, BV)
@@ -155,7 +157,7 @@ def _advance_kernel(start, stats, rows, ends, widths, n, R: tl.constexpr, WIDTH:
     row = tl.load(rows + o, mask=o < n, other=-1)
     live = row >= 0
     end = tl.load(ends + o, mask=live, other=0)
-    if WIDTH == 0:
+    if WIDTH < 0:
         width = tl.load(widths + o, mask=live, other=0)
     else:
         width = WIDTH
@@ -217,15 +219,11 @@ def gdn_replay(
     rows: torch.Tensor,       # [n] int32 record row per sequence; < 0 = padding
     positions: torch.Tensor,  # [tokens] int32 absolute position of each input
     scale: float,
-    *,
-    fold: bool = False,
 ) -> torch.Tensor:
     """Gated delta rule over each sequence's inputs ``[p, p + T)`` (``p`` = position of its
     first input), starting from its checkpoint plus the records ``[b, p)``. Returns
-    ``[tokens, HV, V]`` and writes the records of ``[p, p + T)``. With ``fold`` (target
-    decode), a sequence with ``p + T - b > R`` first stores its complete state into its
-    checkpoint; call ``gdn_replay_advance`` after the last layer. Padding rows get zero
-    output and write nothing."""
+    ``[tokens, HV, V]`` and writes the records of ``[p, p + T)``; needs ``p + T - b <= R``.
+    Padding rows get zero output and write nothing."""
     HV, R, V = u.shape[1:]
     H, K = k.shape[1], k.shape[3]
     out = qkv.new_zeros(qkv.shape[0], HV, V)
@@ -234,7 +232,7 @@ def gdn_replay(
         qkv, a, b, A_log, dt_bias, out, state, u, k, g, start, cu_seqlens, slots, rows,
         positions, scale, qkv.stride(0), a.stride(0), b.stride(0), state.stride(0), u.stride(0),
         k.stride(0), g.stride(0), HV=HV, H=H, K=K, V=V, R=R, BK=triton.next_power_of_2(K),
-        BV=_BV, BC=max(16, R), FOLD=fold, num_warps=4,
+        BV=_BV, BC=max(16, R), num_warps=4,
     )
     return out
 
@@ -247,11 +245,11 @@ def gdn_replay_advance(
     widths: torch.Tensor | int,  # [n] int32 inputs to make room for, or one width for all
     ring: int,             # R
 ) -> None:
-    """Move ``b`` to ``end`` wherever ``end + width - b > R`` -- the same test the fold paths
-    apply -- once every layer has folded."""
+    """Move ``b`` to ``end`` wherever ``end + width - b > R`` -- the test gdn_replay_fold
+    applies -- after that fold, before any kernel reads ``b`` again."""
     n = rows.shape[0]
-    fixed = widths if isinstance(widths, int) else 0
-    _advance_kernel[(1,)](start, stats, rows, ends, rows if fixed else widths, n, R=ring,
+    fixed = widths if isinstance(widths, int) else -1
+    _advance_kernel[(1,)](start, stats, rows, ends, widths if fixed < 0 else rows, n, R=ring,
                           WIDTH=fixed, BLOCK=triton.next_power_of_2(max(n, 16)))
 
 
@@ -261,18 +259,24 @@ def gdn_replay_fold(
     k: torch.Tensor,      # [layers, rows, H, R, K]
     g: torch.Tensor,      # [layers, rows, HV, R]
     start: torch.Tensor,  # [rows] int32
-    plan: torch.Tensor,   # [n, 5] int32 (source slot, destination slot, record row, end, width)
+    rows: torch.Tensor,   # [n] int32 record row; < 0 = padding
+    src: torch.Tensor,    # [n] int32 source checkpoint slot
+    dst: torch.Tensor,    # [n] int32 destination slot
+    ends: torch.Tensor,   # [n] int32 position the state is taken at
+    widths: torch.Tensor | int,  # [n] int32, or one width for all
 ) -> None:
-    """For every layer, write into the destination slot the state after the records
-    ``[b, end)`` following the source checkpoint. ``width == 0`` always does it (export);
+    """For every layer, write into ``dst`` the state after the records ``[b, end)``
+    following the checkpoint in ``src``. ``width == 0`` always does it (export);
     ``width > 0`` only when ``end + width - b > R`` (fold). Records and ``b`` are unchanged."""
     num_layers, _, HV, R, V = u.shape
     H, K = k.shape[2], k.shape[4]
-    grid = (triton.cdiv(V, _BV), plan.shape[0] * num_layers, HV)
+    fixed = widths if isinstance(widths, int) else -1
+    grid = (triton.cdiv(V, _BV), rows.shape[0] * num_layers, HV)
     _fold_kernel[grid](
-        state, u, k, g, start, plan, num_layers, state.stride(0), state.stride(1), u.stride(0),
-        u.stride(1), k.stride(0), k.stride(1), g.stride(0), g.stride(1), HV=HV, H=H, K=K, V=V,
-        R=R, BK=triton.next_power_of_2(K), BV=_BV, BC=max(16, R), num_warps=4,
+        state, u, k, g, start, rows, src, dst, ends, widths if fixed < 0 else rows, num_layers,
+        state.stride(0), state.stride(1), u.stride(0), u.stride(1), k.stride(0), k.stride(1),
+        g.stride(0), g.stride(1), HV=HV, H=H, K=K, V=V, R=R, BK=triton.next_power_of_2(K),
+        BV=_BV, BC=max(16, R), WIDTH=fixed, num_warps=4,
     )
 
 

@@ -39,8 +39,8 @@ class GdnReplay:
     position ``start[row]`` (GPU), and its records ``[start, cached_len)`` complete the target
     state. Draft and verify also write records past ``cached_len``; they become target history
     only as ``cached_len`` advances over them. Folds are decided on the GPU from ``start``:
-    target decode folds inside its kernel and advances ``start`` after the last GDN layer, an
-    SD round folds before drafting. The host only resets ``start`` at prefill.
+    target decode folds and advances ``start`` before its first GDN layer, an SD round before
+    drafting. The host only resets ``start`` at prefill.
     """
 
     def __init__(self, pool, shapes, device) -> None:
@@ -63,13 +63,13 @@ class GdnReplay:
         self._timed: list[tuple[str, torch.cuda.Event, torch.cuda.Event]] = []
         self._stats_host = torch.zeros(2, dtype=torch.int64, pin_memory=True)
         self._stats_copied: torch.cuda.Event | None = None
-        # Compile the fold and round-advance kernels now, not inside the first round or
-        # donation: a zero-record export of the padding slot onto itself, an empty advance.
-        pad = pool.padding_slot
-        gdn_replay_fold(pool.recurrent_states, self.u, self.k, self.g, self.start,
-                        _device([(pad, pad, 0, 0, 0)], device))
-        gdn_replay_advance(self.start, self.stats, *(_device([v], device) for v in (-1, 0, 1)),
-                           self.ring)
+        # Compile the export and round fold/advance variants now, not inside the first round or
+        # donation (the decode variants compile with the graphs); padding rows do nothing.
+        pad = _device([-1], device)
+        for widths in (0, pad):
+            gdn_replay_fold(pool.recurrent_states, self.u, self.k, self.g, self.start, pad, pad,
+                            pad, pad, widths)
+        gdn_replay_advance(self.start, self.stats, pad, pad, pad, self.ring)
 
     def snapshot(self) -> dict:
         """Counters as of the previous snapshot's copy of the GPU fold counters (lagging by
@@ -116,12 +116,12 @@ class GdnReplay:
         for row in rows:
             self.window_span[row] = None
 
-    def _fold(self, plan, key: str) -> None:
+    def _fold(self, rows, src, dst, ends, widths, key: str) -> None:
         pool = self.pool
-        planned = _device(plan, pool.device)
         start, end = (torch.cuda.Event(enable_timing=True) for _ in range(2))
         start.record()
-        gdn_replay_fold(pool.recurrent_states, self.u, self.k, self.g, self.start, planned)
+        gdn_replay_fold(pool.recurrent_states, self.u, self.k, self.g, self.start, rows, src,
+                        dst, ends, widths)
         end.record()
         self._timed.append((key, start, end))
 
@@ -136,7 +136,8 @@ class GdnReplay:
     def export(self, req, position: int, dst: int) -> None:
         """Write the complete state after ``position`` inputs (see ``can_export``) into ``dst``."""
         row, slot = req.table_idx, self._slot(req)
-        self._fold([(slot, dst, row, position, 0)], "export_gpu_ms")
+        device = self.pool.device
+        self._fold(*(_device([v], device) for v in (row, slot, dst, position)), 0, "export_gpu_ms")
         self.counts["snapshot_exports"] += 1
         conv = self.pool.conv_states
         if position == req.cached_len:
@@ -146,8 +147,9 @@ class GdnReplay:
 
     def materialize(self, req) -> None:
         """Make the request's own slot its complete current state (it is about to be donated)."""
-        slot = self._slot(req)
-        self._fold([(slot, slot, req.table_idx, req.cached_len, 0)], "export_gpu_ms")
+        device = self.pool.device
+        row, slot, end = (_device([v], device) for v in (req.table_idx, self._slot(req), req.cached_len))
+        self._fold(row, slot, slot, end, 0, "export_gpu_ms")
         self.counts["snapshot_exports"] += 1
 
     def _window_cols(self, position: int) -> list[int]:
@@ -162,14 +164,13 @@ class GdnReplay:
         rows = [req.table_idx for req in reqs]
         slots = [self._slot(req) for req in reqs]
         firsts = [req.cached_len for req in reqs]
-        widths = [length + 1 for length in lengths]
-        self._fold(list(zip(slots, slots, rows, firsts, widths)), "flush_gpu_ms")
-        rows_t, firsts_t = _device(rows, device), _device(firsts, device)
-        gdn_replay_advance(self.start, self.stats, rows_t, firsts_t, _device(widths, device),
-                           self.ring)
+        rows_t, slots_t, firsts_t, widths_t = (
+            _device(v, device) for v in (rows, slots, firsts, [n + 1 for n in lengths]))
+        self._fold(rows_t, slots_t, slots_t, firsts_t, widths_t, "flush_gpu_ms")
+        gdn_replay_advance(self.start, self.stats, rows_t, firsts_t, widths_t, self.ring)
         cols = _device([self._window_cols(p) for p in firsts], device)
         conv = self.pool.conv_states
-        self.window[:, rows_t[:, None], cols] = conv[:, _device(slots, device)].transpose(-1, -2)
+        self.window[:, rows_t[:, None], cols] = conv[:, slots_t].transpose(-1, -2)
         for row in rows:
             self.window_span[row] = None
         return _ReplayRound(self, rows, slots, firsts)

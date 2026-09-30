@@ -143,14 +143,14 @@ from freetoken.kernel.triton.gdn_replay import (
 
 记录按**绝对输入位置**p存放在环中：`u[m, j, p & (R-1), :]`（长度V）、`k[m, h, p & (R-1), :]`（归一化后的key，长度K）、`g[m, j, p & (R-1)]`（fp32）。位置p指已消费输入的序号：p之前的输入已经进入状态。每个记录行的完整状态位置b存放在GPU数组`start[m]`（int32）中：新序列开始时由调用方写入（生产中在prefill完成时写为prefill后的长度），之后只由下面的入口读写。
 
-**`gdn_replay(qkv, a, b, A_log, dt_bias, state, u, k, g, start, cu_seqlens, slots, rows, positions, scale, *, fold=False) -> out`**
+**`gdn_replay(qkv, a, b, A_log, dt_bias, state, u, k, g, start, cu_seqlens, slots, rows, positions, scale) -> out`**
 
 | 参数 | 形状／dtype | 说明 |
 | --- | --- | --- |
 | qkv | [tokens, 2·H·K + HV·V]，激活dtype | 卷积＋silu之后的每个token依次为q(H×K)、k(H×K)、v(HV×V)；最后一维连续，行stride可更大 |
 | a, b | [tokens, HV]，激活dtype | 原始门控输入；最后一维连续 |
 | A_log, dt_bias | [HV] fp32 | |
-| state | [slots, HV, V, K] 连续，默认fp32 | 只在`fold`时写 |
+| state | [slots, HV, V, K] 连续，默认fp32 | 只读 |
 | u / k / g | [rows, HV, R, V] / [rows, H, R, K] / [rows, HV, R]；u、k为激活dtype，g为fp32，连续 | 记录 |
 | start | [rows] int32 | 各记录行的b；只读 |
 | cu_seqlens | [n+1] int32 | 序列i的输入为`[cu[i], cu[i+1])`，长度T |
@@ -160,15 +160,15 @@ from freetoken.kernel.triton.gdn_replay import (
 
 语义（序列i，b=`start[m]`）：起始状态＝`state[slot]`依次叠加位置`[b, p)`的记录；随后对T个输入逐个执行
 `q̂ = q/√(Σq²+1e-6)·scale`，`k̂ = k/√(Σk²+1e-6)`，`g = -exp(A_log)·softplus(a+dt_bias)`（x>20时softplus(x)=x），`β = sigmoid(b)`（均为fp32），`S ← e^g·S`，`u = β(v − S k̂)`，`S ← S + u k̂ᵀ`，`y = S q̂`。
-返回`out[tokens, HV, V]`（qkv的dtype），并写入位置`[p, p+T)`的记录`(u, k̂, g)`。`fold=True`且`p+T−b > R`时，先把起始状态（即长度p的前缀状态）写回`state[slot]`；`start`不变，由调用方在所有层之后调用`gdn_replay_advance`。`fold=False`时要求`p+T−b ≤ R`，不写state。总要求`p ≥ b`；同一次调用中各序列的记录行与状态槽都互不相同，T ≥ 1。padding行输出为0，不写任何东西，其slots与positions取值不被读取。
+返回`out[tokens, HV, V]`（qkv的dtype），并写入位置`[p, p+T)`的记录`(u, k̂, g)`；不写state与start。要求`b ≤ p`且`p+T−b ≤ R`（写入的环位置不与读取的历史重叠）；同一次调用中各序列的记录行与状态槽都互不相同，T ≥ 1。padding行输出为0，不写任何东西，其slots与positions取值不被读取。
 
 **`gdn_replay_advance(start, stats, rows, ends, widths, ring) -> None`**
 
 rows、ends为[n] int32，widths为int或[n] int32，stats为[2] int64。对每个`rows[i] ≥ 0`：若`ends[i] + width − start[m] > ring`，则`start[m] = ends[i]`，`stats[0] += 1`，`stats[1] += ends[i] − 原start[m]`。判定式与`fold`、`gdn_replay_fold`一致。
 
-**`gdn_replay_fold(state, u, k, g, start, plan) -> None`**
+**`gdn_replay_fold(state, u, k, g, start, rows, src, dst, ends, widths) -> None`**
 
-state为[L, slots, HV, V, K]，u/k/g为带层维的[L, rows, …]；`plan`为[n, 5] int32，每行`(源slot, 目标slot, m, end, width)`。令b=`start[m]`：`width == 0`时总是执行，`width > 0`时仅在`end+width−b > R`时执行。执行时对每一层写入`state[l, 目标] =` 源状态（位于位置b）依次叠加位置`[b, end)`的记录后的完整状态，即长度为`end`的前缀对应的状态；要求`0 ≤ end−b ≤ R`。记录与`start`不被修改；目标可以等于源；各行的目标互不相同且不等于其他行的源。
+state为[L, slots, HV, V, K]，u/k/g为带层维的[L, rows, …]；rows、src、dst、ends为[n] int32（记录行m、源slot、目标slot、end），widths为int或[n] int32。对每个`rows[i] ≥ 0`，令b=`start[m]`：`width == 0`时总是执行，`width > 0`时仅在`end+width−b > R`时执行。执行时对每一层写入`state[l, dst] =` 源状态（位于位置b）依次叠加位置`[b, end)`的记录后的完整状态，即长度为`end`的前缀对应的状态；要求`0 ≤ end−b ≤ R`。记录与`start`不被修改；目标可以等于源；各行的目标互不相同且不等于其他行的源；`rows[i] < 0`的行不读取其他字段。
 
 **`gdn_replay_conv(x, weight, window, cu_seqlens, rows, positions) -> out`**
 
@@ -176,7 +176,7 @@ x为[tokens, D]的原始卷积输入（激活dtype），weight为[D, KW]（浮�
 
 精度：所有乘加在fp32中完成，其中记录叠加进状态的矩阵乘使用3×TF32（误差接近fp32）；每条记录的衰减系数`exp(其后各步g之和)`由末尾向前累加得到，舍入误差随该系数自身的指数大小而定，不随整段Σg增长；u、k按激活dtype存储，g为fp32，完整状态保持其存储dtype。单次调用内部的逐token递推使用未舍入的fp32 u、k，因此与普通逐token递推相比，只有此前调用写入的u、k记录存在舍入。
 
-模型中的用法：target AR沿用原有逐token卷积并原地更新卷积状态，再以`fold=True`调用`gdn_replay`，最后一个GDN层之后用`gdn_replay_advance(rows, positions, 1)`推进b；draft与verify先用`gdn_replay_conv`，再以`fold=False`调用`gdn_replay`，不推进b；SD每轮起草前对各请求以`width = 草稿长度+1`调用`gdn_replay_fold`，再以相同widths调用`gdn_replay_advance`；公共快照导出与请求结束捐献用`width = 0`的`gdn_replay_fold`。`state`在模型中是状态池的一层视图，K=V时与上表布局一致。
+模型中的用法：target AR在第一个GDN层之前对所有层调用`gdn_replay_fold(rows, slots, slots, positions, 1)`，再用`gdn_replay_advance(rows, positions, 1)`推进b（记录环位置被新记录复用前，旧记录已被所有层和头读完）；随后每层沿用原有逐token卷积并原地更新卷积状态，再调用`gdn_replay`；draft与verify先用`gdn_replay_conv`再调用`gdn_replay`，不推进b；SD每轮起草前对各请求以`width = 草稿长度+1`调用`gdn_replay_fold`，再以相同widths调用`gdn_replay_advance`；公共快照导出与请求结束捐献用`width = 0`的`gdn_replay_fold`。`state`在模型中是状态池的一层视图，K=V时与上表布局一致。
 
 ## 6. 最小服务验收集合
 
