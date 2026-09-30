@@ -141,7 +141,7 @@ from freetoken.kernel.triton.gdn_replay import (
 
 记号：H个key头、HV个value头（HV整除H，value头j使用key头`j // (HV/H)`），头维K、V；R为记录环长度（2的幂）；m为请求记录行；slot为完整状态槽。每个value头的状态S是V×K矩阵，`y = S @ q`，`state[slot, j]`按行v、列k存放。
 
-记录按**绝对输入位置**p存放在环中：`u[m, j, p & (R-1), :]`（长度V）、`k[m, h, p & (R-1), :]`（归一化后的key，长度K）、`g[m, j, p & (R-1)]`（fp32）。位置p指已消费输入的序号：p之前的输入已经进入状态。每个记录行的完整状态位置b存放在GPU数组`start[m]`（int32）中，只由下面的入口读写。
+记录按**绝对输入位置**p存放在环中：`u[m, j, p & (R-1), :]`（长度V）、`k[m, h, p & (R-1), :]`（归一化后的key，长度K）、`g[m, j, p & (R-1)]`（fp32）。位置p指已消费输入的序号：p之前的输入已经进入状态。每个记录行的完整状态位置b存放在GPU数组`start[m]`（int32）中：新序列开始时由调用方写入（生产中在prefill完成时写为prefill后的长度），之后只由下面的入口读写。
 
 **`gdn_replay(qkv, a, b, A_log, dt_bias, state, u, k, g, start, cu_seqlens, slots, rows, positions, scale, *, fold=False) -> out`**
 
@@ -160,7 +160,7 @@ from freetoken.kernel.triton.gdn_replay import (
 
 语义（序列i，b=`start[m]`）：起始状态＝`state[slot]`依次叠加位置`[b, p)`的记录；随后对T个输入逐个执行
 `q̂ = q/√(Σq²+1e-6)·scale`，`k̂ = k/√(Σk²+1e-6)`，`g = -exp(A_log)·softplus(a+dt_bias)`（x>20时softplus(x)=x），`β = sigmoid(b)`（均为fp32），`S ← e^g·S`，`u = β(v − S k̂)`，`S ← S + u k̂ᵀ`，`y = S q̂`。
-返回`out[tokens, HV, V]`（qkv的dtype），并写入位置`[p, p+T)`的记录`(u, k̂, g)`。`fold=True`且`p+T−b > R`时，先把起始状态（即长度p的前缀状态）写回`state[slot]`；`start`不变，由调用方在所有层之后调用`gdn_replay_advance`。`fold=False`时要求`p+T−b ≤ R`，不写state。总要求`p ≥ b`；同一次调用中各序列的记录行互不相同。padding行输出为0，不写任何东西。
+返回`out[tokens, HV, V]`（qkv的dtype），并写入位置`[p, p+T)`的记录`(u, k̂, g)`。`fold=True`且`p+T−b > R`时，先把起始状态（即长度p的前缀状态）写回`state[slot]`；`start`不变，由调用方在所有层之后调用`gdn_replay_advance`。`fold=False`时要求`p+T−b ≤ R`，不写state。总要求`p ≥ b`；同一次调用中各序列的记录行与状态槽都互不相同，T ≥ 1。padding行输出为0，不写任何东西，其slots与positions取值不被读取。
 
 **`gdn_replay_advance(start, stats, rows, ends, widths, ring) -> None`**
 
@@ -172,9 +172,9 @@ state为[L, slots, HV, V, K]，u/k/g为带层维的[L, rows, …]；`plan`为[n,
 
 **`gdn_replay_conv(x, weight, window, cu_seqlens, rows, positions) -> out`**
 
-x为[tokens, D]的原始卷积输入（激活dtype），weight为[D, KW]，window为[rows, W, D]，按绝对位置存原始卷积输入：`window[m, q % W]`为位置q的输入。调用前须保证位置`[p−KW+1, p)`的输入已在窗口中（`p = positions[cu[i]]`）。输出`out_t = silu(Σ_j weight[:, j]·x(p+t−KW+1+j))`（fp32累加，输出x的dtype），其中`q ≥ p`的输入取自x，`q < p`的取自窗口；之后`window[m, (p+t) % W] = x_t`。要求`W ≥ KW−1+T`；padding行输出0、不写窗口。
+x为[tokens, D]的原始卷积输入（激活dtype），weight为[D, KW]（浮点dtype均可），window为[rows, W, D]，按绝对位置存原始卷积输入：`window[m, q % W]`为位置q的输入。调用前须保证位置`[p−KW+1, p)`的输入已在窗口中（`p = positions[cu[i]]`）。输出`out_t = silu(Σ_j weight[:, j]·x(p+t−KW+1+j))`（fp32累加，输出x的dtype），其中`q ≥ p`的输入取自x，`q < p`的取自窗口；之后`window[m, (p+t) % W] = x_t`。要求`W ≥ KW−1+T`；padding行输出0、不写窗口。
 
-精度：所有乘加在fp32中完成，其中记录叠加进状态的矩阵乘使用3×TF32（误差接近fp32）；u、k按激活dtype存储，g为fp32，完整状态保持其存储dtype。单次调用内部的逐token递推使用未舍入的fp32 u、k，因此与普通逐token递推相比，只有此前调用写入的u、k记录存在舍入。
+精度：所有乘加在fp32中完成，其中记录叠加进状态的矩阵乘使用3×TF32（误差接近fp32）；每条记录的衰减系数`exp(其后各步g之和)`由末尾向前累加得到，舍入误差随该系数自身的指数大小而定，不随整段Σg增长；u、k按激活dtype存储，g为fp32，完整状态保持其存储dtype。单次调用内部的逐token递推使用未舍入的fp32 u、k，因此与普通逐token递推相比，只有此前调用写入的u、k记录存在舍入。
 
 模型中的用法：target AR沿用原有逐token卷积并原地更新卷积状态，再以`fold=True`调用`gdn_replay`，最后一个GDN层之后用`gdn_replay_advance(rows, positions, 1)`推进b；draft与verify先用`gdn_replay_conv`，再以`fold=False`调用`gdn_replay`，不推进b；SD每轮起草前对各请求以`width = 草稿长度+1`调用`gdn_replay_fold`，再以相同widths调用`gdn_replay_advance`；公共快照导出与请求结束捐献用`width = 0`的`gdn_replay_fold`。`state`在模型中是状态池的一层视图，K=V时与上表布局一致。
 

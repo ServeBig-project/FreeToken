@@ -45,9 +45,12 @@ def _replayed_state(state, u, k, g, slot, row, start, count, i_hv, i_h, o_v, o_k
     valid = o_c < count
     ring = (start + o_c) & (R - 1)
     row = row.to(tl.int64)
-    b_g = tl.load(g + row * stride_g + i_hv * R + ring, mask=valid, other=0.0)
-    total = tl.sum(b_g, axis=0)
-    coef = tl.where(valid, tl.exp(total - tl.cumsum(b_g, axis=0)), 0.0)
+    p_g = g + row * stride_g + i_hv * R
+    total = tl.sum(tl.load(p_g + ring, mask=valid, other=0.0), axis=0)
+    # Decay after each record, summed back from the last one: the terms that matter have
+    # small exponents and keep their own precision (total - prefix would cancel).
+    g_next = tl.load(p_g + ((ring + 1) & (R - 1)), mask=o_c + 1 < count, other=0.0)
+    coef = tl.where(valid, tl.exp(tl.cumsum(g_next, axis=0, reverse=True)), 0.0)
     b_u = tl.load(u + row * stride_u + (i_hv * R + ring[None, :]) * V + o_v[:, None],
                   mask=mask_v[:, None] & valid[None, :], other=0.0).to(tl.float32)
     b_k = tl.load(k + row * stride_k + (i_h * R + ring[:, None]) * K + o_k[None, :],
