@@ -252,7 +252,12 @@ def parse_args(
         "--speculative-num-steps",
         type=int,
         default=ServerArgs.speculative_num_steps,
-        help="Draft tokens per self-speculative round; 0 disables speculation (default).",
+        help="Maximum draft tokens per speculative round; 0 disables speculation (default).",
+    )
+    parser.add_argument(
+        "--speculative-draft-model-path", type=str,
+        default=ServerArgs.speculative_draft_model_path,
+        help="DFlash checkpoint directory or Hugging Face model; omitted uses self drafting.",
     )
     parser.add_argument(
         "--speculative-draft-experts",
@@ -769,6 +774,14 @@ def parse_args(
 
     if kwargs["model_path"].startswith("~"):
         kwargs["model_path"] = os.path.expanduser(kwargs["model_path"])
+    draft_path = kwargs.get("speculative_draft_model_path")
+    if draft_path:
+        draft_path = os.path.expanduser(draft_path)
+        if not os.path.isdir(draft_path):
+            from huggingface_hub import snapshot_download
+
+            draft_path = snapshot_download(draft_path, allow_patterns=["config.json", "*.safetensors"])
+        kwargs["speculative_draft_model_path"] = draft_path
 
     if kwargs["served_model_name"] is None:
         kwargs["served_model_name"] = (

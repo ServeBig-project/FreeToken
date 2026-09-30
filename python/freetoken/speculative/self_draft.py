@@ -43,6 +43,9 @@ class SelfDrafter:
             result["draft_expert_loads"] = int(self.draft_loads.item())
         return result
 
+    def observe_acceptance(self, lengths, accepted):
+        self.cost.observe_acceptance(lengths, accepted)
+
     def plan(self, batch: Batch, lengths: list[int]) -> list[int]:
         engine = self.engine
         expert_cache = engine.moe_offload_cache

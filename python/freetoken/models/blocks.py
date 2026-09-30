@@ -20,8 +20,18 @@ if TYPE_CHECKING:
 
 
 class BaseLLMModel(ABC, BaseOP):
+    supports_draft_features = False
+
     @abstractmethod
     def forward(self) -> torch.Tensor: ...
+
+
+def record_draft_feature(layer_id, hidden, residual):
+    from freetoken.core import get_global_ctx
+
+    context = get_global_ctx().draft_context
+    if context is not None:
+        context.record(layer_id, hidden, residual)
 
 
 @dataclass

@@ -11,7 +11,7 @@ from freetoken.layers import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from freetoken.models.blocks import LayerGroupState, ResidualLayerGroupCausalLM
+from freetoken.models.blocks import LayerGroupState, ResidualLayerGroupCausalLM, record_draft_feature
 from freetoken.utils import nvtx_annotate
 
 from .attention import Qwen3_5Attention
@@ -84,11 +84,14 @@ class Qwen3_5Model(BaseOP):
         residual: torch.Tensor | None = None
         for layer in self.layers.op_list:
             x, residual = layer.forward(x, residual)
+            record_draft_feature(layer._layer_id, x, residual)
         x, _ = self.norm.forward_add_residual(x, residual)
         return x
 
 
 class Qwen3_5MoEForCausalLM(ResidualLayerGroupCausalLM):
+    supports_draft_features = True
+
     def __init__(self, config: ModelConfig):
         self.model = Qwen3_5Model(config)
         if getattr(config, "lm_head_quant", "none") == "nvfp4":

@@ -125,10 +125,10 @@ class LinearStatePool:
                 return capped
         return [0] * len(lengths)
 
-    def begin_speculation(self, reqs, views, lengths):
+    def begin_speculation(self, reqs, views, lengths, *, draft=True):
         if self.replay is not None:
             return self.replay.begin_round(reqs, lengths)
-        return LinearSpeculativeState(self, reqs, views, lengths)
+        return LinearSpeculativeState(self, reqs, views, lengths, draft=draft)
 
     def create_speculative_graphs(self, max_batch, query_width, device):
         from freetoken.attention.linear import FLASpeculativeGraphs, ReplaySpeculativeGraphs
@@ -314,17 +314,18 @@ def gdn_state_budget(config) -> int:
 
 def _linear_pool_num_slots(config) -> int:
     """Full-state slots that fit the GDN state budget next to the fixed ReplaySSM buffers."""
-    if config.gdn_state_budget_bytes is None and replay_records(config) is None:
+    draft_bytes = getattr(config, "_draft_reserved_bytes", 0)
+    if config.gdn_state_budget_bytes is None and replay_records(config) is None and not draft_bytes:
         return _default_pool_slots(config)
     per_slot = linear_state_bytes_per_req(
         config.model_config.linear_attention_group(), config.tp_info.size, config.dtype)
     budget = gdn_state_budget(config)
-    fixed = replay_buffer_bytes(config)
+    fixed = replay_buffer_bytes(config) + draft_bytes
     slots = (budget - fixed) // per_slot
     if slots < _linear_pool_min_slots(config):
         raise ValueError(
             f"GDN state budget {budget} bytes holds {max(slots, 0)} full states after "
-            f"{fixed} bytes of replay buffers; at least {_linear_pool_min_slots(config)} "
+            f"{fixed} bytes of replay/draft storage; at least {_linear_pool_min_slots(config)} "
             f"states of {per_slot} bytes are needed, raise --gdn-state-budget-bytes"
         )
     return slots
@@ -341,14 +342,14 @@ def _linear_pool_min_slots(config) -> int:
 class LinearSpeculativeState:
     """Own temporary draft/verify states until the host decides what output is retained."""
 
-    def __init__(self, pool, reqs, views, lengths):
+    def __init__(self, pool, reqs, views, lengths, *, draft=True):
         self.pool = pool
-        self.slots = pool.alloc(sum(length > 0 for length in lengths))
+        self.slots = pool.alloc(sum(length > 0 for length in lengths)) if draft else []
         self.live_slots = [req.linear_slot_idx if req.linear_slot_idx is not None else req.table_idx
                            for req in reqs]
         draft_slots = iter(self.slots)
         for live, view, length in zip(self.live_slots, views, lengths, strict=True):
-            if length:
+            if draft and length:
                 slot = next(draft_slots)
                 pool.copy_from(live, slot)
                 view.linear_slot_idx = slot

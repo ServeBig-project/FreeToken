@@ -5,6 +5,8 @@ from freetoken.core import get_global_ctx
 def forward_model(model):
     logits = model.forward()
     ctx = get_global_ctx()
+    if ctx.draft_context is not None:
+        ctx.draft_context.flush(ctx.batch)
     cost = ctx.speculative_cost
     if cost is not None and cost.prefetch is not None:
         # Join before returning, including the warmup immediately preceding capture.

@@ -38,7 +38,12 @@ class SpeculativeDecoder:
         # A separate seed keeps subsequent Torch draws from reusing that random stream.
         self.generator = torch.Generator(device=engine.device)
         self.generator.manual_seed((torch.cuda.initial_seed() + 1) % (1 << 64))
-        self.drafter = SelfDrafter(engine, table, self._logits, self.generator)
+        if engine.config.speculative_draft_model_path:
+            from freetoken.speculative.dflash import DFlashDrafter
+
+            self.drafter = DFlashDrafter(engine, table, self._logits, self.generator)
+        else:
+            self.drafter = SelfDrafter(engine, table, self._logits, self.generator)
         self.selector = DecodeBatchSelector()
         self.draft_tokens = 0
         self.accepted_draft_tokens = 0
@@ -105,7 +110,8 @@ class SpeculativeDecoder:
         views = [copy(req) for req in batch.reqs]
         if self.cost is not None:
             self.cost.begin_state(0)
-        state = self.cache.begin_speculation(batch.reqs, views, lengths)
+        state = self.cache.begin_speculation(
+            batch.reqs, views, lengths, draft=self.drafter.uses_target_state)
         if self.cost is not None:
             self.cost.end_state(0, batch.size)
         # The ordinary decode query is already allocated. Reserve only the extra
@@ -158,7 +164,7 @@ class SpeculativeDecoder:
             offset += length + 1
 
         if accepted_lengths is not None:
-            self.cost.observe_acceptance(lengths, accepted_lengths)
+            self.drafter.observe_acceptance(lengths, accepted_lengths)
 
         host = output.to("cpu", non_blocking=True)
         ready = torch.cuda.Event()

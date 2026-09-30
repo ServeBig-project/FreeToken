@@ -929,6 +929,10 @@ class Engine:
             if num_mamba_slots is not None
             else (self.linear_state_pool.num_slots if self.linear_state_pool is not None else None)
         )
+        state_geometry_changed = (
+            (num_mamba_slots is not None and target_mamba != self.linear_state_pool.num_slots)
+            or (num_pages is not None and num_pages != self.num_pages)
+        )
         draft_bytes = 0
         if self.dflash is not None:
             draft_bytes = (self.dflash_model.weight_bytes + self.dflash.storage_bytes_for_pages(
@@ -993,7 +997,7 @@ class Engine:
             self.dflash.rebuild()
             object.__setattr__(config, "_draft_reserved_bytes",
                                self.dflash_model.weight_bytes + self.dflash.storage_bytes_actual)
-        if self.linear_state_pool is not None and (num_mamba_slots is not None or num_pages is not None):
+        if self.linear_state_pool is not None and state_geometry_changed:
             self._gdn_state_budget_bytes = state_pool_bytes(config, self.linear_state_pool.num_slots)
         aligned_max_seq_len = _page_table_width(self.max_seq_len, config.page_size)
         # 4. Re-capture CUDA graphs against the new tensors (reset_capture above re-armed

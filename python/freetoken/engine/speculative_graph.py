@@ -26,6 +26,8 @@ class SpeculativeGraphs:
             except KeyError:  # linear-attention layer without paged KV
                 continue
         usable_tokens = stores[0][0].flatten(0, 1).shape[0] - 1
+        if ctx.draft_context is not None:
+            stores.extend(ctx.draft_context.capture_stores())
         max_tokens = min(runner.max_graph_bs * (config.speculative_num_steps + 1), usable_tokens)
         self.max_tokens = max_tokens
         self.query_width = config.speculative_num_steps + 1
@@ -50,7 +52,8 @@ class SpeculativeGraphs:
             for bs in reversed(runner.graph_bs_list):
                 if bs > max_tokens:
                     continue
-                self._capture(model, "draft", [1] * bs)
+                if config.speculative_draft_model_path is None:
+                    self._capture(model, "draft", [1] * bs)
                 limit = min(bs * self.query_width, max_tokens)
                 # Exact shapes where the admission policy could flip, and the full window. The
                 # power-of-two batch sizes most rounds run at also get 2-5 inputs per request

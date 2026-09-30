@@ -209,6 +209,7 @@ class Context:
     moe_offload_cache: OffloadMoeCache | None = None
     draft_load_missing: bool = False
     speculative_cost: SpeculativeCost | None = None
+    draft_context: object | None = None
     kv_cache: BaseKVCachePool = field(init=False)
     # Per-request recurrent state for GatedDeltaNet layers; set by the engine for
     # hybrid linear-attention models, otherwise None.
