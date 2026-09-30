@@ -52,7 +52,7 @@ Qwen3 MoE 与 Qwen3.6-35B-A3B 使用公共 SD 验证、提交和缓存流程。�
 
 ## Harness 下一轮基座与任务
 
-- 以本分支合入主线后的固定commit作为新候选起点。测量用的上游AR对照与候选起点分别记录，保留真实agent trace、相同输入和工作量约束。
+- PR3与PR4已合入 `main@c3b637f`。新一轮从该基座固定提交、新建campaign并重新标定；入口、历史线索及对照要求见[Harness交接](harness-handoff.md)。测量用的上游AR对照与候选起点分别记录，保留真实agent trace、相同输入和工作量约束。
 - 原harness候选`9eb44ab`的hybrid／layered-pipeline耦合仅作为参考。它基于早期公共SD，未包含Replay与SelfDrafter／DFlashDrafter拆分，不整体合回新版。
 - 耦合是源码适配任务，不只是开关搜索：复用公共draft／verify／提交和状态管理，适配CPU/GPU专家执行及分层调度，覆盖已有SelfDrafter与DFlashDrafter。不得恢复模型名白名单或退回旧的内联起草流程。
 - 当前验收范围是legacy／offload SD；CPU/GPU hybrid只测过AR。新组合需独立黑盒和真实trace A/B，报告实际draft／verify执行、接受量、专家传输和内存；不能以静默退回AR代替耦合完成。工具调用特殊检查点及其他调度组合不由现有短测证明。
