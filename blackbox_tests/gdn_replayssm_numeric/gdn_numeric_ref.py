@@ -8,7 +8,7 @@ the out atol, which was REVISED AFTER SEEING RESULTS (see below):
   out (bf16) vs fp64:                          |y - y*| <= 2^-8 |y*| + 2^-12 sum_k |S*_vk q*_k|
   record u, record k_hat (bf16) vs fp64:       |x - x*| <= 2^-8 |x*| + 2^-12 rms(x*)
   record g (fp32) vs fp64:                     |g - g*| <= 1e-5 |g*| + 1e-6 exp(A_log)
-  written state (fp32: fold, export, fold=True write-back) vs fp64:
+  written state (fp32: in-place fold, export) vs fp64:
                                                |S - S*| <= 2^-20 |S*| + 2^-12 rms_head(S*)
   conv out (bf16) vs fp64:                     |o - o*| <= 2^-8 |o*| + 2^-16 sum_j |w_j x_j|
   vs ideal fp64 recurrence (records unrounded): ||x - x*|| / ||x*|| <= 2^-6 per call / state
@@ -273,16 +273,13 @@ class World:
         compare(self.log, kind, self.state[l, slot], ref, STATE_RTOL, STATE_ATOL * rms(ref, (-2, -1)), **info)
         compare_ideal(self.log, kind + "_vs_ideal", self.state[l, slot], ideal, **info)
 
-    def call(self, specs, fold=False, qkv_pad=0, tag=""):
-        """One gdn_replay per layer over `specs` (then gdn_replay_advance when fold=True, as the
-        model does after its last layer); checks outputs, records, state writes, untouched tensors.
+    def call(self, specs, qkv_pad=0, tag=""):
+        """One gdn_replay per layer over `specs`; checks outputs, records and untouched tensors.
         Returns per layer the list of per-spec output slices."""
         Ts = [s["x"][0][0].shape[0] for s in specs]
         cu = [0]
         for T in Ts:
             cu.append(cu[-1] + T)
-        real = [i for i, s in enumerate(specs) if s["m"] >= 0]
-        folds = {i for i in real if fold and specs[i]["p"] + Ts[i] - self.b[specs[i]["m"]] > self.R}
         self.refs = [[] for _ in range(self.L)]  # per layer, per spec: reference (y, terms size)
         args = (self.start, i32(cu), i32([s["slot"] for s in specs]), i32([s["m"] for s in specs]),
                 positions_of(specs, Ts), SCALE)
@@ -295,28 +292,24 @@ class World:
                 ab = torch.zeros(cu[-1], 2 * HV + qkv_pad, dtype=BF16, device=DEV)
                 ab[:, :HV], ab[:, HV: 2 * HV] = a, b
                 qkv, a, b = buf[:, :D], ab[:, :HV], ab[:, HV: 2 * HV]
-            state0, start0 = self.state[l].clone(), self.start.clone()
+            state0, start0 = self.state.clone(), self.start.clone()
             out = gdn_replay(qkv, a, b, self.A_log[l], self.dt_bias[l], self.state[l], self.u[l], self.k[l],
-                             self.g[l], *args, fold=fold)
+                             self.g[l], *args)
             assert out.shape == (cu[-1], HV, V) and out.dtype == BF16, (out.shape, out.dtype)
             assert torch.equal(self.start, start0), "gdn_replay modified start"
+            assert torch.equal(self.state, state0), "gdn_replay wrote state"
             expect = [t[l].clone() for t in self.snap]
-            new_states = {}
             for i, s in enumerate(specs):
                 o = out[cu[i]: cu[i + 1]]
                 info = dict(tag=tag, layer=l, name=s["name"], step=s["step"], phase=s["phase"], T=Ts[i],
-                            hist=s["p"] - self.b[s["m"]] if s["m"] >= 0 else 0, fold=fold)
+                            hist=s["p"] - self.b[s["m"]] if s["m"] >= 0 else 0)
                 if s["m"] < 0:
                     assert torch.equal(o, torch.zeros_like(o)), f"padding row produced output {info}"
                     self.refs[l].append(None)
                     continue
                 m, T, p, slot = s["m"], Ts[i], s["p"], s["slot"]
-                S0 = self.start_ref(l, m, slot, self.b[m], p)
-                if i in folds:  # the prefix state of length p is written back to the slot
-                    Si = self.start_ideal(l, m, slot, self.b[m], p)
-                    self.check_state("replay_fold_state", l, slot, S0, Si, **info)
-                    new_states[slot] = (S0, Si)
-                _, y, u, kh, g, mag = recur(S0, *s["x"][l], self.A_log[l], self.dt_bias[l])
+                _, y, u, kh, g, mag = recur(self.start_ref(l, m, slot, self.b[m], p), *s["x"][l],
+                                            self.A_log[l], self.dt_bias[l])
                 compare(self.log, "out", o, y, OUT_RTOL, OUT_ATOL * mag, **info)
                 # the pre-revision out tolerance, kept only for the before/after count
                 self.log[-1]["tol_ratio_old"] = tol_ratio(o, y, OUT_RTOL, OUT_ATOL * rms(y, -1))
@@ -335,21 +328,14 @@ class World:
                     ex[m][:, idx] = live[l, m][:, idx]
             for ex, live, name in zip(expect, (self.u, self.k, self.g), "ukg"):
                 assert torch.equal(live[l], ex), f"gdn_replay changed record {name} outside the written windows"
-            for slot in range(self.state.shape[1]):
-                if slot not in new_states:
-                    assert torch.equal(self.state[l, slot], state0[slot]), f"gdn_replay wrote state slot {slot}"
-            for slot, (S0, Si) in new_states.items():
-                self.ref[l, slot], self.ideal[l, slot] = S0, Si
             for snap, live in zip(self.snap, (self.u, self.k, self.g)):
                 snap[l].copy_(live[l])
             result.append([out[cu[i]: cu[i + 1]] for i in range(len(specs))])
-        for i in real:
-            for t in range(Ts[i]):
-                for l in range(self.L):
-                    self.hist[(l, specs[i]["m"], specs[i]["p"] + t)] = tuple(c[t: t + 1] for c in specs[i]["x"][l])
-        if fold:
-            widths = 1 if all(T == 1 for T in Ts) else [Ts[i] for i in real]
-            self.advance([specs[i]["m"] for i in real], [specs[i]["p"] for i in real], widths)
+        for i, s in enumerate(specs):
+            if s["m"] >= 0:
+                for t in range(Ts[i]):
+                    for l in range(self.L):
+                        self.hist[(l, s["m"], s["p"] + t)] = tuple(c[t: t + 1] for c in s["x"][l])
         return result
 
     def advance(self, rows, ends, widths):
@@ -368,42 +354,50 @@ class World:
         assert self.stats.tolist() == self.expect_stats, f"stats {self.stats.tolist()} != {self.expect_stats}"
 
     def fold(self, plan, tag=""):
-        """gdn_replay_fold over all layers; plan rows (src, dst, m, end, width). Returns which ran."""
+        """gdn_replay_fold over all layers; plan rows (src, dst, m, end, width), m < 0 = padding.
+        widths go in as one int when all rows share it, as the model's AR call does."""
         state0, start0 = self.state.clone(), self.start.clone()
-        gdn_replay_fold(self.state, self.u, self.k, self.g, self.start, i32(plan))
+        src, dst, rows, ends, widths = (list(c) for c in zip(*plan))
+        warg = widths[0] if len(set(widths)) == 1 else i32(widths)
+        gdn_replay_fold(self.state, self.u, self.k, self.g, self.start, i32(rows), i32(src), i32(dst), i32(ends),
+                        warg)
         for live, snap, name in zip((self.u, self.k, self.g), self.snap, "ukg"):
             assert torch.equal(live, snap), f"gdn_replay_fold modified record {name}"
         assert torch.equal(self.start, start0), "gdn_replay_fold modified start"
         new, ran = {}, []
-        for src, dst, m, end, width in plan:
-            b = self.b[m]
-            ran.append(width == 0 or end + width - b > self.R)
+        for s_, d_, m, end, width in plan:
+            b = self.b[m] if m >= 0 else 0
+            ran.append(m >= 0 and (width == 0 or end + width - b > self.R))
             if not ran[-1]:
                 continue
             for l in range(self.L):
-                info = dict(tag=tag, layer=l, src=src, dst=dst, b=b, end=end, width=width)
-                ref, ideal = self.start_ref(l, m, src, b, end), self.start_ideal(l, m, src, b, end)
-                self.check_state("fold_state", l, dst, ref, ideal, **info)
+                info = dict(tag=tag, layer=l, src=s_, dst=d_, b=b, end=end, width=width)
+                ref, ideal = self.start_ref(l, m, s_, b, end), self.start_ideal(l, m, s_, b, end)
+                self.check_state("fold_state", l, d_, ref, ideal, **info)
                 if end == b:
                     self.log.append(dict(kind="fold_count0_bitwise_copy", **info,
-                                         value=bool(torch.equal(self.state[l, dst], state0[l, src]))))
-                new[(l, dst)] = (ref, ideal)
+                                         value=bool(torch.equal(self.state[l, d_], state0[l, s_]))))
+                new[(l, d_)] = (ref, ideal)
         dsts = {row[1] for row, r in zip(plan, ran) if r}
         for slot in range(self.state.shape[1]):
             if slot not in dsts:
                 assert torch.equal(self.state[:, slot], state0[:, slot]), f"fold touched slot {slot}"
-        for (l, dst), (ref, ideal) in new.items():
-            self.ref[l, dst], self.ideal[l, dst] = ref, ideal
+        for (l, d_), (ref, ideal) in new.items():
+            self.ref[l, d_], self.ideal[l, d_] = ref, ideal
         self.log.append(dict(kind="fold_ran", tag=tag, value=ran))
         return ran
 
-    def prefold(self, reqs, tag="prefold"):
-        """What SD does before a round: conditional in-place fold per request, then advance."""
+    def prefold(self, reqs, pad=False, tag="prefold"):
+        """Conditional in-place fold per request, then advance: what target AR (width 1) and SD
+        (width = draft length + 1) do before appending records. `pad` adds a padding row."""
         plan = [(s.slot, s.slot, s.m, s.p, width) for s, width in reqs]
+        if pad:  # fields of a padding row are not read; slot 0 / end 0 would be wrong if they were
+            plan.insert(len(plan) // 2, (0, 0, -1, 0, reqs[0][1]))
         ran = self.fold(plan, tag=tag)
-        self.advance([s.m for s, _ in reqs], [s.p for s, _ in reqs], [width for _, width in reqs])
-        return ran
-
+        widths = [row[4] for row in plan]
+        self.advance([row[2] for row in plan], [row[3] for row in plan],
+                     widths[0] if len(set(widths)) == 1 else widths)
+        return [r for row, r in zip(plan, ran) if row[2] >= 0]
 
 def assert_rejects(w, got, alt_start, x, l, name):
     """The tight output tolerance must not accept the output of a plausible wrong start state."""

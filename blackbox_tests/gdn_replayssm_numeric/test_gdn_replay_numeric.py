@@ -1,5 +1,7 @@
 """Black-box numeric acceptance of gdn_replay / gdn_replay_advance / gdn_replay_fold (public contract
 section 5.1), production head geometry: H=16, HV=32, K=V=128, bf16 activations, fp32 state.
+Every step follows the contract's model usage: fold (width = T; 1 for target AR, draft length + 1
+for SD), advance, then gdn_replay per layer.
 
 Tolerances (fixed before any comparison ran, except the out atol; derivation in gdn_numeric_ref.py):
   out           : |y-y*| <= 2^-8|y*| + 2^-12 sum_k|S*_vk q*_k|   REVISED AFTER SEEING RESULTS,
@@ -29,15 +31,8 @@ def pair_ratio(got, other, ref):
     return tol_ratio(got, other.to(F64), 2 * OUT_RTOL, 2 * OUT_ATOL * mag)
 
 
-def ar_step(w, s, x, T=1, tag=""):
-    """Target AR as the model runs it: gdn_replay(fold=True), then advance."""
-    out = w.call([s.spec(x, phase="ar")], fold=True, tag=tag or s.name)
-    s.p += T
-    return out
-
-
 def window_step(w, s, x, T, tag=""):
-    """A window as SD runs it: conditional in-place fold with width T, then gdn_replay(fold=False)."""
+    """One request's step: conditional in-place fold with width T, advance, then gdn_replay."""
     w.prefold([(s, T)])
     out = w.call([s.spec(x, phase="window")], tag=tag or s.name)
     s.p += T
@@ -47,9 +42,9 @@ def window_step(w, s, x, T, tag=""):
 @pytest.mark.parametrize("R", [16, 64])
 def test_ar_and_windows_follow_fp64_recurrence(R, log):
     """Detects: wrong gating, normalisation, scale or GQA head mapping; a wrong in-window
-    recurrence; wrong record values or ring positions; the fold=True write-back or advance at the
-    wrong position; T=1 and T=2..9 disagreeing on one trajectory; a fresh request (zero state,
-    position 0) or large positions mishandled."""
+    recurrence; wrong record values or ring positions; the AR fold or advance at the
+    wrong position; T=1 (target AR) and T=2..9 disagreeing on one trajectory; a fresh request
+    (zero state, position 0) or large positions mishandled."""
     w = World(log, L=1, slots=4, rows=4, R=R, seed=100 + R)
     w.warm_slot(0)
     w.copy_slot(0, 1)
@@ -57,14 +52,14 @@ def test_ar_and_windows_follow_fp64_recurrence(R, log):
     n = 3 * R + 11
     X = w.x(n)
     p0 = 2 * R - 5  # windows cross the ring end early
-    runs = [(Seq(0, 0, p0, "ar"), [1], ar_step), (Seq(1, 1, 200001, "win2-9"), list(range(2, 10)), window_step),
-            (Seq(2, 2, p0, "win9-fold"), [9], ar_step), (Seq(3, 3, 0, "fresh"), list(range(1, 10)), window_step)]
-    for s, cycle, step in runs:
+    runs = [(Seq(0, 0, p0, "ar"), [1]), (Seq(1, 1, 200001, "win2-9"), list(range(2, 10))),
+            (Seq(2, 2, p0, "win9"), [9]), (Seq(3, 3, 0, "fresh"), list(range(1, 10)))]
+    for s, cycle in runs:
         w.assign(s.m, s.p)
         t = i = 0
         while t < n:
             T = min(cycle[i % len(cycle)], n - t)
-            step(w, s, [tuple(c[t: t + T] for c in X)], T)
+            window_step(w, s, [tuple(c[t: t + T] for c in X)], T)
             t, i = t + T, i + 1
     assert w.expect_stats[0] >= 4 * 2, "trajectory never flushed as planned"
     assert_within_tolerance(log)
@@ -179,8 +174,8 @@ def test_fold_exports_prefix_states(log):
 def test_batch_rows_permuted_mixed_T_padding(log, extra):
     """Detects: a request reading another request's slot, records or tokens; dependence on the
     order of requests in a batch; wrong cu_seqlens/positions segmentation with mixed T; padding
-    rows producing output or writing anything; strided qkv/a/b rows; fold=True writing back or
-    advancing only the requests whose window overflows."""
+    rows producing output or writing anything; strided qkv/a/b rows; a batched fold (with a
+    padding row) writing back and advancing only the requests whose window would overflow."""
     R = 32
     w = World(log, L=1, slots=8, rows=8, R=R, seed=500)
     slots, rows = [3, 7, 0, 5, 1, 6], [5, 2, 7, 0, 3, 6]
@@ -228,22 +223,23 @@ def test_batch_rows_permuted_mixed_T_padding(log, extra):
     o = seqs[2]
     assert_rejects(w, got["order1"][1], w.start_ref(0, o.m, o.slot, w.b[o.m], o.p), X[1][0], 0,
                    "another request's slot and records")
-    # fold=True batch: r2 (27+9) and r5 (30+3) overflow the ring and are written back, others not
+    # batched fold then replay: r2 (27+9) and r5 (30+3) would overflow the ring and are folded
     w.restore(saved)
-    T2 = [2, 9, 9, 1, 9, 3]
-    specs = [seqs[i].spec(w.inputs(T2[i]), phase="fold-batch") for i in (4, 2, 0, 5, 1, 3)]
+    T2, order = [2, 9, 9, 1, 9, 3], (4, 2, 0, 5, 1, 3)
+    assert w.prefold([(seqs[i], T2[i]) for i in order], pad=True, tag="fold-batch") == \
+        [False, True, False, True, False, False]
+    specs = [seqs[i].spec(w.inputs(T2[i]), phase="fold-batch") for i in order]
     specs.insert(3, pad_spec(w.inputs(2)))
-    w.call(specs, fold=True, qkv_pad=64, tag="fold-batch")
-    assert w.expect_stats[0] == 2, w.expect_stats
+    w.call(specs, qkv_pad=64, tag="fold-batch")
     assert_within_tolerance(log)
 
 
 @pytest.mark.parametrize("T", [1, 2])
-def test_fold_true_full_ring_write_back_repeatable(T, log, extra):
-    """Detects: a nondeterministic fold=True write-back: the same batch, repeated from identical
-    tensors, must give the correct state and outputs every time. The folding request holds a full
-    ring of records (p-b=R), which is what every AR flush (T=1) looks like, next to two requests
-    that do not fold."""
+def test_full_ring_fold_then_replay_repeatable(T, log, extra):
+    """Detects: a nondeterministic result for the step that used to fail (fold=True write-back
+    racing): a batch where one request holds a full ring (p-b=R, what every target-AR flush
+    looks like) next to two that do not fold, run in the contract's order (fold, advance,
+    gdn_replay) 200 times from identical tensors; every state and output must be correct."""
     R, reps = 32, 200
     w = World(log, L=1, slots=4, rows=4, R=R, seed=900 + R)
     for slot in range(3):
@@ -259,7 +255,8 @@ def test_fold_true_full_ring_write_back_repeatable(T, log, extra):
     X = [w.inputs(T), w.inputs(1), w.inputs(1)]
     for r in range(reps):
         w.restore(saved)
-        w.call([C.spec(X[2]), B.spec(X[1]), A.spec(X[0])], fold=True, tag=f"repeat{r}")
+        assert w.prefold([(C, 1), (B, 1), (A, T)], tag=f"repeat{r}") == [False, False, True]
+        w.call([C.spec(X[2]), B.spec(X[1]), A.spec(X[0])], tag=f"repeat{r}")
     bad = {e["tag"] for e in log if e.get("tol_ratio", 0) > 1 and e.get("tag", "").startswith("repeat")}
     extra["repeats_with_violations"] = f"{len(bad)}/{reps}"
     assert_within_tolerance(log)
@@ -268,7 +265,7 @@ def test_fold_true_full_ring_write_back_repeatable(T, log, extra):
 @pytest.mark.parametrize("R", [16, 32, 64])
 def test_long_trajectory_many_wraps_and_folds(R, log, extra):
     """Detects: errors that only show after the ring wraps many times or after repeated folds
-    (stale positions, drift, error growth with steps), with AR steps (fold=True), SD rounds
+    (stale positions, drift, error growth with steps), with target-AR steps, SD rounds
     (pre-draft folds, drafts, verify with random acceptance) and random windows sharing batches,
     padding rows and prefix exports along the way (L=2)."""
     rng = random.Random(R)
@@ -284,12 +281,14 @@ def test_long_trajectory_many_wraps_and_folds(R, log, extra):
     counts = dict(calls=0, ar_steps=0, sd_steps=0, verifies=0, exports=0)
     while min(s.p - s.p0 for s in reqs) < total:
         T_win = rng.randint(1, 9)
-        if draft is None and rng.random() < 0.4:  # an AR step for everyone
+        ar_step = draft is None and rng.random() < 0.4
+        if ar_step:  # a target-AR step for everyone (win with its own width)
+            w.prefold([(ar, 1), (sd, 1), (win, T_win)], pad=rng.random() < 0.3)
             specs = [ar.spec(w.inputs(1), phase="ar"), sd.spec(w.inputs(1), phase="ar"),
                      win.spec(w.inputs(T_win), phase="ar")]
-            fold, advance = True, {ar: 1, sd: 1, win: T_win}
+            advance = {ar: 1, sd: 1, win: T_win}
             counts["ar_steps"] += 1
-        else:  # an SD step: pre-folds for everyone not mid-draft, then fold=False
+        else:  # an SD step: pre-folds for everyone not mid-draft
             if draft is None:
                 draft = [rng.randint(1, min(8, R - 1)), 0]
             N, i = draft
@@ -297,7 +296,7 @@ def test_long_trajectory_many_wraps_and_folds(R, log, extra):
             specs = [ar.spec(w.inputs(1), phase="ar1"), win.spec(w.inputs(T_win), phase="win"),
                      sd.spec(w.inputs(1), p=sd.p + i, phase="draft") if i < N else
                      sd.spec(w.inputs(N + 1), phase="verify")]
-            fold, advance = False, {ar: 1, win: T_win}
+            advance = {ar: 1, win: T_win}
             counts["sd_steps"] += 1
         if rng.random() < 0.1:
             e = rng.choice(reqs)
@@ -306,11 +305,11 @@ def test_long_trajectory_many_wraps_and_folds(R, log, extra):
         rng.shuffle(specs)
         if rng.random() < 0.3:
             specs.insert(rng.randrange(len(specs) + 1), pad_spec(w.inputs(rng.randint(1, 4))))
-        w.call(specs, fold=fold, tag="traj")
+        w.call(specs, tag="traj")
         counts["calls"] += 1
         for s, T in advance.items():
             s.p += T
-        if not fold:
+        if not ar_step:
             N, i = draft
             if i < N:
                 draft[1] += 1
@@ -369,8 +368,8 @@ def test_fold_precision_with_strong_varying_decay(count, pattern, log, extra):
         g = -(0.05 + 0.45 * jitter)
         g[0, 0, :, (1000 + count // 2) % R] = -(2.0 ** (torch.arange(HV, device=DEV) / 2 + 1))
     b = 1000
-    start = torch.tensor([b], dtype=I32, device=DEV)
-    gdn_replay_fold(state, u, k, g, start, torch.tensor([[0, 1, 0, b + count, 0]], dtype=I32, device=DEV))
+    one = lambda v: torch.tensor([v], dtype=I32, device=DEV)
+    gdn_replay_fold(state, u, k, g, one(b), one(0), one(0), one(1), one(b + count), 0)
     idx = torch.arange(b, b + count, device=DEV) & (R - 1)
     ref = replay_records(state[0, 0].to(F64), u[0, 0][:, idx].transpose(0, 1).to(F64),
                          k[0, 0][:, idx].transpose(0, 1).to(F64), g[0, 0][:, idx].T.to(F64))
