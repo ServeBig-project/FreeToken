@@ -67,5 +67,71 @@ a failure. It never starts or stops a service and never reads model code.
 
 ## DFlash numerical phase
 
-New DFlash numerical tests wait for the documented public calculation entrypoint
-and reference equations.
+The independent CPU mathematical reference and its measured results are in
+[`../dflash_numeric/README.md`](../dflash_numeric/README.md).
+
+## Performance-only comparison
+
+`performance_requests.json` freezes the 16 distinct public request templates
+from `/data2/servebig-envs/replayssm_ab_20260929b_gpu2/new-sd8-adaptive/http.json`.
+The runner uses the runtime model ID and a fresh cache group for each wave.
+It preserves the original greedy, ignore-EOS, streaming decoding parameters.
+
+```sh
+python blackbox_tests/dflash_common/run_performance.py \
+  --url http://127.0.0.1:PORT --label qwen36-ar --output /tmp/ar-performance.json
+
+python blackbox_tests/dflash_common/run_performance.py \
+  --url http://127.0.0.1:PORT --label qwen36-dflash \
+  --output /tmp/dflash-performance.json --reference /tmp/ar-performance.json
+```
+
+The coordinator starts each comparison service with its chosen, documented
+resource budget. The runner performs the following waves:
+
+| Workload | Warmup | Scored output |
+| --- | --- | --- |
+| C16, all 16 frozen prompts | 1 wave × 16 requests × 16 tokens | 2 waves × 16 requests × 64 tokens |
+| C1, first 4 frozen prompts | 4 sequential requests × 16 tokens | 4 sequential requests × 64 tokens |
+
+Scored totals contain 2304 output tokens; all 320 warmup tokens and warmup
+durations/counters are excluded. Each wave starts from a fresh cache group while
+the service's expert cache remains warm. This entrypoint performs no cache
+rebuilds and does not invoke the lifecycle suite.
+
+The result JSON contains:
+
+- `frozen_requests`, `source`, `models`: exact comparison inputs and model identity.
+- `waves[]`: scored/warmup designation, concurrency, wall time, every request's
+  input/text/usage/timing, complete statistics and cache reports before/after,
+  observed counter deltas, and Graph replay rows with actual/physical sizes.
+- `scored.all`, `scored.c16`, `scored.c1`: completion tokens, wall time and
+  throughput, average TTFT and per-output latency, summed scored counter deltas
+  including draft/accepted/verify, GPU cost and load observations when exposed,
+  and Graph actual/physical token totals.
+- `comparison` when `--reference` is supplied: equality of frozen/scored inputs
+  after replacing only model/cache group, and separately reported greedy text
+  differences. Text differences have no automatic quality threshold.
+- `completed`, `failures`: protocol, output-count, or comparison-input failures.
+
+TTFT measures client request start to first nonempty content chunk. The
+`mean_ms_per_output_token` metric is end-to-end request time divided by output
+tokens. `post_first_chunk_ms_per_remaining_token` divides the time between
+first and last content chunks by output tokens minus one. A chunk can contain
+multiple tokens; this last metric is a stream-observed average. Wave throughput
+uses synchronized dispatch through the last completed response and excludes
+statistics reads. Public statistics are sampled after HTTP completion and idle;
+asynchronous GPU timing observations may still lag generation replies.
+
+DFlash block observations are preserved in
+`stats_delta.speculative.dflash_block_gpu_ms`, `dflash_block_samples` (keys are
+`B:max_draft_tokens`) and `dflash_block_choices` (index 0 is ordinary generation).
+`expert_loads_delta` reports draft loads and, when adaptive-cost observations are
+available, target AR/verification loads. Fixed-mode target load counts are
+`null`, with `complete_target_counts=false`; the coordinator can supplement them
+from the service's MoE log. Cache snapshots preserve `geometry.dflash`, including
+weights, context, metadata, and reserved bytes.
+
+Exit 0 means the frozen workload completed; it establishes no minimum speed or
+automatic quality conclusion. CPU checks confirmed the templates and derived
+counter differences against the supplied public result before service use.
