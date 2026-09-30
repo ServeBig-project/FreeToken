@@ -1538,7 +1538,7 @@ class Scheduler(SchedulerIOMixin):
         self.cache_manager.allocate_paged(batch.reqs)
         if batch.has_prefill and not batch.is_speculative_verify:
             self.cache_manager.prepare_prefill_snapshots(batch.prefill_reqs)
-        self.cache_manager.reserve_linear_records(batch)
+        self.cache_manager.begin_linear_records(batch)
 
     def _prepare_resident_group_decode_batch(
         self,

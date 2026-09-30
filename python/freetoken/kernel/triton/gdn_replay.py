@@ -14,10 +14,14 @@ moves data. The state after the records ``[b, b + n)`` is
 
     S = exp(sum g) * S_b + sum_i exp(sum of the g after i) * u_i k_i^T.
 
-Precision: every product and accumulation runs in fp32; the one matrix product (records
-into the state) uses 3xTF32, whose error is close to fp32 and which runs ~18x faster than
-IEEE fp32 dots on the 4090. The records u and k are stored in the activation dtype and g in
-fp32; the checkpoint keeps its storage dtype. Within one call the recurrence over the call's own inputs uses the unrounded
+``b`` lives on the GPU (``start[row]``); every fold decision reads it there. A sequence
+whose next ``width`` inputs would not fit the ring (``p + width - b > R``) folds all its
+records into the checkpoint, and ``b`` then becomes ``p``.
+
+Precision: every product and accumulation runs in fp32; matrix products use 3xTF32, whose
+error is close to fp32 and which runs ~18x faster than IEEE fp32 dots on the 4090. The
+records u and k are stored in the activation dtype and g in fp32; the checkpoint keeps its
+storage dtype. Within one call the recurrence over the call's own inputs uses the unrounded
 fp32 u and k, so the only rounding relative to the plain recurrent kernel is the stored
 u/k of earlier calls.
 """
@@ -52,26 +56,33 @@ def _replayed_state(state, u, k, g, slot, row, start, count, i_hv, i_h, o_v, o_k
 
 
 @triton.jit
-def _replay_kernel(qkv, a, b, A_log, dt_bias, out, state, u, k, g, cu_seqlens, slots, cursors,
-                   scale, stride_qkv, stride_a, stride_b, stride_state, stride_u, stride_k,
-                   stride_g, HV: tl.constexpr, H: tl.constexpr, K: tl.constexpr,
-                   V: tl.constexpr, R: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr,
-                   BC: tl.constexpr):
+def _replay_kernel(qkv, a, b, A_log, dt_bias, out, state, u, k, g, start, cu_seqlens, slots,
+                   rows, positions, scale, stride_qkv, stride_a, stride_b, stride_state,
+                   stride_u, stride_k, stride_g, HV: tl.constexpr, H: tl.constexpr,
+                   K: tl.constexpr, V: tl.constexpr, R: tl.constexpr, BK: tl.constexpr,
+                   BV: tl.constexpr, BC: tl.constexpr, FOLD: tl.constexpr):
     i_v, i_n, i_hv = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    row = tl.load(cursors + i_n * 3)
+    row = tl.load(rows + i_n)
     if row < 0:  # padding: the output was allocated zeroed, records stay untouched
         return
-    start = tl.load(cursors + i_n * 3 + 1)
-    pos = tl.load(cursors + i_n * 3 + 2)
     bos = tl.load(cu_seqlens + i_n).to(tl.int64)
     eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+    pos = tl.load(positions + bos)
+    b0 = tl.load(start + row)
+    slot = tl.load(slots + i_n)
     i_h = i_hv // (HV // H)
     o_v = i_v * BV + tl.arange(0, BV)
     o_k = tl.arange(0, BK)
     mask_v, mask_k = o_v < V, o_k < K
-    S = _replayed_state(state, u, k, g, tl.load(slots + i_n), row, start, pos - start, i_hv, i_h,
-                        o_v, o_k, mask_v, mask_k, stride_state, stride_u, stride_k, stride_g,
+    S = _replayed_state(state, u, k, g, slot, row, b0, pos - b0, i_hv, i_h, o_v, o_k,
+                        mask_v, mask_k, stride_state, stride_u, stride_k, stride_g,
                         HV, H, K, V, R, BC)
+    if FOLD:
+        if pos + (eos - bos) - b0 > R:
+            # Every layer folds the same records; gdn_replay_advance moves b afterwards.
+            p_s = state + slot.to(tl.int64) * stride_state + i_hv * V * K
+            tl.store(p_s + o_v[:, None] * K + o_k[None, :], S.to(state.dtype.element_ty),
+                     mask=mask_v[:, None] & mask_k[None, :])
 
     neg_a = -tl.exp(tl.load(A_log + i_hv).to(tl.float32))
     bias = tl.load(dt_bias + i_hv).to(tl.float32)
@@ -97,16 +108,16 @@ def _replay_kernel(qkv, a, b, A_log, dt_bias, out, state, u, k, g, cu_seqlens, s
         S = S + b_u[:, None] * b_k[None, :]
         tl.store(out + (tok * HV + i_hv) * V + o_v,
                  tl.sum(S * b_q[None, :], axis=1).to(out.dtype.element_ty), mask=mask_v)
-        slot = (pos + t) & (R - 1)
-        tl.store(rec_u + slot * V + o_v, b_u.to(u.dtype.element_ty), mask=mask_v)
+        ring = (pos + t) & (R - 1)
+        tl.store(rec_u + ring * V + o_v, b_u.to(u.dtype.element_ty), mask=mask_v)
         if owns_k:
-            tl.store(rec_k + slot * K + o_k, b_k.to(k.dtype.element_ty), mask=mask_k)
+            tl.store(rec_k + ring * K + o_k, b_k.to(k.dtype.element_ty), mask=mask_k)
         if i_v == 0:
-            tl.store(rec_g + slot, b_g)
+            tl.store(rec_g + ring, b_g)
 
 
 @triton.jit
-def _fold_kernel(state, u, k, g, plan, num_layers, stride_state_layer, stride_state,
+def _fold_kernel(state, u, k, g, start, plan, num_layers, stride_state_layer, stride_state,
                  stride_u_layer, stride_u, stride_k_layer, stride_k, stride_g_layer, stride_g,
                  HV: tl.constexpr, H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
                  R: tl.constexpr, BK: tl.constexpr, BV: tl.constexpr, BC: tl.constexpr):
@@ -115,15 +126,18 @@ def _fold_kernel(state, u, k, g, plan, num_layers, stride_state_layer, stride_st
     src = tl.load(plan + entry * 5)
     dst = tl.load(plan + entry * 5 + 1)
     row = tl.load(plan + entry * 5 + 2)
-    start = tl.load(plan + entry * 5 + 3)
-    count = tl.load(plan + entry * 5 + 4)
+    end = tl.load(plan + entry * 5 + 3)
+    width = tl.load(plan + entry * 5 + 4)
+    b0 = tl.load(start + row)
+    if (width > 0) & (end + width - b0 <= R):
+        return  # the next ``width`` inputs still fit: nothing to fold
     state = state + layer * stride_state_layer
     i_h = i_hv // (HV // H)
     o_v = i_v * BV + tl.arange(0, BV)
     o_k = tl.arange(0, BK)
     mask_v, mask_k = o_v < V, o_k < K
     S = _replayed_state(state, u + layer * stride_u_layer, k + layer * stride_k_layer,
-                        g + layer * stride_g_layer, src, row, start, count, i_hv, i_h, o_v, o_k,
+                        g + layer * stride_g_layer, src, row, b0, end - b0, i_hv, i_h, o_v, o_k,
                         mask_v, mask_k, stride_state, stride_u, stride_k, stride_g,
                         HV, H, K, V, R, BC)
     p_s = state + dst.to(tl.int64) * stride_state + i_hv * V * K
@@ -131,16 +145,34 @@ def _fold_kernel(state, u, k, g, plan, num_layers, stride_state_layer, stride_st
              mask=mask_v[:, None] & mask_k[None, :])
 
 
+@triton.jit(do_not_specialize=["n"])  # one compile for every batch size
+def _advance_kernel(start, stats, rows, ends, widths, n, R: tl.constexpr, WIDTH: tl.constexpr,
+                    BLOCK: tl.constexpr):
+    o = tl.arange(0, BLOCK)
+    row = tl.load(rows + o, mask=o < n, other=-1)
+    live = row >= 0
+    end = tl.load(ends + o, mask=live, other=0)
+    if WIDTH == 0:
+        width = tl.load(widths + o, mask=live, other=0)
+    else:
+        width = WIDTH
+    b0 = tl.load(start + row, mask=live, other=0)
+    fold = live & (end + width - b0 > R)
+    tl.store(start + row, end, mask=fold)
+    tl.store(stats, tl.load(stats) + tl.sum(fold.to(tl.int64), axis=0))
+    tl.store(stats + 1, tl.load(stats + 1) + tl.sum(tl.where(fold, end - b0, 0).to(tl.int64), axis=0))
+
+
 @triton.jit
-def _conv_kernel(x, weight, window, out, cu_seqlens, cursors, stride_x, stride_window,
+def _conv_kernel(x, weight, window, out, cu_seqlens, rows, positions, stride_x, stride_window,
                  D, W, KW: tl.constexpr, BKW: tl.constexpr, BD: tl.constexpr):
     i_n, i_d = tl.program_id(0), tl.program_id(1)
-    row = tl.load(cursors + i_n * 3)
+    row = tl.load(rows + i_n)
     if row < 0:
         return
-    pos = tl.load(cursors + i_n * 3 + 2)
     bos = tl.load(cu_seqlens + i_n).to(tl.int64)
     eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+    pos = tl.load(positions + bos)
     o_d = i_d * BD + tl.arange(0, BD)
     mask_d = o_d < D
     o_j = tl.arange(0, BKW)
@@ -172,29 +204,52 @@ def gdn_replay(
     b: torch.Tensor,          # [tokens, HV] raw beta input
     A_log: torch.Tensor,      # [HV] fp32
     dt_bias: torch.Tensor,    # [HV] fp32
-    state: torch.Tensor,      # [slots, HV, V, K] checkpoints (read only)
+    state: torch.Tensor,      # [slots, HV, V, K] checkpoints
     u: torch.Tensor,          # [rows, HV, R, V] update-vector records
     k: torch.Tensor,          # [rows, H, R, K] normalized-key records
     g: torch.Tensor,          # [rows, HV, R] fp32 log-decay records
+    start: torch.Tensor,      # [rows] int32 checkpoint position b per record row
     cu_seqlens: torch.Tensor,  # [n+1] int32 input offsets per sequence
     slots: torch.Tensor,      # [n] int32 checkpoint slot per sequence
-    cursors: torch.Tensor,    # [n, 3] int32 (record row, checkpoint position b, first input position p)
+    rows: torch.Tensor,       # [n] int32 record row per sequence; < 0 = padding
+    positions: torch.Tensor,  # [tokens] int32 absolute position of each input
     scale: float,
+    *,
+    fold: bool = False,
 ) -> torch.Tensor:
-    """Gated delta rule over each sequence's inputs, starting from its checkpoint plus the
-    records ``[b, p)``. Returns ``[tokens, HV, V]`` and writes the records of positions
-    ``[p, p + T)``. A negative record row marks padding: zero output, nothing written."""
+    """Gated delta rule over each sequence's inputs ``[p, p + T)`` (``p`` = position of its
+    first input), starting from its checkpoint plus the records ``[b, p)``. Returns
+    ``[tokens, HV, V]`` and writes the records of ``[p, p + T)``. With ``fold`` (target
+    decode), a sequence with ``p + T - b > R`` first stores its complete state into its
+    checkpoint; call ``gdn_replay_advance`` after the last layer. Padding rows get zero
+    output and write nothing."""
     HV, R, V = u.shape[1:]
     H, K = k.shape[1], k.shape[3]
     out = qkv.new_zeros(qkv.shape[0], HV, V)
     grid = (triton.cdiv(V, _BV), slots.shape[0], HV)
     _replay_kernel[grid](
-        qkv, a, b, A_log, dt_bias, out, state, u, k, g, cu_seqlens, slots, cursors, scale,
-        qkv.stride(0), a.stride(0), b.stride(0), state.stride(0), u.stride(0), k.stride(0),
-        g.stride(0), HV=HV, H=H, K=K, V=V, R=R, BK=triton.next_power_of_2(K), BV=_BV,
-        BC=max(16, R), num_warps=4,
+        qkv, a, b, A_log, dt_bias, out, state, u, k, g, start, cu_seqlens, slots, rows,
+        positions, scale, qkv.stride(0), a.stride(0), b.stride(0), state.stride(0), u.stride(0),
+        k.stride(0), g.stride(0), HV=HV, H=H, K=K, V=V, R=R, BK=triton.next_power_of_2(K),
+        BV=_BV, BC=max(16, R), FOLD=fold, num_warps=4,
     )
     return out
+
+
+def gdn_replay_advance(
+    start: torch.Tensor,   # [rows] int32
+    stats: torch.Tensor,   # [2] int64 (folds, folded records), accumulated
+    rows: torch.Tensor,    # [n] int32; < 0 = padding
+    ends: torch.Tensor,    # [n] int32 position the fold would reach
+    widths: torch.Tensor | int,  # [n] int32 inputs to make room for, or one width for all
+    ring: int,             # R
+) -> None:
+    """Move ``b`` to ``end`` wherever ``end + width - b > R`` -- the same test the fold paths
+    apply -- once every layer has folded."""
+    n = rows.shape[0]
+    fixed = widths if isinstance(widths, int) else 0
+    _advance_kernel[(1,)](start, stats, rows, ends, rows if fixed else widths, n, R=ring,
+                          WIDTH=fixed, BLOCK=triton.next_power_of_2(max(n, 16)))
 
 
 def gdn_replay_fold(
@@ -202,16 +257,17 @@ def gdn_replay_fold(
     u: torch.Tensor,      # [layers, rows, HV, R, V]
     k: torch.Tensor,      # [layers, rows, H, R, K]
     g: torch.Tensor,      # [layers, rows, HV, R]
-    plan: torch.Tensor,   # [n, 5] int32 (source slot, destination slot, record row, b, count)
+    start: torch.Tensor,  # [rows] int32
+    plan: torch.Tensor,   # [n, 5] int32 (source slot, destination slot, record row, end, width)
 ) -> None:
-    """For every layer, write into the destination slot the state after the ``count`` records
-    following the source checkpoint at position ``b``. Destination == source folds records
-    into the checkpoint in place; records are never modified."""
+    """For every layer, write into the destination slot the state after the records
+    ``[b, end)`` following the source checkpoint. ``width == 0`` always does it (export);
+    ``width > 0`` only when ``end + width - b > R`` (fold). Records and ``b`` are unchanged."""
     num_layers, _, HV, R, V = u.shape
     H, K = k.shape[2], k.shape[4]
     grid = (triton.cdiv(V, _BV), plan.shape[0] * num_layers, HV)
     _fold_kernel[grid](
-        state, u, k, g, plan, num_layers, state.stride(0), state.stride(1), u.stride(0),
+        state, u, k, g, start, plan, num_layers, state.stride(0), state.stride(1), u.stride(0),
         u.stride(1), k.stride(0), k.stride(1), g.stride(0), g.stride(1), HV=HV, H=H, K=K, V=V,
         R=R, BK=triton.next_power_of_2(K), BV=_BV, BC=max(16, R), num_warps=4,
     )
@@ -222,7 +278,8 @@ def gdn_replay_conv(
     weight: torch.Tensor,      # [D, KW] depthwise conv weight
     window: torch.Tensor,      # [rows, W, D] raw conv inputs by absolute position, p % W
     cu_seqlens: torch.Tensor,  # [n+1] int32
-    cursors: torch.Tensor,     # [n, 3] int32, as in gdn_replay (the b column is unused)
+    rows: torch.Tensor,        # [n] int32; < 0 = padding
+    positions: torch.Tensor,   # [tokens] int32
 ) -> torch.Tensor:
     """Causal depthwise conv + silu for inputs at positions ``[p, p + T)`` whose earlier
     ``KW - 1`` inputs are read from the window, which then receives this call's inputs.
@@ -231,10 +288,10 @@ def gdn_replay_conv(
     out = x.new_zeros(x.shape[0], D)
     BD = 256
     _conv_kernel[(cu_seqlens.shape[0] - 1, triton.cdiv(D, BD))](
-        x, weight, window, out, cu_seqlens, cursors, x.stride(0), window.stride(0), D,
+        x, weight, window, out, cu_seqlens, rows, positions, x.stride(0), window.stride(0), D,
         window.shape[1], KW=KW, BKW=triton.next_power_of_2(KW), BD=BD, num_warps=4,
     )
     return out
 
 
-__all__ = ["gdn_replay", "gdn_replay_conv", "gdn_replay_fold"]
+__all__ = ["gdn_replay", "gdn_replay_advance", "gdn_replay_conv", "gdn_replay_fold"]

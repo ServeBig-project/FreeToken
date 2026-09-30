@@ -9,7 +9,7 @@ from freetoken.layers import BaseOP, LinearColParallelMerged
 from freetoken.kernel.triton.fp8_block_linear import Fp8BlockColMerged
 from freetoken.kernel.triton.fp8_pertensor_linear import Fp8PerTensorColMerged
 
-from freetoken.kernel.triton.gdn_replay import gdn_replay, gdn_replay_conv
+from freetoken.kernel.triton.gdn_replay import gdn_replay, gdn_replay_advance, gdn_replay_conv
 
 from .gdn_kernels import gdn_decode_fla, gdn_prefill_chunk_fla
 from .quant_linear import make_replicated_quant
@@ -148,11 +148,11 @@ class Qwen3_5GatedDeltaNet(BaseOP):
 
     def _run_decode(
         self, conv_in: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
-        pool, li: int, fla, dtype: torch.dtype,
+        pool, li: int, fla, dtype: torch.dtype, positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run the fused single-token conv and recurrence for a decode sub-batch."""
-        if fla.cursors is not None:
-            return self._run_replay(conv_in, a, b, pool, li, fla)
+        if fla.rows is not None:
+            return self._run_replay(conv_in, a, b, pool, li, fla, positions)
         mixed = self._conv_decode(conv_in, fla.cache_indices, pool)
         size = mixed.shape[0]
         qf, kf, vf = torch.split(
@@ -167,20 +167,25 @@ class Qwen3_5GatedDeltaNet(BaseOP):
             cu_seqlens=fla.cu_seqlens, scale=self.head_k_dim ** -0.5,
         )
 
-    def _run_replay(self, conv_in, a, b, pool, li: int, fla) -> torch.Tensor:
-        """ReplaySSM: target decode, draft steps and verify windows share one recurrence from
-        each request's checkpoint plus records; only draft/verify use the replay conv window."""
+    def _run_replay(self, conv_in, a, b, pool, li: int, fla, positions) -> torch.Tensor:
+        """ReplaySSM: target decode, draft steps and verify windows start from each request's
+        checkpoint plus records. Target decode folds full rings in place and, after the last
+        GDN layer, advances the checkpoint positions; draft and verify never fold and use the
+        replay conv window."""
         replay = pool.replay
         if fla.speculative:
             mixed = gdn_replay_conv(conv_in, self._conv_weight(), replay.window[li],
-                                    fla.cu_seqlens, fla.cursors)
+                                    fla.cu_seqlens, fla.rows, positions)
         else:
             mixed = self._conv_decode(conv_in, fla.cache_indices, pool)
-        return gdn_replay(
+        out = gdn_replay(
             mixed, a, b, self.A_log, self.dt_bias, pool.recurrent_states[li], replay.u[li],
-            replay.k[li], replay.g[li], fla.cu_seqlens, fla.cache_indices, fla.cursors,
-            self.head_k_dim ** -0.5,
+            replay.k[li], replay.g[li], replay.start, fla.cu_seqlens, fla.cache_indices,
+            fla.rows, positions, self.head_k_dim ** -0.5, fold=not fla.speculative,
         )
+        if not fla.speculative and li == pool.num_linear_layers - 1:
+            gdn_replay_advance(replay.start, replay.stats, fla.rows, positions, 1, replay.ring)
+        return out
 
     def _run_verify(
         self, conv_in: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
@@ -267,11 +272,13 @@ class Qwen3_5GatedDeltaNet(BaseOP):
             core_out = self._run_verify(conv_in, a, b, pool, li, fla.verify, dtype)
         elif fla.prefill is None:
             assert fla.decode is not None
-            core_out = self._run_decode(conv_in, a, b, pool, li, fla.decode, dtype)
+            core_out = self._run_decode(conv_in, a, b, pool, li, fla.decode, dtype,
+                                        batch.positions)
         elif fla.decode is not None:
             split = batch.decode_size
             decode_out = self._run_decode(
-                conv_in[:split], a[:split], b[:split], pool, li, fla.decode, dtype
+                conv_in[:split], a[:split], b[:split], pool, li, fla.decode, dtype,
+                batch.positions[:split],
             )
             prefill_out = self._run_prefill(
                 conv_in[split:], a[split:], b[split:], pool, li, fla.prefill, dtype

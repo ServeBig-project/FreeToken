@@ -38,10 +38,11 @@ class FLAPathMetadata:
     track_h_row: torch.Tensor | None = None      # [nt] int64 row into h (boh_i + aligned//CHUNK)
     track_conv_src: torch.Tensor | None = None   # [nt, kernel-1] int64 conv-input token positions
 
-    # --- ReplaySSM: [n, 3] int32 (record row, checkpoint position, first input position) per
-    # request (see GdnReplay.cursors); None runs the recurrent-state kernels. Speculative rows
-    # (draft and verify) convolve through the replay window, never the target conv state.
-    cursors: torch.Tensor | None = None
+    # --- ReplaySSM: [n] int32 record row per request (-1 = padding); None runs the
+    # recurrent-state kernels. Positions come from the batch and checkpoint positions from the
+    # GPU. Speculative rows (draft and verify) convolve through the replay window and never
+    # fold or touch the target conv state.
+    rows: torch.Tensor | None = None
     speculative: bool = False
 
 
@@ -97,9 +98,9 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
         cu_seqlens = torch.arange(len(reqs) + 1, dtype=torch.int32, device=device)
         if cache_indices is None:
             cache_indices = to([gdn_slot(r) for r in reqs])
-        cursors = to(replay.cursors(reqs)) if replay is not None else None
+        rows = to(replay.record_rows(reqs)) if replay is not None else None
         return FLAPathMetadata(cu_seqlens=cu_seqlens, cache_indices=cache_indices,
-                               cursors=cursors, speculative=speculative)
+                               rows=rows, speculative=speculative)
 
     def build_prefill(reqs):
         lens = [r.extend_len for r in reqs]
@@ -134,10 +135,9 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
         # Every verify window reads its request's target records and rewrites the draft tail.
         reqs = batch.reqs
         cu_seqlens = to([0, *(r.extend_len for r in reqs)]).cumsum_(0)
-        cursors = to(replay.cursors(reqs))
         return FLAMetadata(decode=FLAPathMetadata(
             cu_seqlens=cu_seqlens, cache_indices=to([gdn_slot(r) for r in reqs]),
-            cursors=cursors, speculative=True))
+            rows=to(replay.record_rows(reqs)), speculative=True))
 
     decode = build_decode(batch.decode_reqs) if batch.has_decode else None
     prefill = build_prefill(batch.prefill_reqs) if batch.has_prefill else None
@@ -270,19 +270,19 @@ class ReplaySpeculativeGraphs:
     def __init__(self, pool):
         replay = pool.replay
         self.pool = pool
-        self.cu, self.slots, self.cursors = replay.graph_cu, replay.graph_slots, replay.graph_cursors
+        self.cu, self.slots, self.rows = replay.graph_cu, replay.graph_slots, replay.graph_rows
 
     def prepare_capture(self, batch, lengths, tokens):
         bs = batch.size
         self.slots[:bs].fill_(self.pool.padding_slot)
-        self.cursors[:bs].fill_(-1)  # capture never touches records
+        self.rows[:bs].fill_(-1)  # capture never touches records
         self.cu[: bs + 1] = torch.tensor([0, *lengths], device=self.cu.device).cumsum(0)
         batch.fla_metadata = FLAMetadata(decode=FLAPathMetadata(
             cu_seqlens=self.cu[: bs + 1], cache_indices=self.slots[:bs],
-            cursors=self.cursors[:bs], speculative=True))
+            rows=self.rows[:bs], speculative=True))
 
     def prepare_replay(self, batch, physical_tokens):
         bs, source = batch.size, batch.fla_metadata.decode
         self.cu[: bs + 1].copy_(source.cu_seqlens)
         self.slots[:bs].copy_(source.cache_indices)
-        self.cursors[:bs].copy_(source.cursors)
+        self.rows[:bs].copy_(source.rows)

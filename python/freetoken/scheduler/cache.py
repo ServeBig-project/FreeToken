@@ -345,32 +345,25 @@ class CacheManager:
                     and req.mamba_snapshot_slot is None):
                 self._allocate_mamba_snapshot(req)
 
-    def _pending_anchor(self, req: Req) -> int | None:
-        anchor = req.toolcall_anchor_len
-        if (not self.is_hybrid or anchor is None or req.mamba_snapshot_slot is not None
-                or anchor % self.page_size != 0):
-            return None
-        return anchor
-
     def snapshot_toolcall_anchor(self, reqs: List[Req]) -> None:
         """Freeze a reusable tool-call prefix before the next decode advances live state."""
+        if not self.is_hybrid:
+            return
         pool = self.linear_state_pool
         for req in reqs:
-            anchor = self._pending_anchor(req)
-            if anchor is None or not pool.can_export(req, anchor):
+            anchor = req.toolcall_anchor_len
+            if (anchor is None or req.mamba_snapshot_slot is not None
+                    or anchor % self.page_size != 0 or not pool.can_export(req, anchor)):
                 continue
             if self._allocate_mamba_snapshot(req):
                 pool.export(req, anchor, req.mamba_snapshot_slot)
                 req.mamba_last_track_seqlen = anchor
 
-    def reserve_linear_records(self, batch: Batch) -> None:
-        """ReplaySSM: restart prefill rows' records and give each decode row room for one
-        more, keeping a pending tool-call anchor exportable."""
+    def begin_linear_records(self, batch: Batch) -> None:
+        """ReplaySSM: a prefill leaves a complete state, so its request restarts its records."""
         pool = self.linear_state_pool
-        if pool is None or pool.replay is None:
-            return
-        pool.replay.begin_prefill(batch.prefill_reqs)
-        pool.replay.reserve(batch.decode_reqs, [1] * batch.decode_size, keep=self._pending_anchor)
+        if pool is not None and pool.replay is not None:
+            pool.replay.begin_prefill(batch.prefill_reqs)
 
     def _release_mamba_snapshot(self, req: Req, *, donated: bool = False) -> None:
         if req.mamba_snapshot_slot is not None and not donated:
