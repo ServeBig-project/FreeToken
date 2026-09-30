@@ -30,7 +30,9 @@ def _scheduler(*, eos_token_ids=()):
         eos_token_ids=set(eos_token_ids),
         toolcall_anchor_id=None,
         config=SimpleNamespace(page_size=1),
-        engine=SimpleNamespace(graph_runner=SimpleNamespace(stats_snapshot=lambda: {})),
+        engine=SimpleNamespace(
+            graph_runner=SimpleNamespace(stats_snapshot=lambda: {}), linear_state_pool=None,
+        ),
         speculative=None,  # speculative decoding off (the default)
         status_reporter=SimpleNamespace(report_batch=lambda *_, **__: None),
         send_result=sent.extend,

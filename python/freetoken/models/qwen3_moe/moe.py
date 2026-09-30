@@ -12,7 +12,6 @@ if TYPE_CHECKING:
 
 class Qwen3MoeMLP(BaseOP):
     def __init__(self, config: ModelConfig, layer_id: int | None = None):
-        self.layer_id = layer_id
         self.experts = make_moe_layer(config, layer_id=layer_id)
         self.gate = LinearReplicated(
             config.hidden_size,

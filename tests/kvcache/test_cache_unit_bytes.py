@@ -168,7 +168,7 @@ def _config(page_size=16, max_running_req=4, cache_type="hybrid_radix", num_expe
 def test_floors_hybrid_moe_model():
     # KV floor = one page's tokens (rebuild rejects num_pages <= 0); MoE floor = one layer's
     # experts (_require_offload_cache_size); mamba floor = _linear_pool_min_slots - 1 usable
-    # (hybrid_radix: 4 slots per running request non-evictable, padding sink excluded).
+    # (hybrid_radix: the configured 4*max_running_req capacity floor, padding excluded).
     eng = SimpleNamespace(
         config=_config(),
         moe_offload_cache=object(),

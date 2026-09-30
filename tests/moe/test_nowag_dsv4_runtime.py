@@ -357,6 +357,7 @@ def test_qwen_offload_layer_dispatches_with_qwen_rule(monkeypatch):
         moe_backend="offload",
         expert_quant="nowag",
         model_type="qwen3_5_moe",
+        moe_router="softmax",
         num_experts=2,
         num_experts_per_tok=1,
         hidden_size=12,

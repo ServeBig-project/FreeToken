@@ -158,22 +158,25 @@ def test_hybrid_chunk_donate_skips_unaligned_boundary(ps):
     cm.allocate_paged([req])
     req.complete_one()
     req.linear_slot_idx = pool.alloc(1)[0]
-    req.mamba_ping_pong = (pool.alloc(1)[0], pool.alloc(1)[0])
-    req.mamba_next_track_idx = 0
+    req.mamba_snapshot_slot = pool.alloc(1)[0]
 
     # Unaligned x64 boundary: the donate must be SKIPPED (state would attach to a shorter node).
     req.mamba_last_track_seqlen = 2 * ps + 3
-    pp_before = req.mamba_ping_pong
+    free_before = pool.num_free_slots
     cm.cache_req(req, finished=False)
     assert req.mamba_last_track_seqlen is None
-    assert req.mamba_ping_pong == pp_before          # frozen slot NOT replaced -> no donate
+    assert req.mamba_snapshot_slot is None
+    assert pool.num_free_slots == free_before + 1  # the unusable private snapshot is released
     assert req.cache_handle is h                     # handle NOT re-pointed -> donate skipped
 
     # Aligned boundary on the same request: the donate goes through.
+    req.mamba_snapshot_slot = pool.alloc(1)[0]
     req.mamba_last_track_seqlen = 2 * ps
     cm.cache_req(req, finished=False)
     assert req.cache_handle is not h                 # re-matched + locked on the committed node
     assert req.cache_handle.cached_len == 2 * ps
+    assert req.mamba_snapshot_slot is None
+    assert pool.num_free_slots == free_before       # no replacement allocation
 
 
 def test_finish_retains_prompt_window_under_pressure():
