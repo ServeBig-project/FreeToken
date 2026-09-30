@@ -341,7 +341,7 @@ class CacheManager:
             if isinstance(req, ChunkedReq) or req.mm_embeds is not None:
                 continue
             boundary = req.cached_len + (req.extend_len - 1) // CHUNK_SIZE * CHUNK_SIZE
-            if (boundary > req.cached_len and boundary % self.page_size == 0
+            if (boundary > req.cache_handle.cached_len and boundary % self.page_size == 0
                     and req.mamba_snapshot_slot is None):
                 self._allocate_mamba_snapshot(req)
 
