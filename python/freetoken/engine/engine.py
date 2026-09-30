@@ -400,7 +400,7 @@ class Engine:
         if config.model_config.is_moe:
             self.ctx.moe_backend = self.moe_backend = create_moe_backend(config.moe_backend)
 
-        self._init_dflash(config)
+        draft_bytes = self._init_dflash(config)
 
         # ======================= Linear (GatedDeltaNet) state initialization ========================
         linear_group = config.model_config.linear_attention_group()
@@ -409,7 +409,7 @@ class Engine:
 
             self.linear_state_pool = LinearStatePool(
                 group=linear_group,
-                num_slots=_linear_pool_num_slots(config),
+                num_slots=_linear_pool_num_slots(config, draft_bytes=draft_bytes),
                 fixed_slots=(config.max_running_req if config.cache_type != "hybrid_radix" else 0),
                 dtype=self.dtype,
                 device=self.device,
@@ -423,7 +423,7 @@ class Engine:
         if self.linear_state_pool is not None:
             from freetoken.kvcache.linear_state_pool import gdn_state_budget
             self._gdn_state_budget_bytes = (
-                gdn_state_budget(config) - getattr(config, "_draft_reserved_bytes", 0)
+                gdn_state_budget(config) - draft_bytes
             )
 
         # ======================= Sampler initialization ========================
@@ -474,10 +474,10 @@ class Engine:
             # Prefill runs on the first comma part; warm its autotune cache.
             self._warmup_prefill()
 
-    def _init_dflash(self, config: EngineConfig) -> None:
+    def _init_dflash(self, config: EngineConfig) -> int:
         self.dflash_model = self.dflash = None
         if config.speculative_draft_model_path is None:
-            return
+            return 0
         from freetoken.speculative.dflash import DFlashRuntime
         from freetoken.speculative.dflash_model import DFlashModel, read_dflash_config
 
@@ -500,8 +500,7 @@ class Engine:
             config.speculative_draft_model_path, dtype=self.dtype, device=self.device,
         )
         self.ctx.draft_context = self.dflash = DFlashRuntime(self, self.dflash_model)
-        object.__setattr__(config, "_draft_reserved_bytes",
-                           self.dflash_model.weight_bytes + self.dflash.storage_bytes_actual)
+        return self.dflash_model.weight_bytes + self.dflash.storage_bytes_actual
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
         if config.tp_info.size == 1 or config.use_pynccl:
@@ -995,8 +994,6 @@ class Engine:
         self._refresh_seq_state(config)
         if self.dflash is not None and num_pages is not None:
             self.dflash.rebuild()
-            object.__setattr__(config, "_draft_reserved_bytes",
-                               self.dflash_model.weight_bytes + self.dflash.storage_bytes_actual)
         if self.linear_state_pool is not None and state_geometry_changed:
             self._gdn_state_budget_bytes = state_pool_bytes(config, self.linear_state_pool.num_slots)
         aligned_max_seq_len = _page_table_width(self.max_seq_len, config.page_size)

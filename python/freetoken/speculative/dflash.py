@@ -136,7 +136,7 @@ class DFlashRuntime:
 class DFlashDrafter:
     uses_target_state = False
 
-    def __init__(self, engine, table, logits_callable, generator):
+    def __init__(self, engine, table, generator):
         self.engine, self.table, self.generator = engine, table, generator
         self.runtime = engine.dflash
         self.cost = BlockDraftCost(engine)

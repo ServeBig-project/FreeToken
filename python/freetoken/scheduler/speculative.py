@@ -41,7 +41,7 @@ class SpeculativeDecoder:
         if engine.config.speculative_draft_model_path:
             from freetoken.speculative.dflash import DFlashDrafter
 
-            self.drafter = DFlashDrafter(engine, table, self._logits, self.generator)
+            self.drafter = DFlashDrafter(engine, table, self.generator)
         else:
             self.drafter = SelfDrafter(engine, table, self._logits, self.generator)
         self.selector = DecodeBatchSelector()

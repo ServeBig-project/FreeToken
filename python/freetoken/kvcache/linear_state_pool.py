@@ -312,9 +312,8 @@ def gdn_state_budget(config) -> int:
     return config.gdn_state_budget_bytes or _default_pool_slots(config) * per_slot
 
 
-def _linear_pool_num_slots(config) -> int:
+def _linear_pool_num_slots(config, *, draft_bytes: int = 0) -> int:
     """Full-state slots that fit the GDN state budget next to the fixed ReplaySSM buffers."""
-    draft_bytes = getattr(config, "_draft_reserved_bytes", 0)
     if config.gdn_state_budget_bytes is None and replay_records(config) is None and not draft_bytes:
         return _default_pool_slots(config)
     per_slot = linear_state_bytes_per_req(

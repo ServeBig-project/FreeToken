@@ -35,8 +35,7 @@ class BlockDraftCost:
         self.samples[key] = self.samples.get(key, 0) + 1
         self.gpu_ms += ms
         if self.cost is not None:
-            self.cost.gpu_ms["draft"] += ms
-            self.cost.samples[1][batch_size] += 1
+            self.cost.record_block_draft(batch_size, ms)
         self.pending = None
 
     def begin(self):
@@ -78,12 +77,7 @@ class BlockDraftCost:
         self._collect()
         cost = self.cost
         if cost is not None:
-            cost.collect_ready()
-            for part in range(2):
-                cost._collect_state(part)
-            cost.predicted.zero_()
-            cost.predicted_positions.zero_()
-            cost.rounds += 1
+            calibrated = cost.begin_block_round(len(lengths))
         if not self.adaptive or not any(lengths):
             return self._choose(lengths, max(lengths, default=0), False, started)
 
@@ -91,7 +85,7 @@ class BlockDraftCost:
         round_no = self.rounds.get(batch_size, 0) + 1
         self.rounds[batch_size] = round_no
         candidates = sorted({min(n, self.limit, max(lengths)) for n in (2, 4, 8)})
-        if not cost.samples[0][batch_size]:
+        if not calibrated:
             return self._choose(lengths, 0, False, started)
 
         unseen = [n for n in candidates if not any(width == n for _, width in self.means)]
@@ -111,13 +105,11 @@ class BlockDraftCost:
             for width in candidates
         ], device=self.engine.device)
         expected = 1 + (active * survival).sum(dim=1)
-        state = cost.state_ms[:, batch_size].sum()
-        scores = [cost._estimate(0, batch_size, batch_size)]
+        positions = [batch_size + sum(min(length, width) for length in lengths) for width in candidates]
+        ar, verify, state = cost.block_target_costs(batch_size, positions)
+        scores = [ar]
         for i, width in enumerate(candidates):
-            logical = batch_size + sum(min(length, width) for length in lengths)
-            physical = cost._physical_verify(batch_size, logical)
-            verify = cost._estimate(2, batch_size, physical, logical)
-            scores.append((self._draft_ms(batch_size, width) + verify + state) / expected[i])
+            scores.append((self._draft_ms(batch_size, width) + verify[i] + state) / expected[i])
         selected = int(torch.stack(scores).argmin().item())
         width = candidates[selected - 1] if selected else 0
         return self._choose(lengths, width, False, started)
@@ -125,12 +117,8 @@ class BlockDraftCost:
     def _choose(self, lengths, width, probe, started):
         self.choices[width] += 1
         if self.cost is not None:
-            eligible = sum(length > 0 for length in lengths)
-            if not width:
-                self.cost.ar_requests += eligible
-            elif probe:
-                self.cost.probe_requests += eligible
-            self.cost.control_ms += (time.perf_counter() - started) * 1000
+            self.cost.record_block_choice(sum(length > 0 for length in lengths), width, probe,
+                                          (time.perf_counter() - started) * 1000)
         return [min(length, width) for length in lengths]
 
     def snapshot(self):
