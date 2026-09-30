@@ -52,10 +52,15 @@ class SpeculativeGraphs:
                     continue
                 self._capture(model, "draft", [1] * bs)
                 limit = min(bs * self.query_width, max_tokens)
-                # Exact shapes where the admission policy could flip; above it every multiple of
-                # the batch size, so a round replays at the smallest shape that holds it.
-                sizes = sorted({*range(bs, min(limit, self.exact_tokens) + 1),
-                                *(min(k * bs, limit) for k in range(1, self.query_width + 1))})
+                # Exact shapes where the admission policy could flip, and the full window. The
+                # power-of-two batch sizes most rounds run at also get 2-5 inputs per request
+                # (up to four drafts), replayed at the smallest shape that holds the round;
+                # every captured graph stays resident (~15 MB each on Qwen3.6), so rare batch
+                # sizes keep only the full window.
+                sizes = {*range(bs, min(limit, self.exact_tokens) + 1), limit}
+                if bs & (bs - 1) == 0:
+                    sizes |= {min(k * bs, limit) for k in range(2, 6)}
+                sizes = sorted(sizes)
                 self.verify_sizes[bs] = sizes
                 # The first (largest) plan sets FlashInfer's maximum total query-row bound.
                 for tokens in reversed(sizes):
