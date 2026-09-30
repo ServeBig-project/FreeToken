@@ -252,9 +252,8 @@ def main():
     case("prefix_reuse_and_isolation", cached)
 
     def long_input(entry):
-        prompt = args.long_prompt_file.read_text() if args.long_prompt_file else (
-            "The red boat crosses the calm lake.\n" * max(64, args.prefill_chunk_size // 8)
-        )
+        prompt = (args.long_prompt_file.read_text() if args.long_prompt_file
+                  else [0] * (args.prefill_chunk_size + 1))
         response = generate(entry, "chunked_prefill", body(prompt, 17, "long-input"))
         require(response["usage"]["prompt_tokens"] > args.prefill_chunk_size,
                 "Long-input fixture did not exceed configured prefill chunk size")
