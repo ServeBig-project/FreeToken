@@ -34,6 +34,22 @@ def _make_layer_and_cache():
     return layer, cache
 
 
+def _batch_context(monkeypatch, *, decode_size):
+    import freetoken.core as core
+    from freetoken.core import Batch, Context, Req
+
+    ctx = Context(page_size=1)
+    monkeypatch.setattr(core, "_GLOBAL_CTX", ctx)
+    req = Req(
+        input_ids=torch.tensor([0], dtype=torch.int32), table_idx=0, cached_len=0,
+        output_len=1, uid=0, sampling_params=None, cache_handle=None,
+    )
+    batch = Batch(reqs=[req], decode_size=decode_size)
+    batch.positions = torch.zeros(1, dtype=torch.int32)
+    batch.num_token_non_padded = torch.tensor(1, dtype=torch.int32) if decode_size else None
+    return ctx.forward_batch(batch)
+
+
 def test_dummy_expert_sources_use_moe_layer_count(monkeypatch):
     from types import SimpleNamespace
 
@@ -74,7 +90,9 @@ def test_offload_moe_layer_prefill_forward_uses_single_layer_cache_view(monkeypa
 
     monkeypatch.setattr(
         "freetoken.layers.moe.fused_topk",
-        lambda *, hidden_states, gating_output, topk, renormalize: (topk_weights, topk_ids),
+        lambda hidden_states, gating_output, topk, renormalize, num_token_non_padded=None: (
+            topk_weights, topk_ids
+        ),
     )
     monkeypatch.setattr(cache, "materialize_layer", lambda layer_id: calls.setdefault("layer_id", layer_id))
     monkeypatch.setattr(cache, "copy_missing", lambda: calls.setdefault("copied", True))
@@ -98,7 +116,8 @@ def test_offload_moe_layer_prefill_forward_uses_single_layer_cache_view(monkeypa
 
     monkeypatch.setattr("freetoken.layers.moe.fused_experts_impl", fake_fused)
 
-    out = layer.prefill_forward(hidden_states, router_logits)
+    with _batch_context(monkeypatch, decode_size=0):
+        out = layer.prefill_forward(hidden_states, router_logits)
 
     assert out is hidden_states
     assert calls["layer_id"] == 0
@@ -156,7 +175,7 @@ def test_offload_moe_layer_prefill_overlap_prefetches_layers_into_two_buffers(mo
 
     monkeypatch.setattr(
         "freetoken.layers.moe.fused_topk",
-        lambda *, hidden_states, gating_output, topk, renormalize: (
+        lambda hidden_states, gating_output, topk, renormalize, num_token_non_padded=None: (
             topk_weights,
             topk_ids.clone(),
         ),
@@ -194,8 +213,9 @@ def test_offload_moe_layer_prefill_overlap_prefetches_layers_into_two_buffers(mo
     monkeypatch.setattr("freetoken.layers.moe.fused_experts_impl", fake_fused)
 
     out = hidden_states
-    for layer in layers:
-        out = layer.prefill_forward(out, router_logits)
+    with _batch_context(monkeypatch, decode_size=0):
+        for layer in layers:
+            out = layer.prefill_forward(out, router_logits)
 
     assert torch.allclose(out, hidden_states + 3)
     for layer_id in range(num_layers):
@@ -331,9 +351,6 @@ def test_prefill_overlap_waits_for_previous_prefill_release_after_begin(monkeypa
 
 
 def test_offload_moe_layer_decode_forward_uses_remapped_slot_ids(monkeypatch):
-    import freetoken.core as core
-    from freetoken.core import Batch, Context, Req
-
     layer, cache = _make_layer_and_cache()
     topk_weights = torch.tensor([[0.7, 0.3]], dtype=torch.float32)
     topk_ids = torch.tensor([[2, 1]], dtype=torch.int32)
@@ -343,7 +360,7 @@ def test_offload_moe_layer_decode_forward_uses_remapped_slot_ids(monkeypatch):
 
     monkeypatch.setattr(
         "freetoken.layers.moe.fused_topk",
-        lambda *, hidden_states, gating_output, topk, renormalize, num_token_non_padded=None: (
+        lambda hidden_states, gating_output, topk, renormalize, num_token_non_padded=None: (
             topk_weights, topk_ids
         ),
     )
@@ -373,13 +390,7 @@ def test_offload_moe_layer_decode_forward_uses_remapped_slot_ids(monkeypatch):
 
     monkeypatch.setattr("freetoken.layers.moe.fused_experts_decode_impl", fake_fused_decode)
 
-    ctx = Context(page_size=1)
-    monkeypatch.setattr(core, "_GLOBAL_CTX", ctx)
-    req = Req(
-        input_ids=torch.tensor([0], dtype=torch.int32), table_idx=0, cached_len=0,
-        output_len=1, uid=0, sampling_params=None, cache_handle=None,
-    )
-    with ctx.forward_batch(Batch(reqs=[req], decode_size=1)):
+    with _batch_context(monkeypatch, decode_size=1):
         out = layer.decode_forward(hidden_states, router_logits)
 
     assert out is hidden_states

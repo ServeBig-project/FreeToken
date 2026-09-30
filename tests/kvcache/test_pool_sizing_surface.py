@@ -58,6 +58,7 @@ def _generic_config(num_page_override=None):
         tp_info=SimpleNamespace(size=1), cache_type="radix",
         swa_full_tokens_ratio=1.0, swa_num_pages_override=None,
         num_page_override=num_page_override, max_running_req=4, max_seq_len=1024,
+        gdn_state_budget_bytes=None, enable_gdn_replayssm=False,
     )
 
 
