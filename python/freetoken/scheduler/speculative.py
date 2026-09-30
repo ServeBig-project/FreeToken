@@ -43,6 +43,7 @@ class SpeculativeDecoder:
         self.accepted_draft_tokens = 0
         self.verify_steps = 0
         self.residency_stops = 0
+        self.state_slot_stops = 0
         self.draft_length_histogram = [0] * (engine.config.speculative_num_steps + 1)
         self.draft_loads = (
             torch.zeros((), dtype=torch.int64, device=engine.device)
@@ -55,6 +56,7 @@ class SpeculativeDecoder:
             "accepted_draft_tokens": self.accepted_draft_tokens,
             "verify_steps": self.verify_steps,
             "residency_stops": self.residency_stops,
+            "state_slot_stops": self.state_slot_stops,
             "draft_length_histogram": list(self.draft_length_histogram),
         }
         if self.draft_loads is not None:
@@ -91,6 +93,10 @@ class SpeculativeDecoder:
     def forward(self, forward_input: ForwardInput) -> ForwardOutput:
         batch = forward_input.batch
         lengths = self._draft_lengths(batch)
+        limited = self.cache.limit_speculation(lengths)
+        if any(lengths) and not any(limited):
+            self.state_slot_stops += 1
+        lengths = limited
         if not any(lengths):
             self._record_lengths(lengths)
             return self.engine.forward_batch(batch, forward_input.sample_args)
@@ -124,6 +130,11 @@ class SpeculativeDecoder:
         starts = [req.device_len for req in batch.reqs]
         ends = [start + length for start, length in zip(starts, lengths, strict=True)]
         views = [copy(req) for req in batch.reqs]
+        if self.cost is not None:
+            self.cost.begin_state(0)
+        state = self.cache.begin_speculation(batch.reqs, views, lengths)
+        if self.cost is not None:
+            self.cost.end_state(0, batch.size)
         # The ordinary decode query is already allocated. Reserve only the extra
         # span; the same physical slots serve drafting and target verification.
         for req, start, end in zip(views, starts, ends, strict=True):
@@ -170,6 +181,8 @@ class SpeculativeDecoder:
         for req, start, length in zip(views, starts, lengths, strict=True):
             req.cached_len, req.device_len = start - 1, start + length
         verify = Batch(views, is_speculative_verify=True)
+        if state is not None:
+            state.prepare_verify(verify, lengths)
         logits = self._logits(verify)
         target_probs = sampler.probabilities(
             logits, sampler.prepare(verify, repeats=[length + 1 for length in lengths])
@@ -207,4 +220,4 @@ class SpeculativeDecoder:
         host = output.to("cpu", non_blocking=True)
         ready = torch.cuda.Event()
         ready.record(engine.stream)
-        return ForwardOutput(output, host, ready, speculative_ends=ends)
+        return ForwardOutput(output, host, ready, speculative_ends=ends, speculative_state=state)

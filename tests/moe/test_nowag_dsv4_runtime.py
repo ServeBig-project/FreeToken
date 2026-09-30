@@ -185,8 +185,9 @@ def test_dsv4_wrapper_keeps_fp8_roundtrips_and_clamped_swiglu(monkeypatch):
 
     calls = []
 
-    def round_input(x, block):
+    def round_input(x, block=128, output=None):
         calls.append(("input", block))
+        assert output is None
         return x + 1
 
     def round_middle(x, block):
@@ -357,6 +358,7 @@ def test_qwen_offload_layer_dispatches_with_qwen_rule(monkeypatch):
         moe_backend="offload",
         expert_quant="nowag",
         model_type="qwen3_5_moe",
+        moe_router="softmax",
         num_experts=2,
         num_experts_per_tok=1,
         hidden_size=12,

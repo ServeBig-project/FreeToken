@@ -1,10 +1,11 @@
-"""Fixed-step Qwen3 draft and ragged verification CUDA graphs."""
+"""Shared capture and replay of draft and ragged verification forwards."""
 from copy import copy
 
 import torch
 
 from freetoken.core import Batch, get_global_ctx
 from .graph import GraphCaptureBuffer
+from .model_forward import forward_model
 
 
 class SpeculativeGraphs:
@@ -14,10 +15,17 @@ class SpeculativeGraphs:
         self.router = (config.speculative_draft_residency == "router"
                        and not config.speculative_draft_load_missing)
         self.graphs = {}
-        self.verify_wrappers = {}
+        self.verify_sizes: dict[int, list[int]] = {}  # captured verify token counts per batch size
+        self.attention = runner.attn_backend.create_speculative_graphs(max_seq_len)
         ctx = get_global_ctx()
         kv = ctx.kv_cache
-        usable_tokens = kv.k_cache(0).flatten(0, 1).shape[0] - 1
+        stores = []
+        for layer in range(kv.num_layers):
+            try:
+                stores.append((kv.k_cache(layer), kv.v_cache(layer)))
+            except KeyError:  # linear-attention layer without paged KV
+                continue
+        usable_tokens = stores[0][0].flatten(0, 1).shape[0] - 1
         max_tokens = min(runner.max_graph_bs * (config.speculative_num_steps + 1), usable_tokens)
         self.max_tokens = max_tokens
         self.query_width = config.speculative_num_steps + 1
@@ -28,40 +36,48 @@ class SpeculativeGraphs:
         self.real_tokens = torch.empty((), dtype=torch.int32, device=runner.device)
         self.dummy_slot = ctx.page_table[runner.dummy_req.table_idx, 0]
         self.buffer = GraphCaptureBuffer.init(max_tokens, vocab_size, runner.device)
+        state_pool = ctx.linear_state_pool
+        self.state = (state_pool.create_speculative_graphs(runner.max_graph_bs, self.query_width, runner.device)
+                      if state_pool is not None else None)
         self.available = (
             torch.ones(config.model_config.num_moe_layers, config.model_config.num_experts,
                        dtype=torch.bool, device=runner.device) if self.router else None
         )
         # Rebuild can preserve existing prefix KV. Capture scratch must not overwrite it.
-        scratch = [storage(layer).flatten(0, 1)[:max_tokens]
-                   for layer in range(kv.num_layers) for storage in (kv.k_cache, kv.v_cache)]
+        scratch = [storage.flatten(0, 1)[:max_tokens] for pair in stores for storage in pair]
         saved = [tensor.clone() for tensor in scratch]
         try:
             for bs in reversed(runner.graph_bs_list):
                 if bs > max_tokens:
                     continue
-                self._capture(model, "draft", [1] * bs, runner.attn_backend.graph_wrappers[bs])
-                wrapper = runner.attn_backend.create_verify_graph_wrapper(bs, max_seq_len)
-                self.verify_wrappers[bs] = wrapper
-                # The first plan sets FlashInfer's maximum total query-row bound.
+                self._capture(model, "draft", [1] * bs)
                 limit = min(bs * self.query_width, max_tokens)
-                # Exact shapes only where the policy could flip; larger counts pad to the limit.
-                counts = sorted({limit, *range(bs, min(limit, self.exact_tokens) + 1)}, reverse=True)
-                for tokens in counts:
+                # Exact shapes where the admission policy could flip, and the full window. The
+                # power-of-two batch sizes most rounds run at also get 2-5 inputs per request
+                # (up to four drafts), replayed at the smallest shape that holds the round;
+                # every captured graph stays resident (~15 MB each on Qwen3.6), so rare batch
+                # sizes keep only the full window.
+                sizes = {*range(bs, min(limit, self.exact_tokens) + 1), limit}
+                if bs & (bs - 1) == 0:
+                    sizes |= {min(k * bs, limit) for k in range(2, 6)}
+                sizes = sorted(sizes)
+                self.verify_sizes[bs] = sizes
+                # The first (largest) plan sets FlashInfer's maximum total query-row bound.
+                for tokens in reversed(sizes):
                     remaining = tokens - bs
                     lengths = []
                     for _ in range(bs):
                         extra = min(remaining, config.speculative_num_steps)
                         lengths.append(1 + extra)
                         remaining -= extra
-                    self._capture(model, "verify", lengths, wrapper)
+                    self._capture(model, "verify", lengths)
         finally:
             for tensor, original in zip(scratch, saved, strict=True):
                 tensor.copy_(original)
             runner._reset_moe_offload_cache()
             torch.cuda.synchronize(runner.device)
 
-    def _capture(self, model, phase, lengths, wrapper):
+    def _capture(self, model, phase, lengths):
         runner = self.runner
         tokens, bs = sum(lengths), len(lengths)
         table = torch.zeros(bs, max(lengths), dtype=torch.int32, device=runner.device)
@@ -87,19 +103,27 @@ class SpeculativeGraphs:
         batch.input_ids = self.buffer.input_ids[:tokens]
         batch.positions = self.buffer.positions[:tokens]
         batch.out_loc = self.buffer.out_loc[:tokens]
-        runner.attn_backend.prepare_speculative_graph(batch, wrapper, table)
+        if self.state is not None:
+            self.state.prepare_capture(batch, lengths, tokens)
+        self.attention.prepare_capture(batch, table)
         graph = torch.cuda.CUDAGraph()
         with get_global_ctx().forward_batch(batch):
             # Admission reads GPU state on replay, so warmups can retain expert residency.
-            self.buffer.logits[:tokens] = model.forward()
+            self.buffer.logits[:tokens] = forward_model(model)
             with torch.cuda.graph(graph, pool=runner.pool, stream=runner.stream):
-                self.buffer.logits[:tokens] = model.forward()
+                self.buffer.logits[:tokens] = forward_model(model)
         self.graphs[(phase, bs, tokens)] = graph
+
+    def verify_tokens(self, batch_size, tokens):
+        """Physical size a verify batch of ``tokens`` queries replays at, shared by replay and
+        the SD cost model: the smallest captured shape that holds it, else eager ``tokens``."""
+        return next((size for size in self.verify_sizes.get(batch_size, ()) if size >= tokens),
+                    tokens)
 
     def _key(self, batch):
         tokens = batch.positions.numel()
-        if batch.is_speculative_verify and tokens > self.exact_tokens:
-            tokens = min(batch.size * self.query_width, self.max_tokens)
+        if batch.is_speculative_verify:
+            tokens = self.verify_tokens(batch.size, tokens)
         return ("verify" if batch.is_speculative_verify else "draft", batch.size, tokens)
 
     def can_replay(self, batch) -> bool:
@@ -119,8 +143,8 @@ class SpeculativeGraphs:
         self.buffer.copy_from(batch)
         if batch.draft_experts is not None and self.available is not None:
             self.available.copy_(batch.draft_available_experts)
-        wrapper = (self.verify_wrappers[batch.size] if batch.is_speculative_verify
-                   else self.runner.attn_backend.graph_wrappers[batch.size])
-        self.runner.attn_backend.prepare_speculative_graph(batch, wrapper)
+        if self.state is not None:
+            self.state.prepare_replay(batch, key[2])
+        self.attention.prepare_replay(batch)
         self.graphs[key].replay()
         return self.buffer.logits[:real]

@@ -459,7 +459,9 @@ class LayeredExecutionAdapter:
         if total_rows <= max_rows:
             return ()
         tiles: list[_LayeredPrefillTile] = []
-        linear_progress: dict[int, tuple[int, int | None]] = {}
+        # Whole-wave metadata will not execute; only actual tile writes may be donated.
+        for req in source.reqs:
+            req.mamba_last_track_seqlen = None
         tile_reqs: list[Req] = []
         tile_request_indices: list[int] = []
         tile_terminal_rows: list[tuple[int, int]] = []
@@ -495,12 +497,7 @@ class LayeredExecutionAdapter:
                 tile_request_indices,
                 strict=True,
             ):
-                linear_progress[request_index] = (
-                    req_view.mamba_next_track_idx,
-                    req_view.mamba_last_track_seqlen,
-                )
                 owner = source.reqs[request_index]
-                owner.mamba_next_track_idx = req_view.mamba_next_track_idx
                 owner.mamba_last_track_seqlen = req_view.mamba_last_track_seqlen
             request_start = tile_request_indices[0]
             request_stop = tile_request_indices[-1] + 1
@@ -538,12 +535,6 @@ class LayeredExecutionAdapter:
                 request_remaining = req.extend_len - request_row
                 take = min(request_remaining, max_rows - tile_rows)
                 req_view = copy(req)
-                progress = linear_progress.get(request_index)
-                if progress is not None:
-                    (
-                        req_view.mamba_next_track_idx,
-                        req_view.mamba_last_track_seqlen,
-                    ) = progress
                 req_view.cached_len = req.cached_len + request_row
                 req_view.device_len = req_view.cached_len + take
                 req_view.input_ids = req.input_ids[: req_view.device_len]

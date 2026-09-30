@@ -175,6 +175,8 @@ class FrontendManager:
     # "num_mamba_slots"}, from the same ack. Seeds geometry before the first generation reply
     # (the running snapshot channel) has anything. None until meta arrives.
     cache_pools: Dict[str, int] | None = None
+    # GDN state storage by kind (compute_gdn_state_geometry): from the ack, then each rebuild.
+    gdn_geometry: Dict[str, Any] | None = None
     # one {index, name, uuid, total_bytes} per TP rank, from the same ack; /v1/stats gpus
     gpus: List[Dict[str, Any]] = field(default_factory=list)
     # Backend worker Process handles (TP schedulers + tokenizer/detokenizer), captured from the
@@ -280,6 +282,8 @@ class FrontendManager:
             "num_swa_pages": msg.num_swa_pages,
             "error": msg.error,
         }
+        if msg.gdn_replayssm is not None:
+            self.gdn_geometry = msg.gdn_replayssm
         fut = self.rebuild_futures.pop(msg.request_id, None)
         if fut is not None and not fut.done():
             fut.set_result(self.last_rebuild)
@@ -651,10 +655,14 @@ def _cache_limits(geo: dict, unit_bytes: dict, pool_budget: int, floors: dict) -
         mamba_per_slot = int(unit_bytes["mamba_per_slot"])
         budget = int(pool_budget) if pool_budget and int(pool_budget) > 0 else 0
 
-        def ideal(unit_cost: int) -> int:
+        def ideal(unit_cost: int, fixed: int = 0) -> int:
             if unit_cost <= 0 or budget <= 0:
                 return 0  # unit cost or budget signal unknown -> "unknown", desktop falls back
-            return budget // unit_cost
+            return max(0, budget - fixed) // unit_cost
+
+        # ReplaySSM records and conv windows are priced with every GDN state rebuild.
+        gdn = geo.get("gdn_replayssm") or {}
+        gdn_fixed = int(gdn.get("reserved_bytes", 0)) - int(gdn.get("checkpoint_bytes", 0))
 
         swa_per_token = int(unit_bytes.get("swa_per_token", 0) or 0)
         kv_min = int(floors.get("kv_tokens", page_size) or 0)
@@ -675,7 +683,7 @@ def _cache_limits(geo: dict, unit_bytes: dict, pool_budget: int, floors: dict) -
         return {
             "kv_tokens": {"min": kv_min, "max": ideal(kv_per_token)},
             "moe_experts": {"min": moe_min, "max": moe_max},
-            "mamba_slots": {"min": mamba_min, "max": ideal(mamba_per_slot)},
+            "mamba_slots": {"min": mamba_min, "max": ideal(mamba_per_slot, gdn_fixed)},
             "swa_tokens": {"min": swa_min, "max": ideal(swa_per_token)},
         }
     except Exception:  # noqa: BLE001 -- limits are a nicety; a bad read must not 500 the poll
@@ -793,6 +801,7 @@ def cache_geometry(state: Any) -> dict:
         # unknown (pre-budget engine) — the desktop then reverse-derives it from the limits.
         "cache_budget_bytes": int(getattr(state, "cache_budget_bytes", 0) or 0),
         "reasoning": reasoning,
+        "gdn_replayssm": getattr(state, "gdn_geometry", None),
     }
     # Per-pool slider bounds, sized against the cache budget the rebuild fit-check actually
     # enforces — NOT the raw post-weights free VRAM, which is larger by the (1-memory_ratio)
@@ -1012,6 +1021,7 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
         _GLOBAL_STATE.cache_floors = meta.pop("floors", None)
         _GLOBAL_STATE.cache_pools = meta.pop("pools", None)
         _GLOBAL_STATE.stats.cuda_graph = meta.pop("cuda_graph", _GLOBAL_STATE.stats.cuda_graph)
+        _GLOBAL_STATE.gdn_geometry = meta.pop("gdn_replayssm", None)
         _GLOBAL_STATE.swa_full_tokens_ratio = float(meta.pop("swa_full_tokens_ratio", 0.0) or 0.0)
         _GLOBAL_STATE.cache_budget_bytes = int(meta.pop("cache_budget_bytes", 0) or 0)
         _GLOBAL_STATE.gpus = list(meta.pop("gpus", None) or [])

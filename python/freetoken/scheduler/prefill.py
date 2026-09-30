@@ -72,13 +72,12 @@ class PrefillAdder:
         if estimated_len + self.reserved_size > self.cache_manager.available_size:
             return self.cache_manager.unlock(handle)
 
-        # Second currency (hybrid GDN): reserve 1 live + 2 ping-pong state slots; evict tree
-        # snapshots if the pool is short, fail admission if still short (mirrors the KV gate).
+        # A request needs one private live state; snapshots are allocated only when produced.
         if self.cache_manager.is_hybrid:
             pool = self.cache_manager.linear_state_pool
-            if pool.num_free_slots < 3:
-                self.cache_manager.ensure_mamba_slots(3)
-            if pool.num_free_slots < 3:
+            if pool.num_free_slots < 1:
+                self.cache_manager.ensure_mamba_slots(1)
+            if pool.num_free_slots < 1:
                 return self.cache_manager.unlock(handle)
 
         # Third currency (SWA): refuse admission unless the swa pool can seat this request's first
@@ -108,13 +107,12 @@ class PrefillAdder:
             n = int(matched.numel())
             self.table_manager.page_table[table_idx][cached_len - n : cached_len].copy_(matched)
 
-        linear_slot_idx = ping_pong = None
+        linear_slot_idx = None
         if self.cache_manager.is_hybrid:
             pool = self.cache_manager.linear_state_pool
             linear_slot_idx = pool.alloc(1)[0]
-            ping_pong = tuple(pool.alloc(2))
 
-        return handle, table_idx, linear_slot_idx, ping_pong, mr.mamba_value
+        return handle, table_idx, linear_slot_idx, mr.mamba_value
 
     def _add_one_req(
         self,
@@ -123,8 +121,6 @@ class PrefillAdder:
         table_idx: int,
         cached_len: int,
         linear_slot_idx: int | None = None,
-        ping_pong: tuple | None = None,
-        next_track_idx: int = 0,
         restore_src: int | None = None,
         swa_evicted_seqlen: int = 0,
     ) -> Req | None:
@@ -214,8 +210,6 @@ class PrefillAdder:
         # Hybrid GDN per-request state slots (None for non-hybrid). On a fresh admit these are
         # freshly allocated; on a chunked continuation they are inherited from the prior chunk.
         req.linear_slot_idx = linear_slot_idx
-        req.mamba_ping_pong = ping_pong
-        req.mamba_next_track_idx = next_track_idx
         req.mamba_restore_src = restore_src
         req.swa_evicted_seqlen = swa_evicted_seqlen  # carry the extend-free watermark across chunks
         return req
@@ -235,22 +229,18 @@ class PrefillAdder:
                     else chunked_req.cached_len
                 ),
                 linear_slot_idx=chunked_req.linear_slot_idx,
-                ping_pong=chunked_req.mamba_ping_pong,
-                next_track_idx=chunked_req.mamba_next_track_idx,
                 restore_src=None,  # continuation chunk already has live state
                 swa_evicted_seqlen=chunked_req.swa_evicted_seqlen,  # extend-free watermark so far
             )
 
         if resource := self._try_allocate_one(pending_req):
-            cache_handle, table_idx, linear_slot_idx, ping_pong, restore_src = resource
+            cache_handle, table_idx, linear_slot_idx, restore_src = resource
             req = self._add_one_req(
                 pending_req=pending_req,
                 cache_handle=cache_handle,
                 table_idx=table_idx,
                 cached_len=cache_handle.cached_len,
                 linear_slot_idx=linear_slot_idx,
-                ping_pong=ping_pong,
-                next_track_idx=0,
                 restore_src=restore_src,
             )
             if req is None:
@@ -259,7 +249,7 @@ class PrefillAdder:
                 self.cache_manager.unlock(cache_handle)
                 self.table_manager.free(table_idx)
                 if linear_slot_idx is not None:
-                    self.cache_manager.linear_state_pool.free([linear_slot_idx, *ping_pong])
+                    self.cache_manager.linear_state_pool.free(linear_slot_idx)
             return req
 
         return None

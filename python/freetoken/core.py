@@ -48,8 +48,7 @@ class Req:
     # --- hybrid-radix (GDN linear-state) per-request slots; None for non-hybrid models or
     # until allocated from LinearStatePool. Set by the scheduler (P2). ---
     linear_slot_idx: int | None = None              # live GDN state slot (sglang mamba_pool_idx)
-    mamba_ping_pong: tuple[int, int] | None = None  # 2 donatable track slots under overlap
-    mamba_next_track_idx: int = 0                   # which ping-pong slot is the next snapshot dst (0/1)
+    mamba_snapshot_slot: int | None = None         # private snapshot awaiting donation, allocated on demand
     mamba_last_track_seqlen: int | None = None      # chunk-aligned committed len of the last snapshot
     mamba_restore_src: int | None = None            # on a prefix hit: tree snapshot slot to COW into the live slot (first chunk only)
     swa_evicted_seqlen: int = 0                      # SWA radix: positions < this had their swa KV freed (slid out of window) during decode
@@ -57,7 +56,7 @@ class Req:
     # Set once, at the first sampled tool-call opener token (scheduler detection): the state
     # length just after that token (its index + 1). A client-side rewrite of the echoed tool
     # call diverges strictly after this point, so it is the deepest reuse boundary that
-    # survives such a rewrite. GDN: the state is frozen into a ping-pong slot when cached_len
+    # survives such a rewrite. GDN: the state is frozen into an on-demand private slot when cached_len
     # reaches it (snapshot_toolcall_anchor) and donated at finish. SWA: caps the proactive
     # out-of-window eviction so the window ending here stays resumable.
     toolcall_anchor_len: int | None = None
@@ -122,6 +121,9 @@ class Batch:
     draft_experts: int | None = None
     draft_available_experts: torch.Tensor | None = None
     is_speculative_verify: bool = False
+    # Speculative verify on a GDN model: per request (live state slot, one scratch slot per
+    # verified position). Set by the state component; None elsewhere.
+    speculative_states: "list[tuple[int, list[int]]] | None" = None
     num_token_non_padded: torch.Tensor | None = None
     # these fields should be set by scheduler
     input_ids: torch.Tensor = field(init=False)

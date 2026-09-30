@@ -37,6 +37,10 @@ class StatsTracker:
         self.swa_used_tokens = 0
         self.swa_total_tokens = 0
         self.vram_bytes = 0
+        # ReplaySSM counters as of the latest generation reply (GdnReplay.counts).
+        self.gdn_replayssm = dict.fromkeys(("ar_tokens", "draft_tokens", "verify_tokens",
+                                            "flushes", "flushed_records", "snapshot_exports"), 0)
+        self.gdn_replayssm.update(flush_gpu_ms=0.0, export_gpu_ms=0.0)
         self.cuda_graph = {"enabled": False, "target_decode": 0, "draft": 0, "verify": 0,
                            "replay_shapes": [], "capture_seconds": 0.0, "extra_reserved_bytes": 0}
         self.speculative = {"draft_tokens": 0, "accepted_draft_tokens": 0, "verify_steps": 0,
@@ -44,7 +48,7 @@ class StatsTracker:
                             "cost_ar_requests": 0, "cost_stopped_requests": 0,
                             "cost_probe_requests": 0, "cost_control_ms": 0.0,
                             "cost_samples": dict.fromkeys(("ar", "draft", "verify"), 0),
-                            "cost_gpu_ms": dict.fromkeys(("ar", "draft", "verify", "moe_compute",
+                            "cost_gpu_ms": dict.fromkeys(("ar", "draft", "verify", "state", "moe_compute",
                                                           "demand_copy", "prefetch_copy", "prefetch_wait"), 0.0),
                             "cost_transfer_predictions": {
                                 phase: dict(predicted_experts=0.0, actual_experts=0, abs_error_experts=0.0)
@@ -77,6 +81,8 @@ class StatsTracker:
             self.cuda_graph = reply.cuda_graph
         if getattr(reply, "speculative", None) is not None:
             self.speculative.update(reply.speculative)
+        if getattr(reply, "gdn_replayssm", None) is not None:
+            self.gdn_replayssm = reply.gdn_replayssm
         if getattr(reply, "completion_tokens_delta", 0) > 0:
             self._decode.append((t, reply.completion_tokens_delta))
             self.completion_tokens_total += reply.completion_tokens_delta
@@ -182,6 +188,10 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
         "vram_bytes": tr.vram_bytes,
         "gpus": list(getattr(state, "gpus", None) or []),
         "cuda_graph": tr.cuda_graph,
+        "gdn_replayssm": {
+            "active": bool((getattr(state, "gdn_geometry", None) or {}).get("active")),
+            **tr.gdn_replayssm,
+        },
         "speculative": {
             "enabled": bool(getattr(config, "speculative_num_steps", 0)),
             "adaptive_cost_enabled": config.speculative_adaptive_cost,

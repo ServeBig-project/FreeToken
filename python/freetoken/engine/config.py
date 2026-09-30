@@ -25,6 +25,12 @@ class EngineConfig:
     speculative_adaptive_cost: bool = False
     speculative_draft_load_missing: bool = False
     speculative_verify_prefetch: bool = False
+    # GDN ReplaySSM: target AR, draft and verify read checkpoint + per-position update records.
+    enable_gdn_replayssm: bool = False
+    gdn_replay_buffer_len: int = 32  # records per active request (ring), incl. the draft/verify tail
+    # Bytes for all GDN state storage (full states, records, conv windows); None keeps the
+    # replay-off pool's bytes.
+    gdn_state_budget_bytes: int | None = None
     attention_backend: str = "auto"
     moe_backend: str = "auto"
     # NVFP4 routed-expert GEMM backend (--nvfp4-backend): auto|marlin|flashinfer|triton.
@@ -102,6 +108,16 @@ class EngineConfig:
             raise ValueError("speculative_num_steps must be >= 0")
         if self.speculative_draft_experts < 1:
             raise ValueError("speculative_draft_experts must be >= 1")
+        ring = self.gdn_replay_buffer_len
+        if ring < 4 or ring & (ring - 1):
+            raise ValueError("--gdn-replay-buffer-len must be a power of two >= 4")
+        if self.enable_gdn_replayssm and ring < self.speculative_num_steps + 1:
+            raise ValueError(
+                f"--gdn-replay-buffer-len {ring} cannot hold a verify window of "
+                f"{self.speculative_num_steps + 1} inputs"
+            )
+        if self.gdn_state_budget_bytes is not None and self.gdn_state_budget_bytes <= 0:
+            raise ValueError("--gdn-state-budget-bytes must be positive")
         if (self.speculative_adaptive_cost or self.speculative_draft_load_missing
                 or self.speculative_verify_prefetch):
             if not 1 <= self.speculative_num_steps <= 8:
@@ -119,8 +135,17 @@ class EngineConfig:
             raise ValueError("self-speculative decoding requires a single GPU (tp_size=1)")
         if getattr(self, "batching_policy", "legacy") != "legacy":
             raise ValueError("self-speculative decoding requires --batching-policy legacy")
-        if self.hf_config.architectures[0] != "Qwen3MoeForCausalLM":
-            raise ValueError("self-speculative decoding currently supports only Qwen3 MoE")
+        from freetoken.attention.base import AttnType
+        from freetoken.moe.routing import ROUTERS
+
+        model = self.model_config
+        if not model.num_experts or model.moe_router not in ROUTERS:
+            raise ValueError("self-speculative decoding requires a shared MoE router component")
+        unsupported = {model.attn_type_for_layer(i) for i in range(model.num_layers)} - {
+            AttnType.FULL, AttnType.LINEAR,
+        }
+        if unsupported:
+            raise ValueError(f"self-speculative state handling is unavailable for {unsupported}")
         if self.speculative_draft_experts > self.model_config.num_experts_per_tok:
             raise ValueError(
                 "speculative_draft_experts must not exceed the target's experts per token "
@@ -144,12 +169,17 @@ class EngineConfig:
 
     @property
     def speculative_graphs(self) -> bool:
+        from freetoken.attention import attention_backend_info
+
+        backend = self.attention_backend
+        graph_attention = (backend != "auto" and "," not in backend
+                           and attention_backend_info(backend).speculative_graphs)
         return bool(
             0 < self.speculative_num_steps <= 8
-            and self.dtype == torch.bfloat16 and self.model_config.model_type == "qwen3_moe"
+            and self.dtype == torch.bfloat16
             and self.model_config.expert_quant == "none" and not self.nowag_expert_path
             and self.model_config.moe_weight_format in (None, "bf16")
-            and self.attention_backend == "fi" and self.moe_backend == "offload"
+            and graph_attention and self.moe_backend == "offload"
             and self.page_size == 1 and self.tp_info.size == 1
             and getattr(self, "batching_policy", "legacy") == "legacy"
             and self.cuda_graph_max_bs != 0 and self.cuda_graph_bs != []

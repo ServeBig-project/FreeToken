@@ -1,19 +1,30 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
+import freetoken.core as core
 from freetoken.attention.linear import build_fla_metadata
-from freetoken.core import Batch
+from freetoken.core import Batch, Context, Req, SamplingParams
+
+
+@pytest.fixture(autouse=True)
+def linear_context(monkeypatch):
+    ctx = Context(page_size=1)
+    ctx.linear_state_pool = SimpleNamespace(
+        replay=None, padding_slot=0, conv_states=torch.zeros(1, 10, 3, 3),
+    )
+    monkeypatch.setattr(core, "_GLOBAL_CTX", ctx)
 
 
 def _req(*, extend_len: int, cached_len: int, state_slot: int):
-    return SimpleNamespace(
-        extend_len=extend_len,
-        cached_len=cached_len,
-        linear_slot_idx=state_slot,
-        table_idx=state_slot + 100,
-        mamba_ping_pong=None,
+    req = Req(
+        input_ids=torch.arange(cached_len + extend_len, dtype=torch.int32),
+        cached_len=cached_len, table_idx=state_slot + 100, uid=state_slot,
+        output_len=4, sampling_params=SamplingParams(), cache_handle=None,
     )
+    req.linear_slot_idx = state_slot
+    return req
 
 
 def test_mixed_fla_metadata_keeps_per_request_boundaries_and_state():
@@ -23,6 +34,7 @@ def test_mixed_fla_metadata_keeps_per_request_boundaries_and_state():
     batch.padded_reqs = batch.reqs
 
     metadata = build_fla_metadata(batch, torch.device("cpu"))
+    assert metadata.verify is None
 
     assert metadata.decode is not None
     assert metadata.decode.cu_seqlens.tolist() == [0, 1]
@@ -47,6 +59,7 @@ def test_mixed_fla_metadata_rebases_multiple_prefill_requests():
     batch.padded_reqs = batch.reqs
 
     metadata = build_fla_metadata(batch, torch.device("cpu"))
+    assert metadata.verify is None
 
     assert metadata.decode is not None
     assert metadata.decode.cu_seqlens.tolist() == [0, 1, 2]

@@ -982,6 +982,8 @@ class Scheduler(SchedulerIOMixin):
         output.copy_done_event.synchronize()
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
+        retained = [0] * batch.size
+        completed = []
         with self.cache_manager.lazy_free_region():
             for i, req in enumerate(batch.reqs):
                 if isinstance(req, ChunkedReq):
@@ -998,9 +1000,9 @@ class Scheduler(SchedulerIOMixin):
                     # Aborted while this final-chunk prefill / decode step was in flight: free
                     # here (the forward is drained) and finish the request. No DetokenizeMsg --
                     # the abort ack flushed after this method stays the uid's terminal reply.
-                    self.decode_manager.remove_req(req)
-                    self._free_req_resources(req)
-                    new_finished_reqs.add(req)
+                    if output.speculative_ends is not None:
+                        self.cache_manager.release_speculative(req, output.speculative_ends[i])
+                    completed.append((i, req, True))
                     continue
                 if req in suppressed_finished_reqs:
                     # Overlap scheduling launched one more decode step for a request that
@@ -1050,10 +1052,21 @@ class Scheduler(SchedulerIOMixin):
                     )
                     if finished:
                         break
+                retained[i] = j + 1
                 if output.speculative_ends is not None:
                     self.cache_manager.release_speculative(req, output.speculative_ends[i])
                     self.speculative.accepted_draft_tokens += min(j + 1, len(tokens) - 1)
 
+                completed.append((i, req, finished))
+
+            if output.speculative_state is not None:
+                cost = self.speculative.cost
+                if cost is not None:
+                    cost.begin_state(1)
+                output.speculative_state.commit(retained)
+                if cost is not None:
+                    cost.end_state(1, batch.size)
+            for i, req, finished in completed:
                 # NOTE: overlap scheduling may make the request freed twice, skip second free
                 if finished and req not in suppressed_finished_reqs:
                     self.decode_manager.remove_req(req)
@@ -1067,7 +1080,7 @@ class Scheduler(SchedulerIOMixin):
                     # instead of freeing them (handled above), so a freed request should
                     # never reach this commit -- but if a future path frees one early, skip
                     # rather than re-read the freed page-table row (and on hybrid, deref the
-                    # None'd GDN ping-pong slots).
+                    # released GDN state slots).
                     self.cache_manager.cache_req(req, finished=False)
 
         if commit_finished_reqs:
@@ -1079,6 +1092,9 @@ class Scheduler(SchedulerIOMixin):
         swa_tokens = self._swa_token_usage()
         if reply:
             reply[-1].cuda_graph = self.engine.graph_runner.stats_snapshot()
+            pool = self.engine.linear_state_pool
+            if pool is not None and pool.replay is not None:
+                reply[-1].gdn_replayssm = pool.replay.snapshot()
             if self.speculative is not None and (batch.has_decode or self.speculative.cost is not None):
                 reply[-1].speculative = self.speculative.snapshot()
             mem = self._gpu_mem_bytes()
@@ -1321,6 +1337,8 @@ class Scheduler(SchedulerIOMixin):
         req.table_idx = -1
 
     def _reply_rebuild(self, request_id: str, status: str, error: str | None = None) -> None:
+        from freetoken.kvcache.cache_status import compute_gdn_state_geometry
+
         # Single source of truth with the rollback snapshot (_current_cache_geometry): mamba is
         # usable slots (padding sink excluded, matching the status-bar gauge), and num_swa_pages
         # reports 0 unless the model actually has a window pool.
@@ -1335,6 +1353,7 @@ class Scheduler(SchedulerIOMixin):
                     mamba_slots=geo["num_mamba_slots"] or 0,
                     num_swa_pages=geo["num_swa_pages"] or 0,
                     error=error,
+                    gdn_replayssm=compute_gdn_state_geometry(self.engine),
                 )
             ]
         )
@@ -1517,6 +1536,9 @@ class Scheduler(SchedulerIOMixin):
         # Polymorphic page allocation: DSV4 allocates window pages + cmp/idx blocks into its
         # slot maps; the generic manager allocates KV pages into the page table.
         self.cache_manager.allocate_paged(batch.reqs)
+        if batch.has_prefill and not batch.is_speculative_verify:
+            self.cache_manager.prepare_prefill_snapshots(batch.prefill_reqs)
+        self.cache_manager.begin_linear_records(batch)
 
     def _prepare_resident_group_decode_batch(
         self,

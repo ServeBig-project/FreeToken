@@ -43,7 +43,12 @@ class SpeculativeCost:
         # External record nodes publish fresh timestamps on every graph replay.
         self.copy_events = [[self._events(True) for _ in range(self.layers)] for _ in self.phases]
         self.gemm_events = [[self._events(True) for _ in range(self.layers)] for _ in self.phases]
-        self.gpu_ms = dict.fromkeys((*self.phases, "moe_compute", "demand_copy", "prefetch_copy", "prefetch_wait"), 0.0)
+        self.gpu_ms = dict.fromkeys((*self.phases, "state", "moe_compute", "demand_copy", "prefetch_copy", "prefetch_wait"), 0.0)
+        # Round state work outside the model forwards: 0 = begin (state setup, folds), 1 = commit.
+        self.state_events = [self._events(), self._events()]
+        self.state_pending = [None, None]
+        self.state_ms = torch.zeros(2, batches, device=device)
+        self.state_ms_cpu = {}
         self.transfer_predictions = {p: dict(predicted_experts=0.0, actual_experts=0,
                                               abs_error_experts=0.0) for p in self.phases}
         self.control_ms = 0.0
@@ -72,11 +77,11 @@ class SpeculativeCost:
         valid_rows = (ids[:, 0] >= 0).sum().clamp_min(1)
         self.use[0 if phase == 1 else 1, layer].lerp_(row.float() / valid_rows, 0.1)
 
-    def record_prediction(self, layer, ids, logits):
+    def record_prediction(self, layer, ids, scores):
         if self.prefetch is None:
             self.predicted[layer].scatter_(0, ids.flatten().long(), True)
         else:
-            self.prefetch.predict(layer, ids, logits)
+            self.prefetch.predict(layer, ids, scores)
         if layer == 0:
             self.predicted_positions.add_(ids.shape[0])
 
@@ -99,6 +104,29 @@ class SpeculativeCost:
         if graphs.can_use_cuda_graph(batch):
             physical = (graphs.speculative._key(batch)[2] if phase else batch.padded_size)
         self.pending[phase] = (batch.size, physical, batch.positions.numel())
+
+    def _collect_state(self, part):
+        # Read a finished sample only; an unfinished one is dropped when its events are reused.
+        batch_size = self.state_pending[part]
+        start, end = self.state_events[part]
+        if batch_size is None or not end.query():
+            return
+        ms = start.elapsed_time(end)
+        self.gpu_ms["state"] += ms
+        key = (part, batch_size)
+        self.state_ms_cpu[key] = 0.8 * self.state_ms_cpu.get(key, ms) + 0.2 * ms
+        self.state_ms[part, batch_size].fill_(self.state_ms_cpu[key])
+        self.state_pending[part] = None
+
+    def begin_state(self, part):
+        """Time one part of a round's state work without waiting on the GPU."""
+        self._collect_state(part)
+        self.state_pending[part] = None
+        self.state_events[part][0].record()
+
+    def end_state(self, part, batch_size):
+        self.state_events[part][1].record()
+        self.state_pending[part] = batch_size
 
     def _collect(self, phase, rows, predicted, prefetch_rows=None):
         pending = self.pending.pop(phase, None)
@@ -166,9 +194,7 @@ class SpeculativeCost:
 
     def _physical_verify(self, batch_size, logical):
         graphs = self.engine.graph_runner.speculative
-        if graphs is not None and logical > graphs.exact_tokens:
-            return min(batch_size * graphs.query_width, graphs.max_tokens)
-        return logical
+        return graphs.verify_tokens(batch_size, logical) if graphs is not None else logical
 
     def _expected_misses(self, phase, batch_size, logical):
         cold = self.cache.slot_for_id < 0
@@ -218,7 +244,8 @@ class SpeculativeCost:
         else:
             ar = self._estimate(0, batch_size, batch_size)
             survival = self._survival(batch_size)
-            draft_cost = torch.zeros_like(ar)
+            # A round pays its state setup and commit once, whatever depth it drafts to.
+            draft_cost = self.state_ms[:, batch_size].sum()
             best = torch.zeros((), dtype=torch.bool, device=self.engine.device)
             expected = torch.ones_like(ar)
             for step in range(max(lengths)):
@@ -275,6 +302,8 @@ class SpeculativeCost:
     def snapshot(self):
         started = time.perf_counter()
         self.collect_ready()
+        for part in range(2):
+            self._collect_state(part)
         self.control_ms += (time.perf_counter() - started) * 1000
         result = {"cost_ar_requests": self.ar_requests, "cost_stopped_requests": self.stopped_requests,
                 "cost_probe_requests": self.probe_requests, "cost_control_ms": self.control_ms,

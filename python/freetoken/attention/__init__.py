@@ -37,6 +37,7 @@ class BackendInfo:
     # linear layers bypass the backend entirely, but a backend whose metadata or
     # graph machinery assumes layer 0 is an attention layer can opt out here.
     hybrid_linear_ok: bool = True
+    speculative_graphs: bool = False
 
 
 SUPPORTED_ATTENTION_BACKENDS = Registry[BackendCreator]("Attention Backend")
@@ -62,6 +63,7 @@ def create_trtllm_backend(config: ModelConfig):
     BackendInfo(
         supported_types=frozenset({AttnType.FULL}),
         requires_flashinfer=True,
+        speculative_graphs=True,
     ),
 )
 def create_fi_backend(config: ModelConfig):

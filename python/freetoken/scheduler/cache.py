@@ -322,32 +322,54 @@ class CacheManager:
             self.linear_state_pool.free(er.mamba_slots)
             self._free(er.kv_indices)
 
+    def _allocate_mamba_snapshot(self, req: Req) -> bool:
+        pool = self.linear_state_pool
+        self.ensure_mamba_slots(1)
+        if not pool.num_free_slots:
+            return False
+        req.mamba_snapshot_slot = pool.alloc(1)[0]
+        return True
+
+    def prepare_prefill_snapshots(self, reqs: List[Req]) -> None:
+        if not self.is_hybrid:
+            return
+        from freetoken.kernel.fla.chunk import CHUNK_SIZE
+        from .prefill import ChunkedReq
+
+        for req in reqs:
+            # Intermediate chunks are never inserted into the prefix cache.
+            if isinstance(req, ChunkedReq) or req.mm_embeds is not None:
+                continue
+            boundary = req.cached_len + (req.extend_len - 1) // CHUNK_SIZE * CHUNK_SIZE
+            if (boundary > req.cached_len and boundary % self.page_size == 0
+                    and req.mamba_snapshot_slot is None):
+                self._allocate_mamba_snapshot(req)
+
     def snapshot_toolcall_anchor(self, reqs: List[Req]) -> None:
-        """Freeze each decoding request's GDN state at its tool-call anchor, into the ping-pong
-        slot that is idle during decode (the kernel-side ×CHUNK track only runs on prefill
-        extends). Must run on the engine stream before the current step's kernels: cached_len
-        equals the anchor exactly when every enqueued step up to the anchor-consuming one has
-        been issued and the next (current) one has not, so the copy lands between them in
-        stream order. Reuses ``mamba_last_track_seqlen`` as the pending-donate mark -- the
-        prefill track's own pending freeze was consumed by the prefill-commit ``cache_req``
-        before any decode drain could set an anchor."""
+        """Freeze a reusable tool-call prefix before the next decode advances live state."""
         if not self.is_hybrid:
             return
         pool = self.linear_state_pool
-        for r in reqs:
-            a = r.toolcall_anchor_len
-            if (
-                a is None
-                or r.mamba_ping_pong is None
-                or r.mamba_last_track_seqlen is not None
-                or r.cached_len != a
-                or align_down(a, self.page_size) != a
-            ):
+        for req in reqs:
+            anchor = req.toolcall_anchor_len
+            if (anchor is None or req.mamba_snapshot_slot is not None
+                    or anchor % self.page_size != 0 or not pool.can_export(req, anchor)):
                 continue
-            dst = r.mamba_ping_pong[r.mamba_next_track_idx]
-            pool.copy_from(r.linear_slot_idx, dst)
-            r.mamba_last_track_seqlen = a
-            r.mamba_next_track_idx = 1 - r.mamba_next_track_idx
+            if self._allocate_mamba_snapshot(req):
+                pool.export(req, anchor, req.mamba_snapshot_slot)
+                req.mamba_last_track_seqlen = anchor
+
+    def begin_linear_records(self, batch: Batch) -> None:
+        """ReplaySSM: a prefill leaves a complete state, so its request restarts its records."""
+        pool = self.linear_state_pool
+        if pool is not None and pool.replay is not None:
+            pool.replay.begin_prefill(batch.prefill_reqs)
+
+    def _release_mamba_snapshot(self, req: Req, *, donated: bool = False) -> None:
+        if req.mamba_snapshot_slot is not None and not donated:
+            self.linear_state_pool.free(req.mamba_snapshot_slot)
+        req.mamba_snapshot_slot = None
+        req.mamba_last_track_seqlen = None
 
     def maybe_free_swa_out_of_window(self, reqs: List[Req], *, forward_iter: int) -> None:
         """Proactively free each decoding request's now-out-of-window SWA slots, bounding its swa
@@ -558,6 +580,21 @@ class CacheManager:
             )
             offset += length
 
+    def limit_speculation(self, lengths):
+        pool = self.linear_state_pool
+        if pool is None:
+            return lengths
+        available = self.mamba_available_size if self.is_hybrid else pool.num_free_slots
+        return pool.limit_speculation(lengths, available)
+
+    def begin_speculation(self, reqs, views, lengths):
+        pool = self.linear_state_pool
+        if pool is None:
+            return None
+        if self.is_hybrid:
+            self.ensure_mamba_slots(pool.speculative_size(lengths))
+        return pool.begin_speculation(reqs, views, lengths)
+
     def release_speculative(self, req: Req, allocated_len: int) -> None:
         """Return whole provisional pages beyond the committed target KV."""
         start = div_ceil(req.cached_len, self.page_size) * self.page_size
@@ -698,14 +735,10 @@ class CacheManager:
         self._free(self.page_table[table_idx, start:end])
 
     def _cache_req_hybrid(self, req: Req, *, finished: bool) -> None:
-        """Hybrid (GDN) cache_req: commit KV like radix AND manage the GDN state snapshot.
-        Prefill chunk commit: DONATE the frozen ping-pong slot (the snapshot the forward wrote
-        at the tracked ×64 boundary mamba_last_track_seqlen) into the tree; replace it with a
-        fresh slot if the tree took it (dedup keeps it for reuse). Finish: donate the live slot
-        (final full-sequence state, zero-copy since the req is done) and free the req's slots."""
+        """Donate a produced private snapshot, or the finished live state, without reserving
+        a replacement. Public prefix states are never advanced by the request."""
         from freetoken.kvcache.hybrid_radix_cache import HybridCacheHandle
 
-        pool = self.linear_state_pool
         old_handle = req.cache_handle
         page_indices = self.page_table[req.table_idx, : req.cached_len]
 
@@ -722,22 +755,19 @@ class CacheManager:
             # donate below: insert it first and advance the dedup-free floor to its boundary
             # -- [prefix_len, L) is now tree-owned by the donated node, so only [old, prefix_len)
             # is this request's dup to free. The frozen slot is consumed either way (taken by
-            # the tree or freed here) and both ping-pong refs are dropped before
-            # _free_req_slots so nothing double-frees.
+            # the tree or freed here) before freeing the request's remaining private slots.
             free_upto = old_handle.cached_len
             L = req.mamba_last_track_seqlen
             if (
                 L is not None
                 and 0 < L <= req.cached_len
                 and align_down(L, self.page_size) == L
-                and req.mamba_ping_pong is not None
+                and req.mamba_snapshot_slot is not None
             ):
-                frozen_idx = 1 - req.mamba_next_track_idx
-                frozen = req.mamba_ping_pong[frozen_idx]
+                frozen = req.mamba_snapshot_slot
                 prefix_len, mamba_exist = self.prefix_cache.insert(
                     req.input_ids[:L], page_indices[:L], frozen, cache_group=req.cache_group)
-                pool.free([s for s in req.mamba_ping_pong if mamba_exist or s != frozen])
-                req.mamba_ping_pong = None
+                self._release_mamba_snapshot(req, donated=not mamba_exist)
                 self._free(page_indices[free_upto : max(free_upto, prefix_len)])
                 free_upto = max(free_upto, L)
             # Donate the live slot (final full-sequence state). The live state is at cached_len;
@@ -748,6 +778,7 @@ class CacheManager:
             insert_len = align_down(req.cached_len, self.page_size)
             keep_live = False
             if insert_len == req.cached_len and insert_len > 0:
+                self.linear_state_pool.materialize(req)
                 prefix_len, mamba_exist = self.prefix_cache.insert(
                     req.input_ids[:insert_len], page_indices[:insert_len], req.linear_slot_idx,
                     cache_group=req.cache_group)
@@ -763,22 +794,20 @@ class CacheManager:
         # Prefill chunk commit: donate the frozen snapshot at the tracked ×64 boundary.
         L = req.mamba_last_track_seqlen
         if L is None:
-            return  # no ×64 boundary crossed this chunk; req keeps its pages (committed later)
+            self._release_mamba_snapshot(req)
+            return  # no checkpoint was produced; only the live state remains private
         if align_down(L, self.page_size) != L:
             # page_size>1 only: insert would align the key down, attaching a state that encodes
             # L tokens to a SHORTER node -- a future hit would COW-restore an over-advanced
             # state. Skip; the next aligned boundary (or the finish-donate) commits instead.
-            req.mamba_last_track_seqlen = None
+            self._release_mamba_snapshot(req)
             return
-        frozen_idx = 1 - req.mamba_next_track_idx          # the slot the forward just wrote
-        frozen = req.mamba_ping_pong[frozen_idx]
+        frozen = req.mamba_snapshot_slot
         prefix_len, mamba_exist = self.prefix_cache.insert(
             req.input_ids[:L], page_indices[:L], frozen, cache_group=req.cache_group)
         self.unlock(old_handle)
         self._free(page_indices[old_handle.cached_len : prefix_len])
-        # Lock the committed snapshot node FIRST: the replacement-slot alloc below can trigger
-        # evict_mamba (via ensure_mamba_slots), which would otherwise reclaim this still-unlocked
-        # just-donated node -- freeing its KV pages under the still-decoding request.
+        # The request's prefix must remain protected after its private snapshot is donated.
         m = self.prefix_cache.match_prefix(req.input_ids[:L], cache_group=req.cache_group)
         # Same re-point as the generic path: the dedup free above returned this request's own
         # pages for [old_handle.cached_len, prefix_len) while its row still named them.
@@ -787,12 +816,7 @@ class CacheManager:
                 m.kv_indices[old_handle.cached_len : prefix_len])
         req.cache_handle = HybridCacheHandle(m.cached_len, m.node, m.kv_indices)
         self.lock(req.cache_handle)
-        if not mamba_exist:                                # tree took `frozen`; replace it
-            self.ensure_mamba_slots(1)
-            pp = list(req.mamba_ping_pong)
-            pp[frozen_idx] = pool.alloc(1)[0]
-            req.mamba_ping_pong = tuple(pp)
-        req.mamba_last_track_seqlen = None
+        self._release_mamba_snapshot(req, donated=not mamba_exist)
 
     def _cache_req_swa(self, req: Req, *, finished: bool) -> None:
         """SWA cache_req: commit the request's full KV prefix into the SWARadixCache (node.value =
@@ -887,15 +911,10 @@ class CacheManager:
         return self.page_table[req.table_idx, start:end]
 
     def _free_req_slots(self, req: Req, keep_live: bool = False) -> None:
-        """Return a finished request's GDN pool slots: both ping-pong slots, plus the live slot
-        unless it was donated to the tree. Idempotent -- clears the refs so a re-entry frees
-        nothing (defense-in-depth against the abort/finish double-free, see _free_req_resources)."""
-        slots = list(req.mamba_ping_pong) if req.mamba_ping_pong is not None else []
+        """Return remaining private state; donated public snapshots belong to the cache."""
+        self._release_mamba_snapshot(req)
         if not keep_live and req.linear_slot_idx is not None:
-            slots.append(req.linear_slot_idx)
-        if slots:
-            self.linear_state_pool.free(slots)
-        req.mamba_ping_pong = None
+            self.linear_state_pool.free(req.linear_slot_idx)
         req.linear_slot_idx = None
 
     def check_integrity(self) -> None:

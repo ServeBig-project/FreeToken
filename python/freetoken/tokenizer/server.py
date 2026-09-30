@@ -192,6 +192,7 @@ def tokenize_worker(
                             mamba_slots=m.mamba_slots,
                             num_swa_pages=m.num_swa_pages,
                             error=m.error,
+                            gdn_replayssm=m.gdn_replayssm,
                         )
                     )
             n_control = sum(
@@ -225,6 +226,7 @@ def tokenize_worker(
                         gpu_mem_bytes=msg.gpu_mem_bytes,
                         speculative=msg.speculative,
                         cuda_graph=msg.cuda_graph,
+                        gdn_replayssm=msg.gdn_replayssm,
                     )
                     for msg, reply in zip(detokenize_msg, replies, strict=True)
                 ]

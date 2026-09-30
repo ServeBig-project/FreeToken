@@ -37,8 +37,8 @@ def test_mixed_gdn_routes_and_merges_decode_first(monkeypatch):
 
     calls = []
 
-    def run_decode(self, conv_in, a, b, pool, li, fla, dtype):
-        calls.append(("decode", conv_in.shape[0], fla))
+    def run_decode(self, conv_in, a, b, pool, li, fla, dtype, positions=None):
+        calls.append(("decode", conv_in.shape[0], fla, positions.tolist()))
         return conv_in.new_ones((conv_in.shape[0], 1, 2))
 
     def run_prefill(self, conv_in, a, b, pool, li, fla, dtype):
@@ -49,13 +49,15 @@ def test_mixed_gdn_routes_and_merges_decode_first(monkeypatch):
     op._run_prefill = MethodType(run_prefill, op)
 
     batch = Batch(reqs=[object()] * 5, decode_size=2)
+    batch.positions = torch.arange(5, dtype=torch.int32)
     decode_metadata = object()
     prefill_metadata = object()
     batch.fla_metadata = SimpleNamespace(
         decode=decode_metadata,
         prefill=prefill_metadata,
+        verify=None,
     )
-    pool = SimpleNamespace(local_index=lambda _layer_id: 0)
+    pool = SimpleNamespace(local_index=lambda _layer_id: 0, replay=None)
     monkeypatch.setattr(
         gdn_module,
         "get_global_ctx",
@@ -65,7 +67,7 @@ def test_mixed_gdn_routes_and_merges_decode_first(monkeypatch):
     output = op.forward(torch.zeros(5, 4))
 
     assert calls == [
-        ("decode", 2, decode_metadata),
+        ("decode", 2, decode_metadata, [0, 1]),
         ("prefill", 3, prefill_metadata),
     ]
     torch.testing.assert_close(output[:2], torch.ones(2, 2))

@@ -9,6 +9,9 @@ from freetoken.layers import BaseOP, LinearColParallelMerged
 from freetoken.kernel.triton.fp8_block_linear import Fp8BlockColMerged
 from freetoken.kernel.triton.fp8_pertensor_linear import Fp8PerTensorColMerged
 
+from freetoken.kernel.triton.gdn_replay import (
+    gdn_replay, gdn_replay_advance, gdn_replay_conv, gdn_replay_fold)
+
 from .gdn_kernels import gdn_decode_fla, gdn_prefill_chunk_fla
 from .quant_linear import make_replicated_quant
 
@@ -146,9 +149,11 @@ class Qwen3_5GatedDeltaNet(BaseOP):
 
     def _run_decode(
         self, conv_in: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
-        pool, li: int, fla, dtype: torch.dtype,
+        pool, li: int, fla, dtype: torch.dtype, positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run the fused single-token conv and recurrence for a decode sub-batch."""
+        if fla.rows is not None:
+            return self._run_replay(conv_in, a, b, pool, li, fla, positions)
         mixed = self._conv_decode(conv_in, fla.cache_indices, pool)
         size = mixed.shape[0]
         qf, kf, vf = torch.split(
@@ -162,6 +167,47 @@ class Qwen3_5GatedDeltaNet(BaseOP):
             state_source=pool.recurrent_states[li], indices=fla.cache_indices,
             cu_seqlens=fla.cu_seqlens, scale=self.head_k_dim ** -0.5,
         )
+
+    def _run_replay(self, conv_in, a, b, pool, li: int, fla, positions) -> torch.Tensor:
+        """ReplaySSM: target decode, draft steps and verify windows start from each request's
+        checkpoint plus records. Before its first GDN layer, target decode folds full rings for
+        every layer and advances the checkpoint positions, so no record is overwritten while
+        another layer or head still reads it; draft and verify never fold and use the replay
+        conv window."""
+        replay = pool.replay
+        if not fla.speculative and li == 0:
+            gdn_replay_fold(pool.recurrent_states, replay.u, replay.k, replay.g, replay.start,
+                            fla.rows, fla.cache_indices, fla.cache_indices, positions, 1)
+            gdn_replay_advance(replay.start, replay.stats, fla.rows, positions, 1, replay.ring)
+        if fla.speculative:
+            mixed = gdn_replay_conv(conv_in, self._conv_weight(), replay.window[li],
+                                    fla.cu_seqlens, fla.rows, positions)
+        else:
+            mixed = self._conv_decode(conv_in, fla.cache_indices, pool)
+        return gdn_replay(
+            mixed, a, b, self.A_log, self.dt_bias, pool.recurrent_states[li], replay.u[li],
+            replay.k[li], replay.g[li], replay.start, fla.cu_seqlens, fla.cache_indices,
+            fla.rows, positions, self.head_k_dim ** -0.5,
+        )
+
+    def _run_verify(
+        self, conv_in: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
+        pool, li: int, steps, dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Speculative verify: one single-token recurrence per position, each starting from a
+        copy of the previous position's state, so every intermediate state survives for the
+        commit and the live slot is never touched."""
+        rec, cv = pool.recurrent_states[li], pool.conv_states[li]
+        core_out = None
+        for step in steps:
+            dst = step.path.cache_indices.long()
+            rec.index_copy_(0, dst, rec.index_select(0, step.prev))
+            cv.index_copy_(0, dst, cv.index_select(0, step.prev))
+            out = self._run_decode(conv_in[step.rows], a[step.rows], b[step.rows], pool, li, step.path, dtype)
+            if core_out is None:  # one extra row absorbs the inert requests' writes
+                core_out = out.new_empty((conv_in.shape[0] + 1, *out.shape[1:]))
+            core_out.index_copy_(0, step.write, out)
+        return core_out[:-1]
 
     def _run_prefill(
         self, conv_in: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
@@ -225,21 +271,23 @@ class Qwen3_5GatedDeltaNet(BaseOP):
         z = z.reshape(total, self.num_v_heads, self.head_v_dim)
         li = pool.local_index(self.layer_id)
 
-        if batch.is_decode_only:
+        if fla.verify is not None:
+            core_out = self._run_verify(conv_in, a, b, pool, li, fla.verify, dtype)
+        elif fla.prefill is None:
             assert fla.decode is not None
-            core_out = self._run_decode(conv_in, a, b, pool, li, fla.decode, dtype)
-        elif batch.is_mixed:
-            assert fla.decode is not None and fla.prefill is not None
+            core_out = self._run_decode(conv_in, a, b, pool, li, fla.decode, dtype,
+                                        batch.positions)
+        elif fla.decode is not None:
             split = batch.decode_size
             decode_out = self._run_decode(
-                conv_in[:split], a[:split], b[:split], pool, li, fla.decode, dtype
+                conv_in[:split], a[:split], b[:split], pool, li, fla.decode, dtype,
+                batch.positions[:split],
             )
             prefill_out = self._run_prefill(
                 conv_in[split:], a[split:], b[split:], pool, li, fla.prefill, dtype
             )
             core_out = torch.cat((decode_out, prefill_out), dim=0)
         else:
-            assert fla.prefill is not None
             core_out = self._run_prefill(conv_in, a, b, pool, li, fla.prefill, dtype)
 
         core_out = core_out.reshape(-1, self.head_v_dim)

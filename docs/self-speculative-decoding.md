@@ -1,18 +1,23 @@
-# Self-speculative decoding: first complete serving version
+# Self-speculative decoding
 
 ## Scope
 
-This phase adds self-assisted speculative decoding to FreeToken for the
-Qwen3 MoE architecture, with Qwen3-30B-A3B as the real-model acceptance target,
-on one RTX 4090. Draft and target use the same checkpoint. Drafting activates
-fewer routed experts; target verification retains the checkpoint's original
-routing.
+The shared SD runtime currently has migrations for Qwen3 MoE and Qwen3.5/3.6
+MoE (including Qwen3-30B-A3B and Qwen3.6-35B-A3B). Draft and target use the same
+checkpoint. Drafting activates fewer routed experts; target verification keeps
+the checkpoint's original routing. The component refactor's real-model acceptance
+is tracked separately; the presence of an implementation does not establish a new
+quality or performance result.
 
-The first version includes stochastic sampling, concurrent requests, streaming,
-request termination, and cancellation. It is not a greedy-only demonstration.
-The supported scheduling policy for this phase is `legacy`; unsupported model
-architectures, multi-GPU execution, and other policy combinations must fail at
-startup with a clear explanation when speculation is enabled.
+Support is determined by the configured routing, attention/state and expert
+execution components, not the checkpoint's name. A checkpoint using the migrated
+components reuses the same SD loop. Other model-owned routers or unsupported
+attention/state components fail with a component-specific startup error; this
+migration does not add their SD support.
+
+The interface includes stochastic sampling, concurrent requests, streaming,
+request termination and cancellation. The scheduling policy is `legacy`, on a
+single GPU. Unsupported policy/execution combinations fail at startup.
 
 Enabled speculation supports GPU-resident experts (`--moe-backend fused`) and
 GPU expert execution with CPU weight offload (`--moe-backend offload`). `auto`
@@ -117,3 +122,48 @@ PYTHONPATH=python python -c 'from freetoken.cli import main; main()' serve \
 This uses the real-model acceptance resource limits, not a tuned lab deployment.
 Use an available GPU assigned to the service. Set `--speculative-num-steps 0`
 for ordinary serving with the same checkpoint.
+
+## Gated DeltaNet models
+
+Qwen3.5/3.6 MoE has linear-attention state that must agree with the retained
+computed prefix. Drafting and verification keep temporary states. Only after
+EOS, stop strings and output limits determine the retained output is the matching
+state committed for continuation or prefix reuse. Cancellation discards the
+round's temporary state and keeps the previously committed prefix.
+
+A hybrid-cache request initially owns one private live state. A reusable prefill
+checkpoint or tool-call checkpoint gets a separate private snapshot only when it
+will be produced. Donation transfers that snapshot to the public prefix cache;
+no replacement is reserved. Deduplicated or unused snapshots are freed. If no
+free or evictable slot exists, the optional new checkpoint is skipped while the
+request continues; finishing can still donate its live state. Intermediate
+prefill chunks do not create snapshots that the cache never consumes.
+The configured state-pool byte budget stays unchanged, and draft scratch remains
+separate from immutable public prefix states.
+
+State allocation uses the current round's admitted lengths, including shorter
+calibration rounds and request tails. Drafting uses one mutable working slot per
+active request. Before verification, those slots return to the pool and the actual
+N + 1 verification snapshots are allocated. The temporary peak is therefore
+sum(N_i + 1) across the batch, including one slot for each zero-draft tail; draft
+and verification no longer reserve their slots simultaneously. If capacity is
+short, free and evictable prefix-state slots are considered first, then the draft
+ceiling is shortened. If even one step for the current batch cannot fit, the
+whole batch uses ordinary generation. This does not split batches, enlarge the
+state pool or take memory from experts or KV.
+
+`state_slot_stops` counts whole-batch fallbacks due to state capacity.
+`draft_length_histogram` records actual request-round draft lengths, after all
+resource and cost decisions. The default state budget is not a guarantee that
+full concurrency can draft: protected prefixes also consume it. The existing idle
+cache rebuild can explicitly resize `num_mamba_slots`.
+
+With `--cache-type naive`, fixed live-state slots and the padding sink are
+reserved. The default naive pool has no temporary-state capacity, so SD legally
+falls back to ordinary generation; an explicitly enlarged pool can run SD.
+Rebuild and Graph capture preserve those ownership boundaries.
+
+Draft and verification CUDA Graphs are implemented for the migrated Gated
+DeltaNet models under the same BF16/offload/FlashInfer/page-size-1 conditions.
+Requesting unsupported Graph components fails at startup; explicit
+`--cuda-graph-max-bs 0` remains the way to choose eager execution.

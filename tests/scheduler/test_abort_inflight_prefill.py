@@ -3,7 +3,7 @@
 Under overlap scheduling a batch launches one iteration before _process_last_data drains
 it, and an abort message is processed in between. Freeing the request's resources inside
 the abort handler while its forward is in flight used to corrupt state: the hybrid
-prefill-commit dereferenced the None'd GDN ping-pong slots (TypeError killed the
+prefill-commit dereferenced released GDN snapshot slots (TypeError killed the
 scheduler); plain radix would silently re-read the freed page-table row.
 
 The scheduler now uses the SGLang-style single-owner design: the abort handler frees
@@ -62,7 +62,9 @@ def _setup():
         eos_token_ids=set(),
         toolcall_anchor_id=None,
         config=SimpleNamespace(page_size=1),
-        engine=SimpleNamespace(graph_runner=SimpleNamespace(stats_snapshot=lambda: {})),
+        engine=SimpleNamespace(
+            graph_runner=SimpleNamespace(stats_snapshot=lambda: {}), linear_state_pool=pool,
+        ),
         speculative=None,  # speculative decoding off (the default)
         status_reporter=SimpleNamespace(report_batch=lambda *_, **__: None),
         send_result=sent.extend,
@@ -91,8 +93,7 @@ def _launch_req(pool, cm, tm, prompt, *, cls=Req, track_seqlen=None):
               uid=UID, sampling_params=SamplingParams(max_tokens=4),
               cache_handle=mr.cuda_handle)
     req.linear_slot_idx = pool.alloc(1)[0]
-    req.mamba_ping_pong = tuple(pool.alloc(2))
-    req.mamba_next_track_idx = 1
+    req.mamba_snapshot_slot = pool.alloc(1)[0] if track_seqlen is not None else None
     cm.lock(mr.cuda_handle)
     cm.allocate_paged([req])
     req.complete_one()
@@ -120,14 +121,21 @@ def test_abort_inflight_final_chunk_marks_then_drains():
 
     Scheduler._process_one_msg(stub, AbortBackendMsg(uid=UID))
     assert req.aborted and req.table_idx != -1  # marked, NOT freed under the forward
-    assert req.mamba_ping_pong is not None
+    assert req.mamba_snapshot_slot is not None
     assert req not in dm.running_reqs
     assert UID in stub._pending_abort_acks
     free_after_mark = pool.num_free_slots
+    live = req.linear_slot_idx
 
     Scheduler._process_last_data(stub, stub._last_data)
     assert req.table_idx == -1                  # freed at the drain point
-    assert pool.num_free_slots > free_after_mark
+    assert req.linear_slot_idx is None and req.mamba_snapshot_slot is None
+    assert pool.num_free_slots == free_after_mark  # both states were donated to the tree
+    matched = cm.match_req(SimpleNamespace(
+        input_ids=torch.arange(1, 14, dtype=torch.int32), input_len=13,
+        mm_embeds=None, cache_group="",
+    ))
+    assert matched.cuda_handle.cached_len == 12 and matched.mamba_value == live
     assert req in stub.finished_reqs
     assert sent == []                           # no DetokenizeMsg: abort ack stays terminal
     cm.check_integrity()
@@ -167,11 +175,18 @@ def test_abort_starved_decode_req_frees_immediately():
     # the un-drained batch belongs to some other request's prefill
     stub._last_data = (SimpleNamespace(batch=SimpleNamespace(reqs=[])), None)
     base_free = pool.num_free_slots
+    live = req.linear_slot_idx
 
     Scheduler._process_one_msg(stub, AbortBackendMsg(uid=UID))
     assert not req.aborted
     assert req.table_idx == -1                  # freed immediately, no drain needed
-    assert pool.num_free_slots > base_free
+    assert req.linear_slot_idx is None and req.mamba_snapshot_slot is None
+    assert pool.num_free_slots == base_free  # the completed working state is now public
+    matched = cm.match_req(SimpleNamespace(
+        input_ids=torch.arange(1, 14, dtype=torch.int32), input_len=13,
+        mm_embeds=None, cache_group="",
+    ))
+    assert matched.cuda_handle.cached_len == 12 and matched.mamba_value == live
     assert req not in dm.running_reqs
     cm.check_integrity()
 
@@ -189,7 +204,7 @@ def test_prefix_commit_sentinel_guard():
     aborted = dm.abort_req(UID)
     assert aborted is req
     Scheduler._free_req_resources(stub, aborted)   # freed WITHOUT the aborted mark
-    assert req.table_idx == -1 and req.mamba_ping_pong is None
+    assert req.table_idx == -1 and req.mamba_snapshot_slot is None
     free_after_abort = pool.num_free_slots
 
     Scheduler._process_last_data(stub, _as_last_data(batch))  # pre-guard: TypeError

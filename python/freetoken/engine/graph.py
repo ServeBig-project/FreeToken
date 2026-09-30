@@ -12,6 +12,8 @@ from freetoken.utils import init_logger, mem_GB
 from freetoken.utils.progress import emit_progress
 from tqdm import tqdm
 
+from .model_forward import forward_model
+
 if TYPE_CHECKING:
     from freetoken.attention import BaseAttnBackend
     from freetoken.models import BaseLLMModel
@@ -36,9 +38,12 @@ class GraphCaptureBuffer:
     table_idx: torch.Tensor  # per-request slot id for GatedDeltaNet state gather/scatter
     # Decode GDN query indptr = arange(bs+1); a constant per captured bs, filled once.
     fla_cu_seqlens: torch.Tensor
+    # ReplaySSM record row per decode row (GdnReplay.record_rows); padding rows -1.
+    fla_rows: torch.Tensor | None
 
     @classmethod
-    def init(cls, bs: int, vocab_size: int, device: torch.device) -> GraphCaptureBuffer:
+    def init(cls, bs: int, vocab_size: int, device: torch.device,
+             rows: torch.Tensor | None = None) -> GraphCaptureBuffer:
         return GraphCaptureBuffer(
             input_ids=torch.zeros(bs, dtype=torch.int32, device=device),
             out_loc=torch.zeros(bs, dtype=torch.int32, device=device),
@@ -46,6 +51,7 @@ class GraphCaptureBuffer:
             logits=torch.empty(bs, vocab_size, dtype=torch.float32, device=device),
             table_idx=torch.zeros(bs, dtype=torch.int32, device=device),
             fla_cu_seqlens=torch.arange(bs + 1, dtype=torch.int32, device=device),
+            fla_rows=rows[:bs] if rows is not None else None,
         )
 
     def set_batch(self, batch: Batch) -> None:
@@ -63,6 +69,7 @@ class GraphCaptureBuffer:
             decode=FLAPathMetadata(
                 cu_seqlens=self.fla_cu_seqlens[: bs + 1],
                 cache_indices=self.table_idx[_slice],
+                rows=self.fla_rows[_slice] if self.fla_rows is not None else None,
             )
         )
 
@@ -74,6 +81,8 @@ class GraphCaptureBuffer:
         self.positions[_slice] = batch.positions
         if batch.linear_table_idx is not None:
             self.table_idx[_slice] = batch.linear_table_idx
+        if self.fla_rows is not None:
+            self.fla_rows[_slice] = batch.fla_metadata.decode.rows
 
 
 def _determine_cuda_graph_bs(
@@ -181,7 +190,10 @@ class GraphRunner:
         free_memory = get_free_memory(self.device)
         logger.info_rank0(f"Free GPU memory before capturing CUDA graphs: {mem_GB(free_memory)}")
 
-        self.buffer = GraphCaptureBuffer.init(self.max_graph_bs, vocab_size, self.device)
+        pool = get_global_ctx().linear_state_pool
+        self.buffer = GraphCaptureBuffer.init(
+            self.max_graph_bs, vocab_size, self.device,
+            rows=pool.replay.graph_rows if pool is not None and pool.replay is not None else None)
         # MoE-only rebuild preserves real prefix KV, so capture must write the dummy slot.
         self.buffer.out_loc[:] = get_global_ctx().page_table[self.dummy_req.table_idx, 0]
         self._reset_moe_offload_cache()
@@ -206,11 +218,11 @@ class GraphRunner:
             # gather/scatter touches scratch rather than a request-owned slot.
             self._set_dummy_linear_slots(bs)
             with get_global_ctx().forward_batch(batch):
-                self.buffer.logits[:bs] = model.forward()
+                self.buffer.logits[:bs] = forward_model(model)
                 # Keep the offload cache warmed for capture. Resetting here forces
                 # CUDA graph capture to replay cold-cache expert copies.
                 with torch.cuda.graph(graph, pool=pool, stream=self.stream):
-                    self.buffer.logits[:bs] = model.forward()
+                    self.buffer.logits[:bs] = forward_model(model)
                 self._reset_moe_offload_cache()
             if pool is None:
                 pool = graph.pool()  # reuse cuda graph handle to reduce memory
@@ -357,6 +369,8 @@ class GraphRunner:
 
     def _set_dummy_linear_slots(self, bs: int) -> None:
         self.buffer.table_idx[:bs].fill_(self._dummy_state_slot())
+        if self.buffer.fla_rows is not None:
+            self.buffer.fla_rows[:bs].fill_(-1)
 
     def can_use_cuda_graph(self, batch: Batch) -> bool:
         if batch.draft_experts is not None or batch.is_speculative_verify:

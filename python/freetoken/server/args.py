@@ -258,7 +258,7 @@ def parse_args(
         "--speculative-draft-experts",
         type=_positive_int,
         default=ServerArgs.speculative_draft_experts,
-        help="Routed experts per draft token (Qwen3 MoE, single GPU, legacy scheduling).",
+        help="Routed experts per draft token, up to the target router top-k (single GPU, legacy scheduling).",
     )
 
     parser.add_argument(
@@ -277,6 +277,22 @@ def parse_args(
     parser.add_argument(
         "--speculative-verify-prefetch", action="store_true",
         help="Prefetch predicted verification experts into the shared cache while drafting.",
+    )
+    parser.add_argument(
+        "--enable-gdn-replayssm", action="store_true",
+        help="GatedDeltaNet state as checkpoint + update records for target decode, draft and verify.",
+    )
+    parser.add_argument(
+        "--gdn-replay-buffer-len",
+        type=_positive_int,
+        default=ServerArgs.gdn_replay_buffer_len,
+        help="Update records per active request (power of two, > the SD draft length).",
+    )
+    parser.add_argument(
+        "--gdn-state-budget-bytes",
+        type=_positive_int,
+        default=ServerArgs.gdn_state_budget_bytes,
+        help="Startup bytes for all GDN state storage (default: the replay-off state pool's bytes).",
     )
     parser.add_argument(
         "--max-seq-len-override",

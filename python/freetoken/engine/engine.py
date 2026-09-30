@@ -22,11 +22,12 @@ from freetoken.utils import align_ceil, init_logger, is_sm90_family, is_sm100_fa
 from .config import EngineConfig
 from .graph import GraphRunner, get_free_memory
 from .sample import BatchSamplingArgs, Sampler
+from .model_forward import forward_model
 from freetoken.kvcache import create_kv_pool, resolve_pool_class
 from freetoken.kvcache.base import CacheRebuildRejected
 from freetoken.kvcache.cache_status import _supports_swa_ratio
 from freetoken.kvcache.linear_state_pool import (
-    _linear_pool_min_slots, _linear_pool_num_slots, state_pool_bytes,
+    _linear_pool_min_slots, _linear_pool_num_slots, replay_records, state_pool_bytes,
 )
 
 logger = init_logger(__name__)
@@ -290,6 +291,7 @@ class ForwardOutput(NamedTuple):
     next_tokens_cpu: torch.Tensor
     copy_done_event: torch.cuda.Event
     speculative_ends: list[int] | None = None
+    speculative_state: object | None = None
 
 
 class Engine:
@@ -385,9 +387,11 @@ class Engine:
             self.linear_state_pool = LinearStatePool(
                 group=linear_group,
                 num_slots=_linear_pool_num_slots(config),
+                fixed_slots=(config.max_running_req if config.cache_type != "hybrid_radix" else 0),
                 dtype=self.dtype,
                 device=self.device,
                 tp_size=config.tp_info.size,
+                records=replay_records(config),
             )
             self.ctx.linear_state_pool = self.linear_state_pool
         else:
@@ -437,7 +441,7 @@ class Engine:
             sampling_params=None,  # type: ignore
             cache_handle=None,  # type: ignore
         )
-        # padded/dummy rows index the GDN padding slot (0) so gather/scatter hits scratch.
+        # Dummy rows use the state pool's padding sink, never a live request slot.
         if self.linear_state_pool is not None:
             self.dummy_req.linear_slot_idx = self.linear_state_pool.padding_slot
         self.page_table[self.dummy_req.table_idx].fill_(num_tokens)  # point to dummy page
@@ -965,11 +969,13 @@ class Engine:
         assert torch.cuda.current_stream() == self.stream
         if self.speculative_cost is not None:
             self.speculative_cost.begin_model(batch)
+        if self.linear_state_pool is not None and self.linear_state_pool.replay is not None:
+            self.linear_state_pool.replay.observe(batch)
         with self.ctx.forward_batch(batch):
             if self.graph_runner.can_use_cuda_graph(batch):
                 logits = self.graph_runner.replay(batch)
             else:
-                logits = self.model.forward()
+                logits = forward_model(self.model)
         if self.speculative_cost is not None:
             self.speculative_cost.end_model(batch)
         if self.cpu_moe_executor is not None:
@@ -1001,22 +1007,15 @@ class Engine:
         """Let execution backends own metadata after Scheduler allocates rows."""
         if self.linear_state_pool is not None:
             if batch.is_decode_only:
-                if linear_cache_is_hybrid:
-                    pool = self.linear_state_pool
-                    slots = [
-                        req.linear_slot_idx
-                        if req.linear_slot_idx is not None
-                        else pool.padding_slot
-                        for req in batch.padded_reqs
-                    ]
-                    batch.linear_table_idx = torch.tensor(
-                        slots,
-                        dtype=torch.int32,
-                        device="cpu",
-                        pin_memory=True,
-                    ).to(self.device, non_blocking=True)
-                else:
-                    batch.linear_table_idx = input_mapping[0].to(torch.int32)
+                pool = self.linear_state_pool
+                slots = [
+                    req.linear_slot_idx if req.linear_slot_idx is not None
+                    else pool.padding_slot if linear_cache_is_hybrid else req.table_idx
+                    for req in batch.padded_reqs
+                ]
+                batch.linear_table_idx = torch.tensor(
+                    slots, dtype=torch.int32, device="cpu", pin_memory=True,
+                ).to(self.device, non_blocking=True)
             if batch.fla_metadata is None:
                 from freetoken.attention.linear import build_fla_metadata
 
@@ -1275,7 +1274,7 @@ class Engine:
                 batch.out_loc = dummy_row[:length]
                 self.attn_backend.prepare_metadata(batch)
                 with self.ctx.forward_batch(batch):
-                    self.model.forward()
+                    forward_model(self.model)
         finally:
             dummy_row.fill_(dummy_slot)
             if self.moe_offload_cache is not None:
@@ -1818,7 +1817,7 @@ def _adjust_config(config: EngineConfig):
         # Never fall back silently: eager SD is far slower and would mislead comparisons.
         if not config.speculative_graphs:
             raise ValueError(
-                "SD CUDA Graph requires BF16 Qwen3 MoE experts with --moe-backend offload, "
+                "SD CUDA Graph requires BF16 experts with --moe-backend offload, "
                 "FlashInfer attention, page size 1 and at most 8 draft steps; "
                 "pass --cuda-graph-max-bs 0 to run speculation eagerly"
             )

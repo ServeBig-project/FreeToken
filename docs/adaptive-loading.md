@@ -2,8 +2,8 @@
 
 The three new options are independent and default off:
 `--speculative-adaptive-cost`, `--speculative-draft-load-missing`, and
-`--speculative-verify-prefetch`. The supported target is single-GPU Qwen3 MoE
-BF16 with offload, legacy scheduling, and a draft ceiling of 1–8 tokens.
+`--speculative-verify-prefetch`. The migrated Qwen3 and Qwen3.5/3.6 MoE
+components use single-GPU BF16 offload, legacy scheduling and a draft ceiling of 1–8 tokens.
 They retain full target verification.
 
 ## Drafting with already-cached experts
@@ -47,7 +47,7 @@ separate from `residency_stops`.
 
 `speculative.draft_length_histogram` in `/v1/stats` counts request rounds: index n
 is the number of rounds that actually drafted n candidates. Index 0 includes
-ordinary-generation decisions and rounds limited by output/KV capacity. With a
+ordinary-generation decisions and rounds limited by output, KV or state capacity. With a
 ceiling of 8, the list has 9 entries. It is not an output-token count.
 
 ## Stepwise cost control

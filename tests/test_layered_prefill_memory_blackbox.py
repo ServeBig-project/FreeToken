@@ -240,7 +240,6 @@ def test_subpage_budget_defers_without_leaks_and_preserves_existing_request_stat
     req = manager.schedule_next_batch(8, incremental_window_prefill=True).reqs[0]
     assert isinstance(req, ChunkedReq)
     req.linear_slot_idx = 5
-    req.mamba_ping_pong = (6, 7)
     req.commit_prefill_kv()
     table_idx = req.table_idx
     cache_handle = req.cache_handle
@@ -251,7 +250,7 @@ def test_subpage_budget_defers_without_leaks_and_preserves_existing_request_stat
     assert cache.active_locks == locks
     assert req.cached_len == 8
     assert req.linear_slot_idx == 5
-    assert req.mamba_ping_pong == (6, 7)
+    assert req.mamba_snapshot_slot is None
 
     for budget, end in ((8, 16), (1, 17)):
         req = manager.schedule_next_batch(budget, incremental_window_prefill=True).reqs[0]
@@ -259,7 +258,7 @@ def test_subpage_budget_defers_without_leaks_and_preserves_existing_request_stat
         assert req.table_idx == table_idx
         assert req.cache_handle is cache_handle
         assert req.linear_slot_idx == 5
-        assert req.mamba_ping_pong == (6, 7)
+        assert req.mamba_snapshot_slot is None
         torch.testing.assert_close(req.input_ids[:end], prompt[:end])
         if isinstance(req, ChunkedReq):
             req.commit_prefill_kv()
