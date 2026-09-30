@@ -53,9 +53,10 @@ tests interpret omission as zero and still require an explicit positive
 `cached_tokens` value when an existing prefix must be reused. Default fixtures
 fit the current 1024-token context at prefill chunk size 512; cancellation uses
 512 output tokens.
-The default long input is a token-ID array containing `prefill_chunk_size + 1`
-copies of valid token ID 0. At chunk size 512 this gives 513 input tokens plus
-17 output tokens, independent of tokenizer; actual usage must still exceed 512.
+The default long input repeats `The red boat crosses the calm lake.\n` 72 times.
+CPU measurements with the acceptance environment's public HF tokenizers give
+576 input tokens for Qwen3 and 648 for Qwen3.6; adding 17 output tokens gives
+593 and 665, both below 1024. Actual service prompt usage must still exceed 512.
 Rebuild requests include `num_mamba_slots` only when a GDN pool exists with a
 positive slot count. Idle waiting retries only HTTP 503 with `status="busy"`;
 an explicit parameter/resource error fails immediately.
