@@ -61,6 +61,7 @@ def _reply(request_id, status, **over):
         num_swa_pages=0,
         error=None,
         gdn_replayssm=None,
+        dflash=None,
     )
     base.update(over)
     return SimpleNamespace(**base)
