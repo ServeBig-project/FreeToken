@@ -198,14 +198,31 @@ def test_adjust_config_selects_nowag_experts_for_qwen_offload():
     assert cfg.moe_backend == "offload"
 
 
-def test_adjust_config_rejects_nowag_cpu_or_hybrid():
+@pytest.mark.parametrize("backend", ["cpu", "hybrid"])
+@pytest.mark.parametrize("supported", [False, True])
+def test_adjust_config_requires_nowag_cpu_support(monkeypatch, backend, supported):
     from freetoken.engine.engine import _adjust_config
 
     cfg = _dsv4_adjust_cfg(
-        nowag_expert_path="/data1/dsv4-nowag", moe_backend="hybrid"
+        nowag_expert_path="/data1/dsv4-nowag", moe_backend=backend,
     )
-    with pytest.raises(ValueError, match="only --moe-backend offload"):
+    cfg.model_config.hidden_act = "silu"
+    cfg.model_config.num_experts = 4
+    probes = []
+
+    def supports(hidden_act, weight_format):
+        probes.append((hidden_act, weight_format))
+        return supported
+
+    monkeypatch.setattr("freetoken.moe.cpu_executor.compiled_extension_supports", supports)
+    if supported:
         _adjust_config(cfg)
+        assert cfg.moe_backend == backend
+        assert cfg.model_config.expert_quant == "nowag"
+    else:
+        with pytest.raises(RuntimeError, match="NoWAG cpu/hybrid.*rebuild"):
+            _adjust_config(cfg)
+    assert probes == [("silu", "nowag")]
 
 
 def test_adjust_config_resolves_num_tokens_for_dsv4():
