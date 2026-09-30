@@ -1,6 +1,6 @@
 # 公共 SD 基座：当前状态
 
-Qwen3 MoE 与 Qwen3.6-35B-A3B 使用公共SD流程。2026-09-29 已按[实现协议](replayssm-implementation-protocol.md)实现 GDN ReplaySSM（`--enable-gdn-replayssm`，默认关闭）。**独立黑盒验收尚未完成，不能称为达到可交付标准。**
+Qwen3 MoE 与 Qwen3.6-35B-A3B 使用公共SD流程。2026-09-29 已按[实现协议](replayssm-implementation-protocol.md)实现 GDN ReplaySSM（`--enable-gdn-replayssm`，默认关闭）。**独立数值验收已通过；服务验收只完成了Replay关闭的AR一臂，按用户决定不再继续，不能称为达到完整的可交付标准。**
 
 ## 当前实现
 
@@ -32,7 +32,7 @@ GPU2（4090），Qwen3.6 BF16，9 GiB专家池，GDN预算6245744640字节，Gra
 
 ## 仍未解决的事项
 
-- 独立黑盒：数值验收（针对改为GPU游标之前的入口）与服务／性能验收正在由独立agent执行，结果未出。
+- 独立黑盒：数值验收在`f184217`上24项全过（含环满场景重复1600次0错）。服务验收在`eaf3255`上只完成Qwen3.6 Replay关闭的AR（9项全过），Replay开启的AR／SD、成对性能、Qwen3回归、naive／layered均未由独立agent覆盖（agent因等待外部GPU占用被中止，按用户决定不再继续）；该agent未提交的测试草稿归档在`/data2/servebig-envs/replayssm_abandoned_blackbox_drafts_20260929/`，原始证据在`/data2/servebig-envs/replayssm_blackbox_service_20260929b/`。
 - 工具调用位置跨SD窗口的导出已实现，未经实际工具输出触发验证。
 - joint／layered-pipeline驻留波次未验证，其解码不计入`ar_tokens`；Qwen3（无GDN）回归本轮未运行。
 - 此前flush／导出计时中的数百毫秒异常来自合并kernel在服务中首次编译；现已在启动时编译，并取消按条目数的整数特化。
