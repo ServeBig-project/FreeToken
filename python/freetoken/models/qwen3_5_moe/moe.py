@@ -65,7 +65,6 @@ class Qwen3_5MoE(BaseOP):
     """
 
     def __init__(self, config: ModelConfig, layer_id: int | None = None):
-        self.layer_id = layer_id
         weight_format = (
             "fp8_block" if getattr(config, "expert_quant", "none") == "fp8_block" else "bf16"
         )
