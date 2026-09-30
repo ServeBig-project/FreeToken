@@ -1,0 +1,4565 @@
+{
+ "env": {
+  "worktree_head": "0003e20664517ae7d0dedc88d2117ee29ff86037",
+  "operator_file": "/tmp/claude-1003/-home-nengneng-AIPrometheus-servebig-servebig-project/2018a061-54d4-45e7-b903-6ee598221638/scratchpad/head2/python/freetoken/kernel/triton/gdn_replay.py",
+  "operator_file_blob": "3a2f8200dd4219d209c4556e342c8d52f878ebb1",
+  "torch": "2.11.0+cu130",
+  "gpu": "NVIDIA GeForce RTX 4090"
+ },
+ "tests": {
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_conv_numeric.py::test_conv_matches_fp64[12-w_bf16]": {
+   "outcome": "passed",
+   "failure": null,
+   "peak_allocated_bytes": 17530880,
+   "summary": {
+    "conv_out": {
+     "count": 180,
+     "max_tol_ratio": 0.9910430357040766,
+     "max_abs": 0.014353558211556816,
+     "max_rel": 0.0038906906846389684,
+     "max_rel_rms": 0.0017633076234727088,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "negative_control": {
+     "count": 2,
+     "max_tol_ratio": 148153.09918623389,
+     "min_tol_ratio": 126897.40866879445,
+     "names": [
+      "output one position off",
+      "taps reversed"
+     ]
+    }
+   },
+   "extra": {}
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_conv_numeric.py::test_conv_matches_fp64[12-w_fp32]": {
+   "outcome": "passed",
+   "failure": null,
+   "peak_allocated_bytes": 17596416,
+   "summary": {
+    "conv_out": {
+     "count": 180,
+     "max_tol_ratio": 0.9910471245778706,
+     "max_abs": 0.014889572952413666,
+     "max_rel": 0.0038906082405278522,
+     "max_rel_rms": 0.001756506215584666,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "negative_control": {
+     "count": 2,
+     "max_tol_ratio": 149239.4812342663,
+     "min_tol_ratio": 133751.6660089632,
+     "names": [
+      "output one position off",
+      "taps reversed"
+     ]
+    }
+   },
+   "extra": {}
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_conv_numeric.py::test_conv_matches_fp64[16-w_bf16]": {
+   "outcome": "passed",
+   "failure": null,
+   "peak_allocated_bytes": 17907712,
+   "summary": {
+    "conv_out": {
+     "count": 180,
+     "max_tol_ratio": 0.9905023342104317,
+     "max_abs": 0.015039535747391142,
+     "max_rel": 0.0038906906846389684,
+     "max_rel_rms": 0.0017539635496225973,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "negative_control": {
+     "count": 2,
+     "max_tol_ratio": 175002.88476889255,
+     "min_tol_ratio": 100769.30744400201,
+     "names": [
+      "output one position off",
+      "taps reversed"
+     ]
+    }
+   },
+   "extra": {}
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_conv_numeric.py::test_conv_matches_fp64[16-w_fp32]": {
+   "outcome": "passed",
+   "failure": null,
+   "peak_allocated_bytes": 17973248,
+   "summary": {
+    "conv_out": {
+     "count": 180,
+     "max_tol_ratio": 0.9910906394315756,
+     "max_abs": 0.015376825374061376,
+     "max_rel": 0.0038908429419457274,
+     "max_rel_rms": 0.0017448926687606773,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "negative_control": {
+     "count": 2,
+     "max_tol_ratio": 187397.50125673536,
+     "min_tol_ratio": 106991.56497972933,
+     "names": [
+      "output one position off",
+      "taps reversed"
+     ]
+    }
+   },
+   "extra": {}
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py::test_ar_and_windows_follow_fp64_recurrence[16]": {
+   "outcome": "failed",
+   "failure": "R = 16\nlog = [{'kind': 'out', 'tag': 'ar', 'layer': 0, 'name': 'ar', ...}, {'kind': 'out_vs_ideal', 'tag': 'ar', 'layer': 0, 'name'...'rec_g', 'tag': 'ar', 'layer': 0, 'name': 'ar', ...}, {'kind': 'out', 'tag': 'ar', 'layer': 0, 'name': 'ar', ...}, ...]\n\n    @pytest.mark.parametrize(\"R\", [16, 64])\n    def test_ar_and_windows_follow_fp64_recurrence(R, log):\n        \"\"\"Detects: wrong gating, normalisation, scale or GQA head mapping; a wrong in-window\n        recurrence; wrong record values or ring positions; the fold=True write-back or advance at the\n        wrong position; T=1 and T=2..9 disagreeing on one trajectory; a fresh request (zero state,\n        position 0) or large positions mishandled.\"\"\"\n        w = World(log, L=1, slots=4, rows=4, R=R, seed=100 + R)\n        w.warm_slot(0)\n        w.copy_slot(0, 1)\n        w.copy_slot(0, 2)  # slot 3 stays zero: a fresh request\n        n = 3 * R + 11\n        X = w.x(n)\n        p0 = 2 * R - 5  # windows cross the ring end early\n        runs = [(Seq(0, 0, p0, \"ar\"), [1], ar_step), (Seq(1, 1, 200001, \"win2-9\"), list(range(2, 10)), window_step),\n                (Seq(2, 2, p0, \"win9-fold\"), [9], ar_step), (Seq(3, 3, 0, \"fresh\"), list(range(1, 10)), window_step)]\n        for s, cycle, step in runs:\n            w.assign(s.m, s.p)\n            t = i = 0\n            while t < n:\n                T = min(cycle[i % len(cycle)], n - t)\n                step(w, s, [tuple(c[t: t + T] for c in X)], T)\n                t, i = t + T, i + 1\n        assert w.expect_stats[0] >= 4 * 2, \"trajectory never flushed as planned\"\n>       assert_within_tolerance(log)\n\nblackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py:60: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nlog = [{'kind': 'out', 'tag': 'ar', 'layer': 0, 'name': 'ar', ...}, {'kind': 'out_vs_ideal', 'tag': 'ar', 'layer': 0, 'name'...'rec_g', 'tag': 'ar', 'layer': 0, 'name': 'ar', ...}, {'kind': 'out', 'tag': 'ar', 'layer': 0, 'name': 'ar', ...}, ...]\n\n    def assert_within_tolerance(log):\n        bad = {}\n        for e in log:\n            if e[\"kind\"] != \"negative_control\" and e.get(\"tol_ratio\", 0.0) > 1.0:\n                worst = bad.setdefault(e[\"kind\"], [0, e])\n                worst[0] += 1\n                if e[\"tol_ratio\"] > worst[1][\"tol_ratio\"]:\n                    worst[1] = e\n>       assert not bad, \"outside tolerance: \" + \"; \".join(\n               ^^^^^^^\n            f\"{kind}: {n} checks, worst {e}\" for kind, (n, e) in bad.items())\nE       AssertionError: outside tolerance: replay_fold_state: 6 checks, worst {'kind': 'replay_fold_state', 'tag': 'win9-fold', 'layer': 0, 'name': 'win9-fold', 'step': 9, 'phase': 'ar', 'T': 9, 'hist': 9, 'fold': True, 'tol_ratio': 8.156719616261825, 'max_abs': 0.00017398595809936523, 'max_rel': 0.000244140625, 'rel_rms': 2.9602087945202894e-05}; fold_state: 7 checks, worst {'kind': 'fold_state', 'tag': 'prefold', 'layer': 0, 'src': 3, 'dst': 3, 'b': 15, 'end': 28, 'width': 8, 'tol_ratio': 9.972485002002292, 'max_abs': 7.194280624389648e-05, 'max_rel': 0.000244140625, 'rel_rms': 1.08864485898626e-05}\n\nblackbox_tests/gdn_replayssm_numeric/gdn_numeric_ref.py:153: AssertionError",
+   "peak_allocated_bytes": 92847616,
+   "summary": {
+    "out": {
+     "count": 93,
+     "max_tol_ratio": 0.9677366055102099,
+     "max_abs": 0.00042307612272771133,
+     "max_rel": 0.003888434770294505,
+     "max_rel_rms": 0.0017708731102727385,
+     "max_excess_over_terms": 1.7095062133283006e-07,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "out_vs_ideal": {
+     "count": 93,
+     "max_tol_ratio": 0.18511564556306706,
+     "max_abs": 0.00042854317236634687,
+     "max_rel_rms": 0.002892431961922923,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_u": {
+     "count": 93,
+     "max_tol_ratio": 0.9724772606805245,
+     "max_abs": 0.007798768072085682,
+     "max_rel": 0.0038849743274116983,
+     "max_rel_rms": 0.0017216442022369009,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_k": {
+     "count": 93,
+     "max_tol_ratio": 0.9519950283168256,
+     "max_abs": 0.000971431644629317,
+     "max_rel": 0.003879815518433603,
+     "max_rel_rms": 0.0017208898602125316,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_g": {
+     "count": 93,
+     "max_tol_ratio": 0.05810229458990854,
+     "max_abs": 3.575027483293525e-05,
+     "max_rel": 2.169775189468982e-07,
+     "max_rel_rms": 1.4256739779355117e-07,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "replay_fold_state": {
+     "count": 8,
+     "max_tol_ratio": 8.156719616261825,
+     "max_abs": 0.00017398595809936523,
+     "max_rel": 0.000244140625,
+     "max_rel_rms": 2.9602087945202894e-05,
+     "violations": 6,
+     "worst_violations": [
+      {
+       "kind": "replay_fold_state",
+       "tag": "win9-fold",
+       "layer": 0,
+       "name": "win9-fold",
+       "step": 9,
+       "phase": "ar",
+       "T": 9,
+       "hist": 9,
+       "fold": true,
+       "tol_ratio": 8.156719616261825,
+       "max_abs": 0.00017398595809936523,
+       "max_rel": 0.000244140625,
+       "rel_rms": 2.9602087945202894e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "win9-fold",
+       "layer": 0,
+       "name": "win9-fold",
+       "step": 27,
+       "phase": "ar",
+       "T": 9,
+       "hist": 9,
+       "fold": true,
+       "tol_ratio": 7.6034573897246025,
+       "max_abs": 6.264448165893555e-05,
+       "max_rel": 0.000244140625,
+       "rel_rms": 1.032738079358087e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "ar",
+       "layer": 0,
+       "name": "ar",
+       "step": 48,
+       "phase": "ar",
+       "T": 1,
+       "hist": 16,
+       "fold": true,
+       "tol_ratio": 4.5596315250962185,
+       "max_abs": 2.0235776901245117e-05,
+       "max_rel": 6.110741163537967e-05,
+       "rel_rms": 3.934436996622998e-06
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "ar",
+       "layer": 0,
+       "name": "ar",
+       "step": 32,
+       "phase": "ar",
+       "T": 1,
+       "hist": 16,
+       "fold": true,
+       "tol_ratio": 4.4751490990554,
+       "max_abs": 5.7250261306762695e-05,
+       "max_rel": 0.0001221590909090909,
+       "rel_rms": 7.748587292291138e-06
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "ar",
+       "layer": 0,
+       "name": "ar",
+       "step": 16,
+       "phase": "ar",
+       "T": 1,
+       "hist": 16,
+       "fold": true,
+       "tol_ratio": 2.097717115549936,
+       "max_abs": 1.0639429092407227e-05,
+       "max_rel": 6.106175108932462e-05,
+       "rel_rms": 1.9751757070444483e-06
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "win9-fold",
+       "layer": 0,
+       "name": "win9-fold",
+       "step": 36,
+       "phase": "ar",
+       "T": 9,
+       "hist": 9,
+       "fold": true,
+       "tol_ratio": 1.7741143438980693,
+       "max_abs": 3.457069396972656e-05,
+       "max_rel": 6.103515625e-05,
+       "rel_rms": 6.619643304912182e-06
+      }
+     ]
+    },
+    "replay_fold_state_vs_ideal": {
+     "count": 8,
+     "max_tol_ratio": 0.1429040410984754,
+     "max_abs": 0.004179878407829437,
+     "max_rel_rms": 0.002232875642163678,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "fold_ran": {
+     "count": 27,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "fold_state": {
+     "count": 8,
+     "max_tol_ratio": 9.972485002002292,
+     "max_abs": 7.799267768859863e-05,
+     "max_rel": 0.000244140625,
+     "max_rel_rms": 1.5257987230503148e-05,
+     "violations": 7,
+     "worst_violations": [
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 0,
+       "src": 3,
+       "dst": 3,
+       "b": 15,
+       "end": 28,
+       "width": 8,
+       "tol_ratio": 9.972485002002292,
+       "max_abs": 7.194280624389648e-05,
+       "max_rel": 0.000244140625,
+       "rel_rms": 1.08864485898626e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 0,
+       "src": 1,
+       "dst": 1,
+       "b": 200001,
+       "end": 200015,
+       "width": 6,
+       "tol_ratio": 7.230874258085972,
+       "max_abs": 7.799267768859863e-05,
+       "max_rel": 0.00024408730754531556,
+       "rel_rms": 1.5257987230503148e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 0,
+       "src": 3,
+       "dst": 3,
+       "b": 28,
+       "end": 36,
+       "width": 9,
+       "tol_ratio": 2.8072520976886017,
+       "max_abs": 3.457069396972656e-05,
+       "max_rel": 6.103515625e-05,
+       "rel_rms": 7.728170695795792e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 0,
+       "src": 3,
+       "dst": 3,
+       "b": 0,
+       "end": 15,
+       "width": 6,
+       "tol_ratio": 2.2023961707769835,
+       "max_abs": 3.528594970703125e-05,
+       "max_rel": 6.112297661870503e-05,
+       "rel_rms": 1.0033159958040991e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 0,
+       "src": 1,
+       "dst": 1,
+       "b": 200015,
+       "end": 200028,
+       "width": 8,
+       "tol_ratio": 1.828370714807225,
+       "max_abs": 2.6613473892211914e-05,
+       "max_rel": 6.111804691036668e-05,
+       "rel_rms": 4.658618976123185e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 0,
+       "src": 1,
+       "dst": 1,
+       "b": 200028,
+       "end": 200036,
+       "width": 9,
+       "tol_ratio": 1.6008903557753948,
+       "max_abs": 2.3871660232543945e-05,
+       "max_rel": 6.103515625e-05,
+       "rel_rms": 4.523628740641465e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 0,
+       "src": 3,
+       "dst": 3,
+       "b": 36,
+       "end": 51,
+       "width": 4,
+       "tol_ratio": 1.0787319442924779,
+       "max_abs": 1.6689300537109375e-05,
+       "max_rel": 3.0517578125338366e-05,
+       "rel_rms": 2.3747144236702134e-06
+      }
+     ]
+    },
+    "fold_state_vs_ideal": {
+     "count": 8,
+     "max_tol_ratio": 0.1528730107318435,
+     "max_abs": 0.004273843275300893,
+     "max_rel_rms": 0.0023886407926850548,
+     "violations": 0,
+     "worst_violations": []
+    }
+   },
+   "extra": {}
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py::test_ar_and_windows_follow_fp64_recurrence[64]": {
+   "outcome": "failed",
+   "failure": "R = 64\nlog = [{'kind': 'out', 'tag': 'ar', 'layer': 0, 'name': 'ar', ...}, {'kind': 'out_vs_ideal', 'tag': 'ar', 'layer': 0, 'name'...'rec_g', 'tag': 'ar', 'layer': 0, 'name': 'ar', ...}, {'kind': 'out', 'tag': 'ar', 'layer': 0, 'name': 'ar', ...}, ...]\n\n    @pytest.mark.parametrize(\"R\", [16, 64])\n    def test_ar_and_windows_follow_fp64_recurrence(R, log):\n        \"\"\"Detects: wrong gating, normalisation, scale or GQA head mapping; a wrong in-window\n        recurrence; wrong record values or ring positions; the fold=True write-back or advance at the\n        wrong position; T=1 and T=2..9 disagreeing on one trajectory; a fresh request (zero state,\n        position 0) or large positions mishandled.\"\"\"\n        w = World(log, L=1, slots=4, rows=4, R=R, seed=100 + R)\n        w.warm_slot(0)\n        w.copy_slot(0, 1)\n        w.copy_slot(0, 2)  # slot 3 stays zero: a fresh request\n        n = 3 * R + 11\n        X = w.x(n)\n        p0 = 2 * R - 5  # windows cross the ring end early\n        runs = [(Seq(0, 0, p0, \"ar\"), [1], ar_step), (Seq(1, 1, 200001, \"win2-9\"), list(range(2, 10)), window_step),\n                (Seq(2, 2, p0, \"win9-fold\"), [9], ar_step), (Seq(3, 3, 0, \"fresh\"), list(range(1, 10)), window_step)]\n        for s, cycle, step in runs:\n            w.assign(s.m, s.p)\n            t = i = 0\n            while t < n:\n                T = min(cycle[i % len(cycle)], n - t)\n                step(w, s, [tuple(c[t: t + T] for c in X)], T)\n                t, i = t + T, i + 1\n        assert w.expect_stats[0] >= 4 * 2, \"trajectory never flushed as planned\"\n>       assert_within_tolerance(log)\n\nblackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py:60: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nlog = [{'kind': 'out', 'tag': 'ar', 'layer': 0, 'name': 'ar', ...}, {'kind': 'out_vs_ideal', 'tag': 'ar', 'layer': 0, 'name'...'rec_g', 'tag': 'ar', 'layer': 0, 'name': 'ar', ...}, {'kind': 'out', 'tag': 'ar', 'layer': 0, 'name': 'ar', ...}, ...]\n\n    def assert_within_tolerance(log):\n        bad = {}\n        for e in log:\n            if e[\"kind\"] != \"negative_control\" and e.get(\"tol_ratio\", 0.0) > 1.0:\n                worst = bad.setdefault(e[\"kind\"], [0, e])\n                worst[0] += 1\n                if e[\"tol_ratio\"] > worst[1][\"tol_ratio\"]:\n                    worst[1] = e\n>       assert not bad, \"outside tolerance: \" + \"; \".join(\n               ^^^^^^^\n            f\"{kind}: {n} checks, worst {e}\" for kind, (n, e) in bad.items())\nE       AssertionError: outside tolerance: replay_fold_state: 5 checks, worst {'kind': 'replay_fold_state', 'tag': 'ar', 'layer': 0, 'name': 'ar', 'step': 128, 'phase': 'ar', 'T': 1, 'hist': 64, 'fold': True, 'tol_ratio': 13.926025856533473, 'max_abs': 5.717575550079346e-05, 'max_rel': 9.147508678975914e-06, 'rel_rms': 7.997161731630746e-06}; out: 1 checks, worst {'kind': 'out', 'tag': 'ar', 'layer': 0, 'name': 'ar', 'step': 192, 'phase': 'ar', 'T': 1, 'hist': 64, 'fold': True, 'tol_ratio': 1.0430156887890194, 'max_abs': 0.000243455832761183, 'max_rel': 0.0038063694968860657, 'rel_rms': 0.0016524286338700303, 'excess_over_terms': 1.5964964368061782e-08, 'worst_head_y_rms_over_terms_rms': 3.844488557161737e-05}; fold_state: 5 checks, worst {'kind': 'fold_state', 'tag': 'prefold', 'layer': 0, 'src': 3, 'dst': 3, 'b': 0, 'end': 60, 'width': 6, 'tol_ratio': 16.150507305842904, 'max_abs': 0.0001538097858428955, 'max_rel': 0.0004885405052033556, 'rel_rms': 2.5240845350863507e-05}\n\nblackbox_tests/gdn_replayssm_numeric/gdn_numeric_ref.py:153: AssertionError",
+   "peak_allocated_bytes": 157365248,
+   "summary": {
+    "out": {
+     "count": 307,
+     "max_tol_ratio": 1.0430156887890194,
+     "max_abs": 0.00048779117800523686,
+     "max_rel": 0.0038909621165568627,
+     "max_rel_rms": 0.0017604263782922134,
+     "max_excess_over_terms": 5.263864077548669e-06,
+     "violations": 1,
+     "worst_violations": [
+      {
+       "kind": "out",
+       "tag": "ar",
+       "layer": 0,
+       "name": "ar",
+       "step": 192,
+       "phase": "ar",
+       "T": 1,
+       "hist": 64,
+       "fold": true,
+       "tol_ratio": 1.0430156887890194,
+       "max_abs": 0.000243455832761183,
+       "max_rel": 0.0038063694968860657,
+       "rel_rms": 0.0016524286338700303,
+       "excess_over_terms": 1.5964964368061782e-08,
+       "worst_head_y_rms_over_terms_rms": 3.844488557161737e-05
+      }
+     ]
+    },
+    "out_vs_ideal": {
+     "count": 307,
+     "max_tol_ratio": 0.209888691402223,
+     "max_abs": 0.0006941519297271048,
+     "max_rel_rms": 0.0032795108031597343,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_u": {
+     "count": 307,
+     "max_tol_ratio": 0.9741816601126351,
+     "max_abs": 0.007812702594399479,
+     "max_rel": 0.0038897488236067364,
+     "max_rel_rms": 0.0017341458840248174,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_k": {
+     "count": 307,
+     "max_tol_ratio": 0.9694790141378387,
+     "max_abs": 0.0009764727947995655,
+     "max_rel": 0.003889889505640309,
+     "max_rel_rms": 0.0017479415492557843,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_g": {
+     "count": 307,
+     "max_tol_ratio": 0.0585255240675584,
+     "max_abs": 3.3942102106720995e-05,
+     "max_rel": 2.5488404283219173e-07,
+     "max_rel_rms": 1.8229651841527387e-07,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "replay_fold_state": {
+     "count": 6,
+     "max_tol_ratio": 13.926025856533473,
+     "max_abs": 0.00013914704322814941,
+     "max_rel": 0.0004883702387461272,
+     "max_rel_rms": 2.4167107999541155e-05,
+     "violations": 5,
+     "worst_violations": [
+      {
+       "kind": "replay_fold_state",
+       "tag": "ar",
+       "layer": 0,
+       "name": "ar",
+       "step": 128,
+       "phase": "ar",
+       "T": 1,
+       "hist": 64,
+       "fold": true,
+       "tol_ratio": 13.926025856533473,
+       "max_abs": 5.717575550079346e-05,
+       "max_rel": 9.147508678975914e-06,
+       "rel_rms": 7.997161731630746e-06
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "win9-fold",
+       "layer": 0,
+       "name": "win9-fold",
+       "step": 126,
+       "phase": "ar",
+       "T": 9,
+       "hist": 63,
+       "fold": true,
+       "tol_ratio": 11.77204420929192,
+       "max_abs": 0.00013914704322814941,
+       "max_rel": 0.0004883702387461272,
+       "rel_rms": 2.4167107999541155e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "win9-fold",
+       "layer": 0,
+       "name": "win9-fold",
+       "step": 63,
+       "phase": "ar",
+       "T": 9,
+       "hist": 63,
+       "fold": true,
+       "tol_ratio": 3.6864929540763773,
+       "max_abs": 4.07099723815918e-05,
+       "max_rel": 0.0001220703125,
+       "rel_rms": 6.310420125981008e-06
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "ar",
+       "layer": 0,
+       "name": "ar",
+       "step": 192,
+       "phase": "ar",
+       "T": 1,
+       "hist": 64,
+       "fold": true,
+       "tol_ratio": 3.1921220714109606,
+       "max_abs": 1.5050172805786133e-05,
+       "max_rel": 1.5269120075924605e-05,
+       "rel_rms": 2.336055201818681e-06
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "win9-fold",
+       "layer": 0,
+       "name": "win9-fold",
+       "step": 189,
+       "phase": "ar",
+       "T": 9,
+       "hist": 63,
+       "fold": true,
+       "tol_ratio": 1.3801770894723218,
+       "max_abs": 2.0673324823528016e-05,
+       "max_rel": 6.106434772569544e-05,
+       "rel_rms": 3.742262815617776e-06
+      }
+     ]
+    },
+    "replay_fold_state_vs_ideal": {
+     "count": 6,
+     "max_tol_ratio": 0.1582568267814192,
+     "max_abs": 0.005767290298825778,
+     "max_rel_rms": 0.002472762918459675,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "fold_ran": {
+     "count": 81,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "fold_state": {
+     "count": 6,
+     "max_tol_ratio": 16.150507305842904,
+     "max_abs": 0.0001538097858428955,
+     "max_rel": 0.0004885405052033556,
+     "max_rel_rms": 2.5240845350863507e-05,
+     "violations": 5,
+     "worst_violations": [
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 0,
+       "src": 3,
+       "dst": 3,
+       "b": 0,
+       "end": 60,
+       "width": 6,
+       "tol_ratio": 16.150507305842904,
+       "max_abs": 0.0001538097858428955,
+       "max_rel": 0.0004885405052033556,
+       "rel_rms": 2.5240845350863507e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 0,
+       "src": 3,
+       "dst": 3,
+       "b": 118,
+       "end": 181,
+       "width": 2,
+       "tol_ratio": 14.516564778765,
+       "max_abs": 0.00010827183092393389,
+       "max_rel": 0.00024407529852138349,
+       "rel_rms": 1.6582047295322963e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 0,
+       "src": 3,
+       "dst": 3,
+       "b": 60,
+       "end": 118,
+       "width": 8,
+       "tol_ratio": 13.548893977970174,
+       "max_abs": 0.00014039874076843262,
+       "max_rel": 0.0004883780187423912,
+       "rel_rms": 2.3513959120373838e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 0,
+       "src": 1,
+       "dst": 1,
+       "b": 200065,
+       "end": 200124,
+       "width": 9,
+       "tol_ratio": 11.556895166512588,
+       "max_abs": 9.799003601074219e-05,
+       "max_rel": 0.0004884200056834328,
+       "rel_rms": 2.310974247037239e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 0,
+       "src": 1,
+       "dst": 1,
+       "b": 200124,
+       "end": 200186,
+       "width": 5,
+       "tol_ratio": 1.7805632826205156,
+       "max_abs": 2.1128265814240876e-05,
+       "max_rel": 6.105347805491344e-05,
+       "rel_rms": 2.900814993869781e-06
+      }
+     ]
+    },
+    "fold_state_vs_ideal": {
+     "count": 6,
+     "max_tol_ratio": 0.15929313437373288,
+     "max_abs": 0.0058440983379082975,
+     "max_rel_rms": 0.0024889552245895763,
+     "violations": 0,
+     "worst_violations": []
+    }
+   },
+   "extra": {}
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py::test_verify_ignores_draft_records[16-1]": {
+   "outcome": "failed",
+   "failure": "yer': 0, 'name': 'sd', ...}, ...]\n\n    @pytest.mark.parametrize(\"R,N\", [(16, 1), (16, 4), (16, 8), (64, 8)])\n    def test_verify_ignores_draft_records(R, N, log):\n        \"\"\"Detects: verify reading the discarded draft records at [p, p+N) or anything outside\n        [b, p); the pre-draft fold running (or not) against the rule; states exported at acceptance\n        positions off by one; stale draft records leaking into the continuation or into a request\n        restarted from an exported prefix.\"\"\"\n        w = World(log, L=1, slots=N + 4, rows=2, R=R, seed=200 + 10 * R + N)\n        w.warm_slot(0)\n        w.warm_slot(N + 3)  # an unrelated request's state for the cross-request control\n        s = Seq(0, 0, 3 * R - 2, \"sd\")\n        w.assign(s.m, s.p)\n        # history before drafting: none; the most that needs no fold; one more, so the fold runs\n        for target in (0, R - N - 1, R - N):\n            while s.p - w.b[s.m] < target:\n                T = min(3, target - (s.p - w.b[s.m]))\n                window_step(w, s, w.inputs(T), T, tag=\"history\")\n            ran = w.prefold([(s, N + 1)], tag=f\"prefold-hist{target}\")\n            assert ran == [target > R - N - 1]\n            b, p = w.b[s.m], s.p\n            for i in range(N):  # draft: other inputs, one token per call, chained on draft records\n                w.call([s.spec(w.inputs(1), p=p + i, phase=\"draft\")], tag=f\"draft-hist{target}\")\n            draft_snap = [t.clone() for t in w.snap]\n            X = w.inputs(N + 1)\n            out = w.call([s.spec(X, phase=\"verify\")], tag=f\"verify-hist{target}\")[0][0]\n            assert_rejects(w, out, w.start_ref(0, s.m, s.slot, b, p + 1, snap=draft_snap), X[0], 0,\n                           \"verify also reads the draft record at p\")\n            assert_rejects(w, out, w.start_ref(0, s.m, N + 3, b, p), X[0], 0, \"another request's state\")\n            if p > b:\n                assert_rejects(w, out, w.start_ref(0, s.m, s.slot, b, p - 1), X[0], 0, \"misses record p-1\")\n                assert_rejects(w, out, w.start_ref(0, s.m, s.slot, b + 1, p), X[0], 0,\n                               \"state position b off by one\")\n            # the state after accepting a drafts (+1 target token) for every a, exported in one plan\n            w.fold([(s.slot, 1 + a, s.m, p + a + 1, 0) for a in range(N + 1)], tag=f\"export-hist{target}\")\n            a = N // 2\n            r = Seq(1, 1 + a, p + a + 1, \"restart\")  # row 1 holds stale records from earlier use\n            w.assign(r.m, r.p)\n            window_step(w, r, w.inputs(2), 2, tag=f\"restart-hist{target}\")\n            s.p = p + a + 1\n            window_step(w, s, w.inputs(1), 1, tag=f\"continue-hist{target}\")\n>       assert_within_tolerance(log)\n\nblackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py:102: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nlog = [{'kind': 'fold_ran', 'tag': 'prefold-hist0', 'value': [False]}, {'kind': 'out', 'tag': 'draft-hist0', 'layer': 0, 'na...ft-hist0', 'layer': 0, 'name': 'sd', ...}, {'kind': 'rec_g', 'tag': 'draft-hist0', 'layer': 0, 'name': 'sd', ...}, ...]\n\n    def assert_within_tolerance(log):\n        bad = {}\n        for e in log:\n            if e[\"kind\"] != \"negative_control\" and e.get(\"tol_ratio\", 0.0) > 1.0:\n                worst = bad.setdefault(e[\"kind\"], [0, e])\n                worst[0] += 1\n                if e[\"tol_ratio\"] > worst[1][\"tol_ratio\"]:\n                    worst[1] = e\n>       assert not bad, \"outside tolerance: \" + \"; \".join(\n               ^^^^^^^\n            f\"{kind}: {n} checks, worst {e}\" for kind, (n, e) in bad.items())\nE       AssertionError: outside tolerance: fold_state: 3 checks, worst {'kind': 'fold_state', 'tag': 'prefold-hist15', 'layer': 0, 'src': 0, 'dst': 0, 'b': 46, 'end': 62, 'width': 2, 'tol_ratio': 3.6917436421177525, 'max_abs': 5.036592554075181e-05, 'max_rel': 0.0001220703125, 'rel_rms': 9.388038710685508e-06}\n\nblackbox_tests/gdn_replayssm_numeric/gdn_numeric_ref.py:153: AssertionError",
+   "peak_allocated_bytes": 163925504,
+   "summary": {
+    "fold_ran": {
+     "count": 16,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "out": {
+     "count": 16,
+     "max_tol_ratio": 0.9664084090272291,
+     "max_abs": 0.0002422320534055944,
+     "max_rel": 0.003884821578840538,
+     "max_rel_rms": 0.0017547473952868136,
+     "max_excess_over_terms": 4.091155412091834e-09,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "out_vs_ideal": {
+     "count": 16,
+     "max_tol_ratio": 0.1522566168426159,
+     "max_abs": 0.00028788298033899373,
+     "max_rel_rms": 0.0023790096381658735,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_u": {
+     "count": 16,
+     "max_tol_ratio": 0.9618180166610631,
+     "max_abs": 0.007771720711590824,
+     "max_rel": 0.003883530718424906,
+     "max_rel_rms": 0.0017049892456247376,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_k": {
+     "count": 16,
+     "max_tol_ratio": 0.9564572321063157,
+     "max_abs": 0.0009762533658022599,
+     "max_rel": 0.0038568198912886076,
+     "max_rel_rms": 0.0017008270921638857,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_g": {
+     "count": 16,
+     "max_tol_ratio": 0.056705801318542755,
+     "max_abs": 0.00014452425534727809,
+     "max_rel": 1.895692334875683e-07,
+     "max_rel_rms": 1.1153310733298424e-07,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "negative_control": {
+     "count": 8,
+     "max_tol_ratio": 13641.17317160409,
+     "min_tol_ratio": 1512.2279044118163,
+     "names": [
+      "another request's state",
+      "misses record p-1",
+      "state position b off by one",
+      "verify also reads the draft record at p"
+     ]
+    },
+    "fold_state": {
+     "count": 7,
+     "max_tol_ratio": 3.6917436421177525,
+     "max_abs": 5.036592554075181e-05,
+     "max_rel": 0.0001220703125,
+     "max_rel_rms": 9.388038710685508e-06,
+     "violations": 3,
+     "worst_violations": [
+      {
+       "kind": "fold_state",
+       "tag": "prefold-hist15",
+       "layer": 0,
+       "src": 0,
+       "dst": 0,
+       "b": 46,
+       "end": 62,
+       "width": 2,
+       "tol_ratio": 3.6917436421177525,
+       "max_abs": 5.036592554075181e-05,
+       "max_rel": 0.0001220703125,
+       "rel_rms": 9.388038710685508e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist14",
+       "layer": 0,
+       "src": 0,
+       "dst": 1,
+       "b": 46,
+       "end": 61,
+       "width": 0,
+       "tol_ratio": 2.9853197852482336,
+       "max_abs": 2.4993176518550708e-05,
+       "max_rel": 6.107262760934052e-05,
+       "rel_rms": 4.825144766867162e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist14",
+       "layer": 0,
+       "src": 0,
+       "dst": 2,
+       "b": 46,
+       "end": 62,
+       "width": 0,
+       "tol_ratio": 1.6474468198627727,
+       "max_abs": 1.3145059227559486e-05,
+       "max_rel": 6.169700568816575e-05,
+       "rel_rms": 3.896357098669811e-06
+      }
+     ]
+    },
+    "fold_state_vs_ideal": {
+     "count": 7,
+     "max_tol_ratio": 0.1253173069359378,
+     "max_abs": 0.004237409221743982,
+     "max_rel_rms": 0.001958082920874028,
+     "violations": 0,
+     "worst_violations": []
+    }
+   },
+   "extra": {}
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py::test_verify_ignores_draft_records[16-4]": {
+   "outcome": "failed",
+   "failure": "0, 'name': 'sd', ...}, ...]\n\n    @pytest.mark.parametrize(\"R,N\", [(16, 1), (16, 4), (16, 8), (64, 8)])\n    def test_verify_ignores_draft_records(R, N, log):\n        \"\"\"Detects: verify reading the discarded draft records at [p, p+N) or anything outside\n        [b, p); the pre-draft fold running (or not) against the rule; states exported at acceptance\n        positions off by one; stale draft records leaking into the continuation or into a request\n        restarted from an exported prefix.\"\"\"\n        w = World(log, L=1, slots=N + 4, rows=2, R=R, seed=200 + 10 * R + N)\n        w.warm_slot(0)\n        w.warm_slot(N + 3)  # an unrelated request's state for the cross-request control\n        s = Seq(0, 0, 3 * R - 2, \"sd\")\n        w.assign(s.m, s.p)\n        # history before drafting: none; the most that needs no fold; one more, so the fold runs\n        for target in (0, R - N - 1, R - N):\n            while s.p - w.b[s.m] < target:\n                T = min(3, target - (s.p - w.b[s.m]))\n                window_step(w, s, w.inputs(T), T, tag=\"history\")\n            ran = w.prefold([(s, N + 1)], tag=f\"prefold-hist{target}\")\n            assert ran == [target > R - N - 1]\n            b, p = w.b[s.m], s.p\n            for i in range(N):  # draft: other inputs, one token per call, chained on draft records\n                w.call([s.spec(w.inputs(1), p=p + i, phase=\"draft\")], tag=f\"draft-hist{target}\")\n            draft_snap = [t.clone() for t in w.snap]\n            X = w.inputs(N + 1)\n            out = w.call([s.spec(X, phase=\"verify\")], tag=f\"verify-hist{target}\")[0][0]\n            assert_rejects(w, out, w.start_ref(0, s.m, s.slot, b, p + 1, snap=draft_snap), X[0], 0,\n                           \"verify also reads the draft record at p\")\n            assert_rejects(w, out, w.start_ref(0, s.m, N + 3, b, p), X[0], 0, \"another request's state\")\n            if p > b:\n                assert_rejects(w, out, w.start_ref(0, s.m, s.slot, b, p - 1), X[0], 0, \"misses record p-1\")\n                assert_rejects(w, out, w.start_ref(0, s.m, s.slot, b + 1, p), X[0], 0,\n                               \"state position b off by one\")\n            # the state after accepting a drafts (+1 target token) for every a, exported in one plan\n            w.fold([(s.slot, 1 + a, s.m, p + a + 1, 0) for a in range(N + 1)], tag=f\"export-hist{target}\")\n            a = N // 2\n            r = Seq(1, 1 + a, p + a + 1, \"restart\")  # row 1 holds stale records from earlier use\n            w.assign(r.m, r.p)\n            window_step(w, r, w.inputs(2), 2, tag=f\"restart-hist{target}\")\n            s.p = p + a + 1\n            window_step(w, s, w.inputs(1), 1, tag=f\"continue-hist{target}\")\n>       assert_within_tolerance(log)\n\nblackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py:102: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nlog = [{'kind': 'fold_ran', 'tag': 'prefold-hist0', 'value': [False]}, {'kind': 'out', 'tag': 'draft-hist0', 'layer': 0, 'na...ft-hist0', 'layer': 0, 'name': 'sd', ...}, {'kind': 'rec_g', 'tag': 'draft-hist0', 'layer': 0, 'name': 'sd', ...}, ...]\n\n    def assert_within_tolerance(log):\n        bad = {}\n        for e in log:\n            if e[\"kind\"] != \"negative_control\" and e.get(\"tol_ratio\", 0.0) > 1.0:\n                worst = bad.setdefault(e[\"kind\"], [0, e])\n                worst[0] += 1\n                if e[\"tol_ratio\"] > worst[1][\"tol_ratio\"]:\n                    worst[1] = e\n>       assert not bad, \"outside tolerance: \" + \"; \".join(\n               ^^^^^^^\n            f\"{kind}: {n} checks, worst {e}\" for kind, (n, e) in bad.items())\nE       AssertionError: outside tolerance: fold_state: 5 checks, worst {'kind': 'fold_state', 'tag': 'export-hist11', 'layer': 0, 'src': 0, 'dst': 5, 'b': 46, 'end': 62, 'width': 0, 'tol_ratio': 9.134966558803995, 'max_abs': 7.587671279907227e-05, 'max_rel': 0.00024407150642658966, 'rel_rms': 1.1649055953959487e-05}\n\nblackbox_tests/gdn_replayssm_numeric/gdn_numeric_ref.py:153: AssertionError",
+   "peak_allocated_bytes": 228509184,
+   "summary": {
+    "fold_ran": {
+     "count": 15,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "out": {
+     "count": 24,
+     "max_tol_ratio": 0.9705307920947328,
+     "max_abs": 0.00024310056927474843,
+     "max_rel": 0.0038879025288117404,
+     "max_rel_rms": 0.001694860581146601,
+     "max_excess_over_terms": 3.7635913839985997e-07,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "out_vs_ideal": {
+     "count": 24,
+     "max_tol_ratio": 0.15417634441728328,
+     "max_abs": 0.0003634288095988175,
+     "max_rel_rms": 0.0024090053815200513,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_u": {
+     "count": 24,
+     "max_tol_ratio": 0.9567524990064916,
+     "max_abs": 0.007798396334217195,
+     "max_rel": 0.0038831614656133317,
+     "max_rel_rms": 0.001704081727673891,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_k": {
+     "count": 24,
+     "max_tol_ratio": 0.9670036698805698,
+     "max_abs": 0.0009762742413766401,
+     "max_rel": 0.003887937088475921,
+     "max_rel_rms": 0.0017165421134198006,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_g": {
+     "count": 24,
+     "max_tol_ratio": 0.05838657899574544,
+     "max_abs": 5.801879376576835e-05,
+     "max_rel": 2.4572102217178475e-07,
+     "max_rel_rms": 1.9351609241047011e-07,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "negative_control": {
+     "count": 8,
+     "max_tol_ratio": 13052.90407923499,
+     "min_tol_ratio": 2785.7305845799424,
+     "names": [
+      "another request's state",
+      "misses record p-1",
+      "state position b off by one",
+      "verify also reads the draft record at p"
+     ]
+    },
+    "fold_state": {
+     "count": 16,
+     "max_tol_ratio": 9.134966558803995,
+     "max_abs": 0.00013464689254760742,
+     "max_rel": 0.000244140625,
+     "max_rel_rms": 2.235149166940636e-05,
+     "violations": 5,
+     "worst_violations": [
+      {
+       "kind": "fold_state",
+       "tag": "export-hist11",
+       "layer": 0,
+       "src": 0,
+       "dst": 5,
+       "b": 46,
+       "end": 62,
+       "width": 0,
+       "tol_ratio": 9.134966558803995,
+       "max_abs": 7.587671279907227e-05,
+       "max_rel": 0.00024407150642658966,
+       "rel_rms": 1.1649055953959487e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold-hist12",
+       "layer": 0,
+       "src": 0,
+       "dst": 0,
+       "b": 46,
+       "end": 61,
+       "width": 5,
+       "tol_ratio": 8.352233172492188,
+       "max_abs": 0.00013464689254760742,
+       "max_rel": 0.000244140625,
+       "rel_rms": 2.235149166940636e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist11",
+       "layer": 0,
+       "src": 0,
+       "dst": 2,
+       "b": 46,
+       "end": 59,
+       "width": 0,
+       "tol_ratio": 6.9018900482273455,
+       "max_abs": 0.00010588765144348145,
+       "max_rel": 0.000244140625,
+       "rel_rms": 2.1588170724055184e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist11",
+       "layer": 0,
+       "src": 0,
+       "dst": 1,
+       "b": 46,
+       "end": 58,
+       "width": 0,
+       "tol_ratio": 3.973975290263292,
+       "max_abs": 4.380941390991211e-05,
+       "max_rel": 0.0001220703125,
+       "rel_rms": 7.815844339937535e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist11",
+       "layer": 0,
+       "src": 0,
+       "dst": 3,
+       "b": 46,
+       "end": 60,
+       "width": 0,
+       "tol_ratio": 1.7340359813551898,
+       "max_abs": 7.927417755126953e-06,
+       "max_rel": 6.108539094650206e-05,
+       "rel_rms": 2.085773916703588e-06
+      }
+     ]
+    },
+    "fold_state_vs_ideal": {
+     "count": 16,
+     "max_tol_ratio": 0.12349625535410867,
+     "max_abs": 0.004296869095764266,
+     "max_rel_rms": 0.001929628989907948,
+     "violations": 0,
+     "worst_violations": []
+    }
+   },
+   "extra": {}
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py::test_verify_ignores_draft_records[16-8]": {
+   "outcome": "failed",
+   "failure": "ayer': 0, 'name': 'sd', ...}, ...]\n\n    @pytest.mark.parametrize(\"R,N\", [(16, 1), (16, 4), (16, 8), (64, 8)])\n    def test_verify_ignores_draft_records(R, N, log):\n        \"\"\"Detects: verify reading the discarded draft records at [p, p+N) or anything outside\n        [b, p); the pre-draft fold running (or not) against the rule; states exported at acceptance\n        positions off by one; stale draft records leaking into the continuation or into a request\n        restarted from an exported prefix.\"\"\"\n        w = World(log, L=1, slots=N + 4, rows=2, R=R, seed=200 + 10 * R + N)\n        w.warm_slot(0)\n        w.warm_slot(N + 3)  # an unrelated request's state for the cross-request control\n        s = Seq(0, 0, 3 * R - 2, \"sd\")\n        w.assign(s.m, s.p)\n        # history before drafting: none; the most that needs no fold; one more, so the fold runs\n        for target in (0, R - N - 1, R - N):\n            while s.p - w.b[s.m] < target:\n                T = min(3, target - (s.p - w.b[s.m]))\n                window_step(w, s, w.inputs(T), T, tag=\"history\")\n            ran = w.prefold([(s, N + 1)], tag=f\"prefold-hist{target}\")\n            assert ran == [target > R - N - 1]\n            b, p = w.b[s.m], s.p\n            for i in range(N):  # draft: other inputs, one token per call, chained on draft records\n                w.call([s.spec(w.inputs(1), p=p + i, phase=\"draft\")], tag=f\"draft-hist{target}\")\n            draft_snap = [t.clone() for t in w.snap]\n            X = w.inputs(N + 1)\n            out = w.call([s.spec(X, phase=\"verify\")], tag=f\"verify-hist{target}\")[0][0]\n            assert_rejects(w, out, w.start_ref(0, s.m, s.slot, b, p + 1, snap=draft_snap), X[0], 0,\n                           \"verify also reads the draft record at p\")\n            assert_rejects(w, out, w.start_ref(0, s.m, N + 3, b, p), X[0], 0, \"another request's state\")\n            if p > b:\n                assert_rejects(w, out, w.start_ref(0, s.m, s.slot, b, p - 1), X[0], 0, \"misses record p-1\")\n                assert_rejects(w, out, w.start_ref(0, s.m, s.slot, b + 1, p), X[0], 0,\n                               \"state position b off by one\")\n            # the state after accepting a drafts (+1 target token) for every a, exported in one plan\n            w.fold([(s.slot, 1 + a, s.m, p + a + 1, 0) for a in range(N + 1)], tag=f\"export-hist{target}\")\n            a = N // 2\n            r = Seq(1, 1 + a, p + a + 1, \"restart\")  # row 1 holds stale records from earlier use\n            w.assign(r.m, r.p)\n            window_step(w, r, w.inputs(2), 2, tag=f\"restart-hist{target}\")\n            s.p = p + a + 1\n            window_step(w, s, w.inputs(1), 1, tag=f\"continue-hist{target}\")\n>       assert_within_tolerance(log)\n\nblackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py:102: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nlog = [{'kind': 'fold_ran', 'tag': 'prefold-hist0', 'value': [False]}, {'kind': 'out', 'tag': 'draft-hist0', 'layer': 0, 'na...ft-hist0', 'layer': 0, 'name': 'sd', ...}, {'kind': 'rec_g', 'tag': 'draft-hist0', 'layer': 0, 'name': 'sd', ...}, ...]\n\n    def assert_within_tolerance(log):\n        bad = {}\n        for e in log:\n            if e[\"kind\"] != \"negative_control\" and e.get(\"tol_ratio\", 0.0) > 1.0:\n                worst = bad.setdefault(e[\"kind\"], [0, e])\n                worst[0] += 1\n                if e[\"tol_ratio\"] > worst[1][\"tol_ratio\"]:\n                    worst[1] = e\n>       assert not bad, \"outside tolerance: \" + \"; \".join(\n               ^^^^^^^\n            f\"{kind}: {n} checks, worst {e}\" for kind, (n, e) in bad.items())\nE       AssertionError: outside tolerance: fold_state: 12 checks, worst {'kind': 'fold_state', 'tag': 'export-hist7', 'layer': 0, 'src': 0, 'dst': 7, 'b': 46, 'end': 60, 'width': 0, 'tol_ratio': 2.9295463706156193, 'max_abs': 1.621246337890625e-05, 'max_rel': 6.103515625e-05, 'rel_rms': 2.267954081675033e-06}\n\nblackbox_tests/gdn_replayssm_numeric/gdn_numeric_ref.py:153: AssertionError",
+   "peak_allocated_bytes": 343991808,
+   "summary": {
+    "fold_ran": {
+     "count": 13,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "out": {
+     "count": 34,
+     "max_tol_ratio": 0.9581401688222202,
+     "max_abs": 0.000244129866371956,
+     "max_rel": 0.003865486619685305,
+     "max_rel_rms": 0.0018098842426367068,
+     "max_excess_over_terms": 3.897313593990256e-08,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "out_vs_ideal": {
+     "count": 34,
+     "max_tol_ratio": 0.1603245293556513,
+     "max_abs": 0.0003639020212380384,
+     "max_rel_rms": 0.0025050707711820517,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_u": {
+     "count": 34,
+     "max_tol_ratio": 0.9689300375339365,
+     "max_abs": 0.007801120423567731,
+     "max_rel": 0.0038908880875851096,
+     "max_rel_rms": 0.0017259203471825997,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_k": {
+     "count": 34,
+     "max_tol_ratio": 0.9577313133988216,
+     "max_abs": 0.0009764750749748363,
+     "max_rel": 0.0038875108133132824,
+     "max_rel_rms": 0.0017291573660684469,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_g": {
+     "count": 34,
+     "max_tol_ratio": 0.05800239580693171,
+     "max_abs": 3.294208224247086e-05,
+     "max_rel": 1.8555584744182326e-07,
+     "max_rel_rms": 1.5503511955547965e-07,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "negative_control": {
+     "count": 8,
+     "max_tol_ratio": 16031.763653795015,
+     "min_tol_ratio": 4118.018779773555,
+     "names": [
+      "another request's state",
+      "misses record p-1",
+      "state position b off by one",
+      "verify also reads the draft record at p"
+     ]
+    },
+    "fold_state": {
+     "count": 28,
+     "max_tol_ratio": 2.9295463706156193,
+     "max_abs": 2.5033950805664062e-05,
+     "max_rel": 6.112197724039829e-05,
+     "max_rel_rms": 5.691916875574522e-06,
+     "violations": 12,
+     "worst_violations": [
+      {
+       "kind": "fold_state",
+       "tag": "export-hist7",
+       "layer": 0,
+       "src": 0,
+       "dst": 7,
+       "b": 46,
+       "end": 60,
+       "width": 0,
+       "tol_ratio": 2.9295463706156193,
+       "max_abs": 1.621246337890625e-05,
+       "max_rel": 6.103515625e-05,
+       "rel_rms": 2.267954081675033e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold-hist8",
+       "layer": 0,
+       "src": 0,
+       "dst": 0,
+       "b": 46,
+       "end": 59,
+       "width": 9,
+       "tol_ratio": 2.1583707727092047,
+       "max_abs": 1.2218952178955078e-05,
+       "max_rel": 6.1021114204205585e-05,
+       "rel_rms": 2.5448633835072214e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist7",
+       "layer": 0,
+       "src": 0,
+       "dst": 2,
+       "b": 46,
+       "end": 55,
+       "width": 0,
+       "tol_ratio": 2.0378083712938744,
+       "max_abs": 2.136826515197754e-05,
+       "max_rel": 6.112132352941177e-05,
+       "rel_rms": 3.712746960019336e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist0",
+       "layer": 0,
+       "src": 0,
+       "dst": 9,
+       "b": 46,
+       "end": 55,
+       "width": 0,
+       "tol_ratio": 1.8886098011117565,
+       "max_abs": 2.288818359375e-05,
+       "max_rel": 6.103515625012632e-05,
+       "rel_rms": 5.387341510854285e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist0",
+       "layer": 0,
+       "src": 0,
+       "dst": 7,
+       "b": 46,
+       "end": 53,
+       "width": 0,
+       "tol_ratio": 1.8501778824127895,
+       "max_abs": 1.3440847396850586e-05,
+       "max_rel": 6.112197724039829e-05,
+       "rel_rms": 2.498612862392583e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist8",
+       "layer": 0,
+       "src": 0,
+       "dst": 9,
+       "b": 59,
+       "end": 68,
+       "width": 0,
+       "tol_ratio": 1.8344930769240988,
+       "max_abs": 2.065300941467285e-05,
+       "max_rel": 6.103515625e-05,
+       "rel_rms": 3.942949130808314e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist7",
+       "layer": 0,
+       "src": 0,
+       "dst": 3,
+       "b": 46,
+       "end": 56,
+       "width": 0,
+       "tol_ratio": 1.8111686011867965,
+       "max_abs": 2.041459083557129e-05,
+       "max_rel": 6.103515625e-05,
+       "rel_rms": 4.09753829187248e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist7",
+       "layer": 0,
+       "src": 0,
+       "dst": 8,
+       "b": 46,
+       "end": 61,
+       "width": 0,
+       "tol_ratio": 1.7934847033598862,
+       "max_abs": 2.5033950805664062e-05,
+       "max_rel": 6.103515625e-05,
+       "rel_rms": 4.669659561604883e-06
+      }
+     ]
+    },
+    "fold_state_vs_ideal": {
+     "count": 28,
+     "max_tol_ratio": 0.12532697061273274,
+     "max_abs": 0.0042878152449484785,
+     "max_rel_rms": 0.001958233915823949,
+     "violations": 0,
+     "worst_violations": []
+    }
+   },
+   "extra": {}
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py::test_verify_ignores_draft_records[64-8]": {
+   "outcome": "failed",
+   "failure": "'name': 'sd', ...}, ...]\n\n    @pytest.mark.parametrize(\"R,N\", [(16, 1), (16, 4), (16, 8), (64, 8)])\n    def test_verify_ignores_draft_records(R, N, log):\n        \"\"\"Detects: verify reading the discarded draft records at [p, p+N) or anything outside\n        [b, p); the pre-draft fold running (or not) against the rule; states exported at acceptance\n        positions off by one; stale draft records leaking into the continuation or into a request\n        restarted from an exported prefix.\"\"\"\n        w = World(log, L=1, slots=N + 4, rows=2, R=R, seed=200 + 10 * R + N)\n        w.warm_slot(0)\n        w.warm_slot(N + 3)  # an unrelated request's state for the cross-request control\n        s = Seq(0, 0, 3 * R - 2, \"sd\")\n        w.assign(s.m, s.p)\n        # history before drafting: none; the most that needs no fold; one more, so the fold runs\n        for target in (0, R - N - 1, R - N):\n            while s.p - w.b[s.m] < target:\n                T = min(3, target - (s.p - w.b[s.m]))\n                window_step(w, s, w.inputs(T), T, tag=\"history\")\n            ran = w.prefold([(s, N + 1)], tag=f\"prefold-hist{target}\")\n            assert ran == [target > R - N - 1]\n            b, p = w.b[s.m], s.p\n            for i in range(N):  # draft: other inputs, one token per call, chained on draft records\n                w.call([s.spec(w.inputs(1), p=p + i, phase=\"draft\")], tag=f\"draft-hist{target}\")\n            draft_snap = [t.clone() for t in w.snap]\n            X = w.inputs(N + 1)\n            out = w.call([s.spec(X, phase=\"verify\")], tag=f\"verify-hist{target}\")[0][0]\n            assert_rejects(w, out, w.start_ref(0, s.m, s.slot, b, p + 1, snap=draft_snap), X[0], 0,\n                           \"verify also reads the draft record at p\")\n            assert_rejects(w, out, w.start_ref(0, s.m, N + 3, b, p), X[0], 0, \"another request's state\")\n            if p > b:\n                assert_rejects(w, out, w.start_ref(0, s.m, s.slot, b, p - 1), X[0], 0, \"misses record p-1\")\n                assert_rejects(w, out, w.start_ref(0, s.m, s.slot, b + 1, p), X[0], 0,\n                               \"state position b off by one\")\n            # the state after accepting a drafts (+1 target token) for every a, exported in one plan\n            w.fold([(s.slot, 1 + a, s.m, p + a + 1, 0) for a in range(N + 1)], tag=f\"export-hist{target}\")\n            a = N // 2\n            r = Seq(1, 1 + a, p + a + 1, \"restart\")  # row 1 holds stale records from earlier use\n            w.assign(r.m, r.p)\n            window_step(w, r, w.inputs(2), 2, tag=f\"restart-hist{target}\")\n            s.p = p + a + 1\n            window_step(w, s, w.inputs(1), 1, tag=f\"continue-hist{target}\")\n>       assert_within_tolerance(log)\n\nblackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py:102: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nlog = [{'kind': 'fold_ran', 'tag': 'prefold-hist0', 'value': [False]}, {'kind': 'out', 'tag': 'draft-hist0', 'layer': 0, 'na...ft-hist0', 'layer': 0, 'name': 'sd', ...}, {'kind': 'rec_g', 'tag': 'draft-hist0', 'layer': 0, 'name': 'sd', ...}, ...]\n\n    def assert_within_tolerance(log):\n        bad = {}\n        for e in log:\n            if e[\"kind\"] != \"negative_control\" and e.get(\"tol_ratio\", 0.0) > 1.0:\n                worst = bad.setdefault(e[\"kind\"], [0, e])\n                worst[0] += 1\n                if e[\"tol_ratio\"] > worst[1][\"tol_ratio\"]:\n                    worst[1] = e\n>       assert not bad, \"outside tolerance: \" + \"; \".join(\n               ^^^^^^^\n            f\"{kind}: {n} checks, worst {e}\" for kind, (n, e) in bad.items())\nE       AssertionError: outside tolerance: fold_state: 13 checks, worst {'kind': 'fold_state', 'tag': 'export-hist55', 'layer': 0, 'src': 0, 'dst': 2, 'b': 190, 'end': 247, 'width': 0, 'tol_ratio': 22.749888351172892, 'max_abs': 0.0002675056457519531, 'max_rel': 0.0004883535772478152, 'rel_rms': 2.6499323682369764e-05}\n\nblackbox_tests/gdn_replayssm_numeric/gdn_numeric_ref.py:153: AssertionError",
+   "peak_allocated_bytes": 390452736,
+   "summary": {
+    "fold_ran": {
+     "count": 29,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "out": {
+     "count": 50,
+     "max_tol_ratio": 0.9675777321134383,
+     "max_abs": 0.00038496117375441674,
+     "max_rel": 0.0038905105300435254,
+     "max_rel_rms": 0.001733642744429778,
+     "max_excess_over_terms": 3.402353227499529e-07,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "out_vs_ideal": {
+     "count": 50,
+     "max_tol_ratio": 0.18575443272550804,
+     "max_abs": 0.000494345079544059,
+     "max_rel_rms": 0.002902413011336063,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_u": {
+     "count": 50,
+     "max_tol_ratio": 0.9697157679347589,
+     "max_abs": 0.007809728987546283,
+     "max_rel": 0.003882414624204988,
+     "max_rel_rms": 0.0016971444153794223,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_k": {
+     "count": 50,
+     "max_tol_ratio": 0.9738829455549464,
+     "max_abs": 0.0009757852774744391,
+     "max_rel": 0.0038879658306303455,
+     "max_rel_rms": 0.001704795405144383,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_g": {
+     "count": 50,
+     "max_tol_ratio": 0.057925300287499176,
+     "max_abs": 4.518210025139524e-05,
+     "max_rel": 2.746963498783739e-07,
+     "max_rel_rms": 2.0192306720189386e-07,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "negative_control": {
+     "count": 8,
+     "max_tol_ratio": 19273.241856689572,
+     "min_tol_ratio": 1732.7146282848616,
+     "names": [
+      "another request's state",
+      "misses record p-1",
+      "state position b off by one",
+      "verify also reads the draft record at p"
+     ]
+    },
+    "fold_state": {
+     "count": 28,
+     "max_tol_ratio": 22.749888351172892,
+     "max_abs": 0.00034737586975097656,
+     "max_rel": 0.0004883994315148163,
+     "max_rel_rms": 4.9135633117201667e-05,
+     "violations": 13,
+     "worst_violations": [
+      {
+       "kind": "fold_state",
+       "tag": "export-hist55",
+       "layer": 0,
+       "src": 0,
+       "dst": 2,
+       "b": 190,
+       "end": 247,
+       "width": 0,
+       "tol_ratio": 22.749888351172892,
+       "max_abs": 0.0002675056457519531,
+       "max_rel": 0.0004883535772478152,
+       "rel_rms": 2.6499323682369764e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist55",
+       "layer": 0,
+       "src": 0,
+       "dst": 5,
+       "b": 190,
+       "end": 250,
+       "width": 0,
+       "tol_ratio": 19.321014392103866,
+       "max_abs": 0.00030261131971076605,
+       "max_rel": 0.0004883994315148163,
+       "rel_rms": 3.5618318999412386e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist55",
+       "layer": 0,
+       "src": 0,
+       "dst": 7,
+       "b": 190,
+       "end": 252,
+       "width": 0,
+       "tol_ratio": 18.841012940827603,
+       "max_abs": 0.00034737586975097656,
+       "max_rel": 0.0004883845462238206,
+       "rel_rms": 4.9135633117201667e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist55",
+       "layer": 0,
+       "src": 0,
+       "dst": 1,
+       "b": 190,
+       "end": 246,
+       "width": 0,
+       "tol_ratio": 14.051688636747913,
+       "max_abs": 0.0002193152904510498,
+       "max_rel": 0.0004883793969849246,
+       "rel_rms": 3.57514951187044e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold-hist56",
+       "layer": 0,
+       "src": 0,
+       "dst": 0,
+       "b": 190,
+       "end": 251,
+       "width": 9,
+       "tol_ratio": 13.458910388192344,
+       "max_abs": 0.00021338462829589844,
+       "max_rel": 0.0004883769994677424,
+       "rel_rms": 3.6746717205480176e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist55",
+       "layer": 0,
+       "src": 0,
+       "dst": 3,
+       "b": 190,
+       "end": 248,
+       "width": 0,
+       "tol_ratio": 13.013177112351942,
+       "max_abs": 0.00016632676124572754,
+       "max_rel": 0.0004883834589276637,
+       "rel_rms": 2.9470610036452977e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist55",
+       "layer": 0,
+       "src": 0,
+       "dst": 6,
+       "b": 190,
+       "end": 251,
+       "width": 0,
+       "tol_ratio": 7.179297890678653,
+       "max_abs": 0.00010710954666137695,
+       "max_rel": 0.00024466869659800364,
+       "rel_rms": 2.2910220294049616e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export-hist55",
+       "layer": 0,
+       "src": 0,
+       "dst": 4,
+       "b": 190,
+       "end": 249,
+       "width": 0,
+       "tol_ratio": 3.220918817529908,
+       "max_abs": 5.0902274791264635e-05,
+       "max_rel": 0.0001221573894509122,
+       "rel_rms": 9.032993464469169e-06
+      }
+     ]
+    },
+    "fold_state_vs_ideal": {
+     "count": 28,
+     "max_tol_ratio": 0.14589978728687528,
+     "max_abs": 0.00473629030673528,
+     "max_rel_rms": 0.002279684176357426,
+     "violations": 0,
+     "worst_violations": []
+    }
+   },
+   "extra": {}
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py::test_fold_in_place_then_continue_matches_unfolded": {
+   "outcome": "failed",
+   "failure": "log = [{'kind': 'out', 'tag': 'A', 'layer': 0, 'name': 'folded', ...}, {'kind': 'out_vs_ideal', 'tag': 'A', 'layer': 0, 'nam...', 'tag': 'A', 'layer': 0, 'name': 'folded', ...}, {'kind': 'out', 'tag': 'A', 'layer': 1, 'name': 'folded', ...}, ...]\nextra = {'folded_vs_unfolded_bitwise_equal': False}\n\n    def test_fold_in_place_then_continue_matches_unfolded(log, extra):\n        \"\"\"Detects: an in-place fold that loses, repeats or mis-decays records or leaves the slot at\n        a position other than `end`, seen as the folded request diverging from an unfolded twin fed\n        identical inputs at different ring positions; a conditional row that should not run but does;\n        per-layer view errors (L=3).\"\"\"\n        w = World(log, L=3, slots=2, rows=2, R=32, seed=300)\n        w.warm_slot(0)\n        w.copy_slot(0, 1)\n        A, B = Seq(0, 0, 90, \"folded\"), Seq(1, 1, 7, \"unfolded\")\n        w.assign(A.m, A.p)\n        w.assign(B.m, B.p)\n    \n        def both(T):\n            x = w.inputs(T)\n            oa, ob = w.call([A.spec(x)], tag=\"A\"), w.call([B.spec(x)], tag=\"B\")\n            A.p, B.p = A.p + T, B.p + T\n            return oa, ob\n    \n        for T in (1, 5, 9, 9):  # 24 records each\n            both(T)\n        assert w.prefold([(A, 9), (B, 8)], tag=\"in-place\") == [True, False]  # 24+9 > 32, 24+8 = 32\n        bitwise = []\n        for T in (1, 4, 3):\n            oa, ob = both(T)\n            for l in range(w.L):\n                ya, yb = oa[l][0], ob[l][0].to(F64)\n                ratio = tol_ratio(ya, yb, 2 * OUT_RTOL, 2 * OUT_ATOL * rms(yb, -1))\n                log.append(dict(kind=\"folded_vs_unfolded\", layer=l, T=T, tol_ratio=ratio))\n                bitwise.append(bool((oa[l][0] == ob[l][0]).all()))\n        extra[\"folded_vs_unfolded_bitwise_equal\"] = all(bitwise)\n>       assert_within_tolerance(log)\n\nblackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py:135: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nlog = [{'kind': 'out', 'tag': 'A', 'layer': 0, 'name': 'folded', ...}, {'kind': 'out_vs_ideal', 'tag': 'A', 'layer': 0, 'nam...', 'tag': 'A', 'layer': 0, 'name': 'folded', ...}, {'kind': 'out', 'tag': 'A', 'layer': 1, 'name': 'folded', ...}, ...]\n\n    def assert_within_tolerance(log):\n        bad = {}\n        for e in log:\n            if e[\"kind\"] != \"negative_control\" and e.get(\"tol_ratio\", 0.0) > 1.0:\n                worst = bad.setdefault(e[\"kind\"], [0, e])\n                worst[0] += 1\n                if e[\"tol_ratio\"] > worst[1][\"tol_ratio\"]:\n                    worst[1] = e\n>       assert not bad, \"outside tolerance: \" + \"; \".join(\n               ^^^^^^^\n            f\"{kind}: {n} checks, worst {e}\" for kind, (n, e) in bad.items())\nE       AssertionError: outside tolerance: fold_state: 3 checks, worst {'kind': 'fold_state', 'tag': 'in-place', 'layer': 0, 'src': 0, 'dst': 0, 'b': 90, 'end': 114, 'width': 9, 'tol_ratio': 19.783388288507286, 'max_abs': 6.19739294052124e-05, 'max_rel': 6.112132352941177e-05, 'rel_rms': 1.0356324497514875e-05}\n\nblackbox_tests/gdn_replayssm_numeric/gdn_numeric_ref.py:153: AssertionError",
+   "peak_allocated_bytes": 268113408,
+   "summary": {
+    "out": {
+     "count": 42,
+     "max_tol_ratio": 0.9650189357454969,
+     "max_abs": 0.00024365775092599629,
+     "max_rel": 0.0038908290753114907,
+     "max_rel_rms": 0.0017045084782029997,
+     "max_excess_over_terms": 2.479212930680222e-06,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "out_vs_ideal": {
+     "count": 42,
+     "max_tol_ratio": 0.16606155008265847,
+     "max_abs": 0.00038030742764930126,
+     "max_rel_rms": 0.0025947117200415385,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_u": {
+     "count": 42,
+     "max_tol_ratio": 0.9684864185501564,
+     "max_abs": 0.007807331371838533,
+     "max_rel": 0.0038890602849972642,
+     "max_rel_rms": 0.001701226540380042,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_k": {
+     "count": 42,
+     "max_tol_ratio": 0.9646853841585413,
+     "max_abs": 0.0009765793236297116,
+     "max_rel": 0.003878297098437415,
+     "max_rel_rms": 0.0017283983862597613,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_g": {
+     "count": 42,
+     "max_tol_ratio": 0.05886958837559213,
+     "max_abs": 0.0001221834019133894,
+     "max_rel": 3.0830535072922083e-07,
+     "max_rel_rms": 1.417593905414237e-07,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "fold_state": {
+     "count": 3,
+     "max_tol_ratio": 19.783388288507286,
+     "max_abs": 6.19739294052124e-05,
+     "max_rel": 6.112132352941177e-05,
+     "max_rel_rms": 1.0356324497514875e-05,
+     "violations": 3,
+     "worst_violations": [
+      {
+       "kind": "fold_state",
+       "tag": "in-place",
+       "layer": 0,
+       "src": 0,
+       "dst": 0,
+       "b": 90,
+       "end": 114,
+       "width": 9,
+       "tol_ratio": 19.783388288507286,
+       "max_abs": 6.19739294052124e-05,
+       "max_rel": 6.112132352941177e-05,
+       "rel_rms": 1.0356324497514875e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "in-place",
+       "layer": 1,
+       "src": 0,
+       "dst": 0,
+       "b": 90,
+       "end": 114,
+       "width": 9,
+       "tol_ratio": 16.156303168015903,
+       "max_abs": 5.3435564041137695e-05,
+       "max_rel": 6.103515633356213e-05,
+       "rel_rms": 8.558868487844282e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "in-place",
+       "layer": 2,
+       "src": 0,
+       "dst": 0,
+       "b": 90,
+       "end": 114,
+       "width": 9,
+       "tol_ratio": 1.139655523008894,
+       "max_abs": 9.545388165332902e-06,
+       "max_rel": 3.068012227092287e-05,
+       "rel_rms": 2.5831331176564476e-06
+      }
+     ]
+    },
+    "fold_state_vs_ideal": {
+     "count": 3,
+     "max_tol_ratio": 0.12989115638512522,
+     "max_abs": 0.005010283081586242,
+     "max_rel_rms": 0.0020295493185175815,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "fold_ran": {
+     "count": 1,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "folded_vs_unfolded": {
+     "count": 9,
+     "max_tol_ratio": 0.866319608887132,
+     "violations": 0,
+     "worst_violations": []
+    }
+   },
+   "extra": {
+    "folded_vs_unfolded_bitwise_equal": false
+   }
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py::test_fold_exports_prefix_states": {
+   "outcome": "failed",
+   "failure": "log = [{'kind': 'out', 'tag': 'src-history', 'layer': 0, 'name': 'src', ...}, {'kind': 'out_vs_ideal', 'tag': 'src-history',...-history', 'layer': 0, 'name': 'src', ...}, {'kind': 'out', 'tag': 'src-history', 'layer': 1, 'name': 'src', ...}, ...]\n\n    def test_fold_exports_prefix_states(log):\n        \"\"\"Detects: an export written for the wrong prefix (end or b off by one), records, start or\n        the source slot modified, other slots touched, a conditional row run against the rule,\n        per-layer indexing errors (L=3), empty (end=b) and full (end=b+R) exports, and an exported\n        state that does not work as the start of a new request.\"\"\"\n        R = 16\n        w = World(log, L=3, slots=8, rows=4, R=R, seed=310)\n        for slot in (0, 6, 7):\n            w.warm_slot(slot)\n        s, t, v = Seq(0, 0, 5 * R + 3, \"src\"), Seq(2, 6, 11, \"other\"), Seq(3, 7, 40, \"idle\")\n        for q, chunks in ((s, (1, 9, 6)), (t, (4, 3, 6)), (v, (2,))):  # s: exactly R records\n            w.assign(q.m, q.p)\n            for T in chunks:\n                w.call([q.spec(w.inputs(T))], tag=f\"{q.name}-history\")\n                q.p += T\n        b0 = w.b[s.m]\n        ran = w.fold([(0, 1, 0, b0, 0), (0, 2, 0, b0 + 1, 0), (0, 3, 0, b0 + 7, 0), (0, 4, 0, b0 + R, 0),\n                      (6, 6, 2, t.p, 4), (7, 7, 3, v.p, 3)], tag=\"exports+conditional\")\n        assert ran == [True, True, True, True, True, False]  # 13+4 > 16 runs, 2+3 does not\n        w.advance([t.m, v.m], [t.p, v.p], [4, 3])\n        assert w.prefold([(s, 1)], tag=\"in-place-full-ring\") == [True]\n        r = Seq(1, 3, b0 + 7, \"from-export\")  # row 1 still holds the initial garbage records\n        w.assign(r.m, r.p)\n        for T in (3, 1):\n            w.call([r.spec(w.inputs(T))], tag=\"from-export\")\n            r.p += T\n        for T in (2, 9):\n            w.call([s.spec(w.inputs(T)), t.spec(w.inputs(T)), v.spec(w.inputs(T))], tag=\"continue\")\n            s.p, t.p, v.p = s.p + T, t.p + T, v.p + T\n>       assert_within_tolerance(log)\n\nblackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py:167: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nlog = [{'kind': 'out', 'tag': 'src-history', 'layer': 0, 'name': 'src', ...}, {'kind': 'out_vs_ideal', 'tag': 'src-history',...-history', 'layer': 0, 'name': 'src', ...}, {'kind': 'out', 'tag': 'src-history', 'layer': 1, 'name': 'src', ...}, ...]\n\n    def assert_within_tolerance(log):\n        bad = {}\n        for e in log:\n            if e[\"kind\"] != \"negative_control\" and e.get(\"tol_ratio\", 0.0) > 1.0:\n                worst = bad.setdefault(e[\"kind\"], [0, e])\n                worst[0] += 1\n                if e[\"tol_ratio\"] > worst[1][\"tol_ratio\"]:\n                    worst[1] = e\n>       assert not bad, \"outside tolerance: \" + \"; \".join(\n               ^^^^^^^\n            f\"{kind}: {n} checks, worst {e}\" for kind, (n, e) in bad.items())\nE       AssertionError: outside tolerance: fold_state: 8 checks, worst {'kind': 'fold_state', 'tag': 'exports+conditional', 'layer': 1, 'src': 6, 'dst': 6, 'b': 11, 'end': 24, 'width': 4, 'tol_ratio': 31.38763922760299, 'max_abs': 0.0002765059471130371, 'max_rel': 0.0009762013118354138, 'rel_rms': 4.280960146148916e-05}\n\nblackbox_tests/gdn_replayssm_numeric/gdn_numeric_ref.py:153: AssertionError",
+   "peak_allocated_bytes": 509043200,
+   "summary": {
+    "out": {
+     "count": 45,
+     "max_tol_ratio": 0.9772816371641055,
+     "max_abs": 0.00024391794480266293,
+     "max_rel": 0.0038875845487255345,
+     "max_rel_rms": 0.001747414368602894,
+     "max_excess_over_terms": 4.7774347477460054e-08,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "out_vs_ideal": {
+     "count": 45,
+     "max_tol_ratio": 0.15366271044086652,
+     "max_abs": 0.0004035596626517507,
+     "max_rel_rms": 0.0024009798506385393,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_u": {
+     "count": 45,
+     "max_tol_ratio": 0.9703254041300459,
+     "max_abs": 0.007810066918920722,
+     "max_rel": 0.0038899485505789018,
+     "max_rel_rms": 0.0016966258002768994,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_k": {
+     "count": 45,
+     "max_tol_ratio": 0.9729664984099438,
+     "max_abs": 0.0009763362295596156,
+     "max_rel": 0.003884307469015009,
+     "max_rel_rms": 0.0016995619792792708,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_g": {
+     "count": 45,
+     "max_tol_ratio": 0.0581811265571102,
+     "max_abs": 6.3118779735305e-05,
+     "max_rel": 2.1140231213406226e-07,
+     "max_rel_rms": 1.44610682231453e-07,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "fold_state": {
+     "count": 18,
+     "max_tol_ratio": 31.38763922760299,
+     "max_abs": 0.0002765059471130371,
+     "max_rel": 0.0009762013118354138,
+     "max_rel_rms": 4.280960146148916e-05,
+     "violations": 8,
+     "worst_violations": [
+      {
+       "kind": "fold_state",
+       "tag": "exports+conditional",
+       "layer": 1,
+       "src": 6,
+       "dst": 6,
+       "b": 11,
+       "end": 24,
+       "width": 4,
+       "tol_ratio": 31.38763922760299,
+       "max_abs": 0.0002765059471130371,
+       "max_rel": 0.0009762013118354138,
+       "rel_rms": 4.280960146148916e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "exports+conditional",
+       "layer": 1,
+       "src": 0,
+       "dst": 3,
+       "b": 83,
+       "end": 90,
+       "width": 0,
+       "tol_ratio": 11.825412189494537,
+       "max_abs": 0.0001493990421295166,
+       "max_rel": 0.0004885392533430882,
+       "rel_rms": 3.234281591647717e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "exports+conditional",
+       "layer": 2,
+       "src": 6,
+       "dst": 6,
+       "b": 11,
+       "end": 24,
+       "width": 4,
+       "tol_ratio": 5.641956186217415,
+       "max_abs": 8.07642936706543e-05,
+       "max_rel": 0.0001220703125,
+       "rel_rms": 9.331075519857447e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "exports+conditional",
+       "layer": 2,
+       "src": 0,
+       "dst": 4,
+       "b": 83,
+       "end": 99,
+       "width": 0,
+       "tol_ratio": 4.686793337537985,
+       "max_abs": 4.0411949157714844e-05,
+       "max_rel": 0.00012214621113989637,
+       "rel_rms": 7.156274978318284e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "in-place-full-ring",
+       "layer": 2,
+       "src": 0,
+       "dst": 0,
+       "b": 83,
+       "end": 99,
+       "width": 1,
+       "tol_ratio": 4.686793337537985,
+       "max_abs": 4.0411949157714844e-05,
+       "max_rel": 0.00012214621113989637,
+       "rel_rms": 7.156274978318284e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "exports+conditional",
+       "layer": 1,
+       "src": 0,
+       "dst": 4,
+       "b": 83,
+       "end": 99,
+       "width": 0,
+       "tol_ratio": 2.117332346786487,
+       "max_abs": 3.1594240575194554e-05,
+       "max_rel": 6.46438930443731e-05,
+       "rel_rms": 6.655709677643498e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "in-place-full-ring",
+       "layer": 1,
+       "src": 0,
+       "dst": 0,
+       "b": 83,
+       "end": 99,
+       "width": 1,
+       "tol_ratio": 2.117332346786487,
+       "max_abs": 3.1594240575194554e-05,
+       "max_rel": 6.46438930443731e-05,
+       "rel_rms": 6.655709677643498e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "exports+conditional",
+       "layer": 0,
+       "src": 6,
+       "dst": 6,
+       "b": 11,
+       "end": 24,
+       "width": 4,
+       "tol_ratio": 1.9209358344190792,
+       "max_abs": 1.2040138244628906e-05,
+       "max_rel": 6.112052010510709e-05,
+       "rel_rms": 3.24791709579671e-06
+      }
+     ]
+    },
+    "fold_state_vs_ideal": {
+     "count": 18,
+     "max_tol_ratio": 0.12244369847170541,
+     "max_abs": 0.004650793235652317,
+     "max_rel_rms": 0.001913182788620397,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "fold_count0_bitwise_copy": {
+     "count": 3,
+     "violations": 0,
+     "worst_violations": [],
+     "all_bitwise": true
+    },
+    "fold_ran": {
+     "count": 2,
+     "violations": 0,
+     "worst_violations": []
+    }
+   },
+   "extra": {}
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py::test_batch_rows_permuted_mixed_T_padding": {
+   "outcome": "failed",
+   "failure": "_slot(sl)  # slot 3 (r0) stays zero: a fresh request at position 0\n        for s in seqs:\n            w.assign(s.m, s.p)\n        rng = random.Random(5)\n        while any(s.p - w.b[s.m] < h for s, h in zip(seqs, hist)):\n            specs = [s.spec(w.inputs(min(4, h - (s.p - w.b[s.m]))), phase=\"history\")\n                     for s, h in zip(seqs, hist) if s.p - w.b[s.m] < h]\n            specs.insert(rng.randrange(len(specs) + 1), pad_spec(w.inputs(rng.randint(1, 3))))\n            w.call(specs, qkv_pad=64, tag=\"history\")\n            for sp in specs:\n                for s in seqs:\n                    if sp[\"m\"] == s.m:\n                        s.p += sp[\"x\"][0][0].shape[0]\n        X = [w.inputs(T) for T in Ts]\n        pads = [w.inputs(2), w.inputs(1)]\n        saved = w.save()\n        orders = {\"order1\": [0, \"p0\", 1, 2, \"p1\", 3, 4, 5], \"order2\": [\"p1\", 5, 3, 1, 4, 2, 0, \"p0\"]}\n        got = {}\n        for name, order in orders.items():\n            w.restore(saved)\n            specs = [pad_spec(pads[int(o[1])]) if isinstance(o, str) else seqs[o].spec(X[o], phase=name)\n                     for o in order]\n            outs = w.call(specs, qkv_pad=64, tag=name)[0]\n            got[name] = {o: outs[j] for j, o in enumerate(order) if not isinstance(o, str)}\n        for i in range(6):  # each request alone\n            w.restore(saved)\n            got.setdefault(\"solo\", {})[i] = w.call([seqs[i].spec(X[i], phase=\"solo\")], tag=\"solo\")[0][0]\n        bitwise = {}\n        for i in range(6):\n            ref = got[\"order1\"][i].to(F64)\n            for name in (\"order2\", \"solo\"):\n                ratio = tol_ratio(got[name][i], ref, 2 * OUT_RTOL, 2 * OUT_ATOL * rms(ref, -1))\n                log.append(dict(kind=f\"order1_vs_{name}\", name=f\"r{i}\", tol_ratio=ratio))\n                bitwise[f\"r{i}_{name}\"] = bool((got[name][i] == got[\"order1\"][i]).all())\n        extra[\"bitwise_equal_across_orders_and_solo\"] = bitwise\n        # cross-request control on the widest window: another request's state/records must be rejected\n        o = seqs[2]\n        assert_rejects(w, got[\"order1\"][1], w.start_ref(0, o.m, o.slot, w.b[o.m], o.p), X[1][0], 0,\n                       \"another request's slot and records\")\n        # fold=True batch: r2 (27+9) and r5 (30+3) overflow the ring and are written back, others not\n        w.restore(saved)\n        T2 = [2, 9, 9, 1, 9, 3]\n        specs = [seqs[i].spec(w.inputs(T2[i]), phase=\"fold-batch\") for i in (4, 2, 0, 5, 1, 3)]\n        specs.insert(3, pad_spec(w.inputs(2)))\n        w.call(specs, fold=True, qkv_pad=64, tag=\"fold-batch\")\n        assert w.expect_stats[0] == 2, w.expect_stats\n>       assert_within_tolerance(log)\n\nblackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py:228: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nlog = [{'kind': 'out', 'tag': 'history', 'layer': 0, 'name': 'r1', ...}, {'kind': 'out_vs_ideal', 'tag': 'history', 'layer':...tag': 'history', 'layer': 0, 'name': 'r1', ...}, {'kind': 'out', 'tag': 'history', 'layer': 0, 'name': 'r2', ...}, ...]\n\n    def assert_within_tolerance(log):\n        bad = {}\n        for e in log:\n            if e[\"kind\"] != \"negative_control\" and e.get(\"tol_ratio\", 0.0) > 1.0:\n                worst = bad.setdefault(e[\"kind\"], [0, e])\n                worst[0] += 1\n                if e[\"tol_ratio\"] > worst[1][\"tol_ratio\"]:\n                    worst[1] = e\n>       assert not bad, \"outside tolerance: \" + \"; \".join(\n               ^^^^^^^\n            f\"{kind}: {n} checks, worst {e}\" for kind, (n, e) in bad.items())\nE       AssertionError: outside tolerance: replay_fold_state: 1 checks, worst {'kind': 'replay_fold_state', 'tag': 'fold-batch', 'layer': 0, 'name': 'r5', 'step': 30, 'phase': 'fold-batch', 'T': 3, 'hist': 30, 'fold': True, 'tol_ratio': 3.4293171491345604, 'max_abs': 6.1002092556217136e-05, 'max_rel': 0.00012213764766055943, 'rel_rms': 1.1457256662012822e-05}\n\nblackbox_tests/gdn_replayssm_numeric/gdn_numeric_ref.py:153: AssertionError",
+   "peak_allocated_bytes": 513900544,
+   "summary": {
+    "out": {
+     "count": 45,
+     "max_tol_ratio": 0.9669879103654536,
+     "max_abs": 0.00024399024962477867,
+     "max_rel": 0.0038900103581045622,
+     "max_rel_rms": 0.0017021653131306933,
+     "max_excess_over_terms": 5.458878265918351e-07,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "out_vs_ideal": {
+     "count": 45,
+     "max_tol_ratio": 0.17347385944472676,
+     "max_abs": 0.0003830382745167449,
+     "max_rel_rms": 0.0027105290538238557,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_u": {
+     "count": 45,
+     "max_tol_ratio": 0.9650921446929877,
+     "max_abs": 0.007812567196422648,
+     "max_rel": 0.003884180779264782,
+     "max_rel_rms": 0.0016851829476373092,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_k": {
+     "count": 45,
+     "max_tol_ratio": 0.9654916090874238,
+     "max_abs": 0.0009763698699997714,
+     "max_rel": 0.003890139774848936,
+     "max_rel_rms": 0.0016955119087168089,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_g": {
+     "count": 45,
+     "max_tol_ratio": 0.057562911766422184,
+     "max_abs": 3.401260963187269e-05,
+     "max_rel": 3.2763495654507646e-07,
+     "max_rel_rms": 1.5774616146951943e-07,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "order1_vs_order2": {
+     "count": 6,
+     "max_tol_ratio": 0.0,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "order1_vs_solo": {
+     "count": 6,
+     "max_tol_ratio": 0.0,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "negative_control": {
+     "count": 1,
+     "max_tol_ratio": 14951.359853510841,
+     "min_tol_ratio": 14951.359853510841,
+     "names": [
+      "another request's slot and records"
+     ]
+    },
+    "replay_fold_state": {
+     "count": 2,
+     "max_tol_ratio": 3.4293171491345604,
+     "max_abs": 6.1002092556217136e-05,
+     "max_rel": 0.00012213764766055943,
+     "max_rel_rms": 1.1457256662012822e-05,
+     "violations": 1,
+     "worst_violations": [
+      {
+       "kind": "replay_fold_state",
+       "tag": "fold-batch",
+       "layer": 0,
+       "name": "r5",
+       "step": 30,
+       "phase": "fold-batch",
+       "T": 3,
+       "hist": 30,
+       "fold": true,
+       "tol_ratio": 3.4293171491345604,
+       "max_abs": 6.1002092556217136e-05,
+       "max_rel": 0.00012213764766055943,
+       "rel_rms": 1.1457256662012822e-05
+      }
+     ]
+    },
+    "replay_fold_state_vs_ideal": {
+     "count": 2,
+     "max_tol_ratio": 0.13964152756316106,
+     "max_abs": 0.0043001098682978744,
+     "max_rel_rms": 0.0021818988681743916,
+     "violations": 0,
+     "worst_violations": []
+    }
+   },
+   "extra": {
+    "bitwise_equal_across_orders_and_solo": {
+     "r0_order2": true,
+     "r0_solo": true,
+     "r1_order2": true,
+     "r1_solo": true,
+     "r2_order2": true,
+     "r2_solo": true,
+     "r3_order2": true,
+     "r3_solo": true,
+     "r4_order2": true,
+     "r4_solo": true,
+     "r5_order2": true,
+     "r5_solo": true
+    }
+   }
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py::test_long_trajectory_many_wraps_and_folds[16]": {
+   "outcome": "failed",
+   "failure": " w.call(specs, fold=fold, tag=\"traj\")\n            counts[\"calls\"] += 1\n            for s, T in advance.items():\n                s.p += T\n            if not fold:\n                N, i = draft\n                if i < N:\n                    draft[1] += 1\n                else:\n                    sd.p += rng.randint(0, N) + 1\n                    draft = None\n                    counts[\"verifies\"] += 1\n        counts[\"flushes\"], counts[\"flushed_records\"] = w.expect_stats\n        counts[\"ring_wraps_per_request\"] = {s.name: (s.p - s.p0) / R for s in reqs}\n        extra[\"counts\"] = counts\n        # error as a function of steps: 8 equal bins over each request's own trajectory\n        series = {}\n        for name in (\"ar\", \"sd\", \"win\"):\n            es = [e for e in log if e.get(\"tag\") == \"traj\" and e.get(\"name\") == name]\n            last = max(e[\"step\"] for e in es) + 1\n            bins = [dict(first_step=j * last // 8, out_max_tol_ratio=0.0, out_max_abs=0.0, out_max_rel=0.0,\n                         out_max_rel_rms=0.0, ideal_max_rel_rms=0.0, ideal_mean_rel_rms=[]) for j in range(8)]\n            for e in es:\n                bn = bins[e[\"step\"] * 8 // last]\n                if e[\"kind\"] == \"out\":\n                    bn[\"out_max_tol_ratio\"] = max(bn[\"out_max_tol_ratio\"], e[\"tol_ratio\"])\n                    bn[\"out_max_abs\"] = max(bn[\"out_max_abs\"], e[\"max_abs\"])\n                    bn[\"out_max_rel\"] = max(bn[\"out_max_rel\"], e[\"max_rel\"])\n                    bn[\"out_max_rel_rms\"] = max(bn[\"out_max_rel_rms\"], e[\"rel_rms\"])\n                elif e[\"kind\"] == \"out_vs_ideal\":\n                    bn[\"ideal_max_rel_rms\"] = max(bn[\"ideal_max_rel_rms\"], e[\"rel_rms\"])\n                    bn[\"ideal_mean_rel_rms\"].append(e[\"rel_rms\"])\n            for bn in bins:\n                vals = bn[\"ideal_mean_rel_rms\"]\n                bn[\"ideal_mean_rel_rms\"] = sum(vals) / len(vals) if vals else None\n            series[name] = bins\n        extra[\"error_by_step_bins\"] = series\n>       assert_within_tolerance(log)\n\nblackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py:309: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nlog = [{'kind': 'fold_ran', 'tag': 'prefold', 'value': [False, False, False]}, {'kind': 'out', 'tag': 'traj', 'layer': 0, 'n...', 'tag': 'traj', 'layer': 0, 'name': 'sd', ...}, {'kind': 'rec_g', 'tag': 'traj', 'layer': 0, 'name': 'sd', ...}, ...]\n\n    def assert_within_tolerance(log):\n        bad = {}\n        for e in log:\n            if e[\"kind\"] != \"negative_control\" and e.get(\"tol_ratio\", 0.0) > 1.0:\n                worst = bad.setdefault(e[\"kind\"], [0, e])\n                worst[0] += 1\n                if e[\"tol_ratio\"] > worst[1][\"tol_ratio\"]:\n                    worst[1] = e\n>       assert not bad, \"outside tolerance: \" + \"; \".join(\n               ^^^^^^^\n            f\"{kind}: {n} checks, worst {e}\" for kind, (n, e) in bad.items())\nE       AssertionError: outside tolerance: fold_state: 306 checks, worst {'kind': 'fold_state', 'tag': 'prefold', 'layer': 1, 'src': 2, 'dst': 2, 'b': 200032, 'end': 200048, 'width': 1, 'tol_ratio': 14.231330477687118, 'max_abs': 2.839416265487671e-05, 'max_rel': 2.037453955762196e-06, 'rel_rms': 4.164886217394993e-06}; replay_fold_state: 28 checks, worst {'kind': 'replay_fold_state', 'tag': 'traj', 'layer': 1, 'name': 'win', 'step': 710, 'phase': 'ar', 'T': 5, 'hist': 13, 'fold': True, 'tol_ratio': 10.608824355509613, 'max_abs': 0.00016421079635620117, 'max_rel': 0.00024409985108278127, 'rel_rms': 1.1595645150197884e-05}; out: 5 checks, worst {'kind': 'out', 'tag': 'traj', 'layer': 0, 'name': 'ar', 'step': 309, 'phase': 'ar1', 'T': 1, 'hist': 5, 'fold': False, 'tol_ratio': 1.6688972297119085, 'max_abs': 0.00042022512843792326, 'max_rel': 0.0035914363572755246, 'rel_rms': 0.0015527823358641038, 'excess_over_terms': 1.6115207449961748e-08, 'worst_head_y_rms_over_terms_rms': 1.1491687419563596e-05}\n\nblackbox_tests/gdn_replayssm_numeric/gdn_numeric_ref.py:153: AssertionError",
+   "peak_allocated_bytes": 374771200,
+   "summary": {
+    "fold_ran": {
+     "count": 424,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "out": {
+     "count": 2532,
+     "max_tol_ratio": 1.6688972297119085,
+     "max_abs": 0.0005399666538558612,
+     "max_rel": 0.0038914936900220428,
+     "max_rel_rms": 0.0018810980768835738,
+     "max_excess_over_terms": 5.234115879537729e-06,
+     "violations": 5,
+     "worst_violations": [
+      {
+       "kind": "out",
+       "tag": "traj",
+       "layer": 0,
+       "name": "ar",
+       "step": 309,
+       "phase": "ar1",
+       "T": 1,
+       "hist": 5,
+       "fold": false,
+       "tol_ratio": 1.6688972297119085,
+       "max_abs": 0.00042022512843792326,
+       "max_rel": 0.0035914363572755246,
+       "rel_rms": 0.0015527823358641038,
+       "excess_over_terms": 1.6115207449961748e-08,
+       "worst_head_y_rms_over_terms_rms": 1.1491687419563596e-05
+      },
+      {
+       "kind": "out",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 1378,
+       "phase": "win",
+       "T": 9,
+       "hist": 6,
+       "fold": false,
+       "tol_ratio": 1.3783554344370668,
+       "max_abs": 0.0004697521674257299,
+       "max_rel": 0.003826772033541777,
+       "rel_rms": 0.0016757195075164854,
+       "excess_over_terms": 5.874465216464975e-08,
+       "worst_head_y_rms_over_terms_rms": 9.727654049838925e-06
+      },
+      {
+       "kind": "out",
+       "tag": "traj",
+       "layer": 0,
+       "name": "win",
+       "step": 1811,
+       "phase": "win",
+       "T": 9,
+       "hist": 0,
+       "fold": false,
+       "tol_ratio": 1.2755112379879407,
+       "max_abs": 0.00048399981410707227,
+       "max_rel": 0.0038570639669126996,
+       "rel_rms": 0.0016246545366306795,
+       "excess_over_terms": 1.0058923359878436e-07,
+       "worst_head_y_rms_over_terms_rms": 4.689928703316184e-05
+      },
+      {
+       "kind": "out",
+       "tag": "traj",
+       "layer": 0,
+       "name": "win",
+       "step": 1516,
+       "phase": "win",
+       "T": 8,
+       "hist": 0,
+       "fold": false,
+       "tol_ratio": 1.1637811947573247,
+       "max_abs": 0.0004879246315191432,
+       "max_rel": 0.0038581730792145216,
+       "rel_rms": 0.0017053784045545685,
+       "excess_over_terms": 1.1797077716506927e-07,
+       "worst_head_y_rms_over_terms_rms": 1.626239590184755e-05
+      },
+      {
+       "kind": "out",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 1156,
+       "phase": "win",
+       "T": 6,
+       "hist": 0,
+       "fold": false,
+       "tol_ratio": 1.0493536137336286,
+       "max_abs": 0.0004777364615698998,
+       "max_rel": 0.0038065085491934426,
+       "rel_rms": 0.0016652581570779465,
+       "excess_over_terms": 7.260037110439327e-08,
+       "worst_head_y_rms_over_terms_rms": 6.007251847117937e-05
+      }
+     ]
+    },
+    "out_vs_ideal": {
+     "count": 2532,
+     "max_tol_ratio": 0.2195267409252729,
+     "max_abs": 0.0009274719187129521,
+     "max_rel_rms": 0.0034301053269573892,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_u": {
+     "count": 2532,
+     "max_tol_ratio": 0.9748321286013477,
+     "max_abs": 0.013524574491492025,
+     "max_rel": 0.003891157737833719,
+     "max_rel_rms": 0.0017720755611045648,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_k": {
+     "count": 2532,
+     "max_tol_ratio": 0.9745934001636819,
+     "max_abs": 0.0009765497430656023,
+     "max_rel": 0.003891105470727228,
+     "max_rel_rms": 0.0017554233180266559,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_g": {
+     "count": 2532,
+     "max_tol_ratio": 0.059116646410256275,
+     "max_abs": 9.183636149145968e-05,
+     "max_rel": 3.5422854817361406e-07,
+     "max_rel_rms": 2.398662791267552e-07,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "fold_state": {
+     "count": 446,
+     "max_tol_ratio": 14.231330477687118,
+     "max_abs": 0.00020444393157958984,
+     "max_rel": 0.0004883653680505993,
+     "max_rel_rms": 2.4908563223176993e-05,
+     "violations": 306,
+     "worst_violations": [
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 2,
+       "dst": 2,
+       "b": 200032,
+       "end": 200048,
+       "width": 1,
+       "tol_ratio": 14.231330477687118,
+       "max_abs": 2.839416265487671e-05,
+       "max_rel": 2.037453955762196e-06,
+       "rel_rms": 4.164886217394993e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 0,
+       "dst": 0,
+       "b": 245,
+       "end": 261,
+       "width": 1,
+       "tol_ratio": 14.039829800583473,
+       "max_abs": 0.0001147538423538208,
+       "max_rel": 0.0004881861611489776,
+       "rel_rms": 1.3057024045859041e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export",
+       "layer": 1,
+       "src": 0,
+       "dst": 4,
+       "b": 261,
+       "end": 261,
+       "width": 0,
+       "tol_ratio": 14.039829800583473,
+       "max_abs": 0.0001147538423538208,
+       "max_rel": 0.0004881861611489776,
+       "rel_rms": 1.3057024045859041e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 2,
+       "dst": 2,
+       "b": 201115,
+       "end": 201131,
+       "width": 2,
+       "tol_ratio": 13.991328602460817,
+       "max_abs": 0.0001513957977294922,
+       "max_rel": 0.0004883653680505993,
+       "rel_rms": 1.6437944938672088e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 1,
+       "dst": 1,
+       "b": 296,
+       "end": 310,
+       "width": 8,
+       "tol_ratio": 13.326982701574506,
+       "max_abs": 0.00016319751739501953,
+       "max_rel": 0.00024405514158788515,
+       "rel_rms": 9.348409064065288e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 2,
+       "dst": 2,
+       "b": 200653,
+       "end": 200668,
+       "width": 6,
+       "tol_ratio": 11.665003079281005,
+       "max_abs": 0.00012701749801635742,
+       "max_rel": 0.000244140625,
+       "rel_rms": 1.0280004502986769e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 0,
+       "src": 2,
+       "dst": 2,
+       "b": 201184,
+       "end": 201197,
+       "width": 6,
+       "tol_ratio": 11.476265316932906,
+       "max_abs": 3.0390918254852295e-05,
+       "max_rel": 6.104006049411244e-05,
+       "rel_rms": 4.100018951453007e-06
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 0,
+       "dst": 0,
+       "b": 117,
+       "end": 133,
+       "width": 1,
+       "tol_ratio": 11.4688626727168,
+       "max_abs": 0.00012066960334777832,
+       "max_rel": 0.000244140625,
+       "rel_rms": 1.0490105360571665e-05
+      }
+     ]
+    },
+    "fold_state_vs_ideal": {
+     "count": 446,
+     "max_tol_ratio": 0.16999445084270468,
+     "max_abs": 0.009620042011958319,
+     "max_rel_rms": 0.0026561632944172606,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "fold_count0_bitwise_copy": {
+     "count": 28,
+     "violations": 0,
+     "worst_violations": [],
+     "all_bitwise": true
+    },
+    "replay_fold_state": {
+     "count": 38,
+     "max_tol_ratio": 10.608824355509613,
+     "max_abs": 0.00016421079635620117,
+     "max_rel": 0.000244140625,
+     "max_rel_rms": 1.76934617274914e-05,
+     "violations": 28,
+     "worst_violations": [
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 710,
+       "phase": "ar",
+       "T": 5,
+       "hist": 13,
+       "fold": true,
+       "tol_ratio": 10.608824355509613,
+       "max_abs": 0.00016421079635620117,
+       "max_rel": 0.00024409985108278127,
+       "rel_rms": 1.1595645150197884e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 1242,
+       "phase": "ar",
+       "T": 2,
+       "hist": 16,
+       "fold": true,
+       "tol_ratio": 9.993865359113059,
+       "max_abs": 8.630752563476562e-05,
+       "max_rel": 0.00024405365230962357,
+       "rel_rms": 9.260694471086054e-06
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 1145,
+       "phase": "ar",
+       "T": 4,
+       "hist": 15,
+       "fold": true,
+       "tol_ratio": 9.460791164186062,
+       "max_abs": 0.0001341700553894043,
+       "max_rel": 0.000244140625,
+       "rel_rms": 1.76934617274914e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 0,
+       "name": "sd",
+       "step": 191,
+       "phase": "ar",
+       "T": 1,
+       "hist": 16,
+       "fold": true,
+       "tol_ratio": 9.432207337814237,
+       "max_abs": 7.295608520507812e-05,
+       "max_rel": 0.000244140625,
+       "rel_rms": 9.838811187275263e-06
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "ar",
+       "step": 336,
+       "phase": "ar",
+       "T": 1,
+       "hist": 16,
+       "fold": true,
+       "tol_ratio": 8.217332734750034,
+       "max_abs": 0.00012969970703125,
+       "max_rel": 0.000244140625,
+       "rel_rms": 1.2711926843706944e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 1029,
+       "phase": "ar",
+       "T": 9,
+       "hist": 10,
+       "fold": true,
+       "tol_ratio": 7.401768582706623,
+       "max_abs": 3.723800182342529e-05,
+       "max_rel": 6.09936149853927e-05,
+       "rel_rms": 5.0126770772232635e-06
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "ar",
+       "step": 80,
+       "phase": "ar",
+       "T": 1,
+       "hist": 16,
+       "fold": true,
+       "tol_ratio": 7.287337607464524,
+       "max_abs": 1.3981014490127563e-05,
+       "max_rel": 1.5353820603132917e-05,
+       "rel_rms": 2.1834100111785072e-06
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 0,
+       "name": "ar",
+       "step": 96,
+       "phase": "ar",
+       "T": 1,
+       "hist": 16,
+       "fold": true,
+       "tol_ratio": 7.172612144259959,
+       "max_abs": 8.404254913330078e-05,
+       "max_rel": 0.00024408776926823988,
+       "rel_rms": 1.700264546701382e-05
+      }
+     ]
+    },
+    "replay_fold_state_vs_ideal": {
+     "count": 38,
+     "max_tol_ratio": 0.16889831634092886,
+     "max_abs": 0.0089967153945274,
+     "max_rel_rms": 0.0026390361928270135,
+     "violations": 0,
+     "worst_violations": []
+    }
+   },
+   "extra": {
+    "counts": {
+     "calls": 422,
+     "ar_steps": 43,
+     "sd_steps": 379,
+     "verifies": 72,
+     "exports": 45,
+     "flushes": 197,
+     "flushed_records": 2734,
+     "ring_wraps_per_request": {
+      "ar": 26.375,
+      "sd": 16.3125,
+      "win": 129.1875
+     }
+    },
+    "error_by_step_bins": {
+     "ar": [
+      {
+       "first_step": 0,
+       "out_max_tol_ratio": 0.9647404278314339,
+       "out_max_abs": 0.00041547135638492216,
+       "out_max_rel": 0.003886756850234347,
+       "out_max_rel_rms": 0.0017702138788249578,
+       "ideal_max_rel_rms": 0.002768506458634931,
+       "ideal_mean_rel_rms": 0.0024248588093623096
+      },
+      {
+       "first_step": 52,
+       "out_max_tol_ratio": 0.9639804029861457,
+       "out_max_abs": 0.000488135494888825,
+       "out_max_rel": 0.003880575520751434,
+       "out_max_rel_rms": 0.001780553043143107,
+       "ideal_max_rel_rms": 0.003062826382829521,
+       "ideal_mean_rel_rms": 0.0027305554982406497
+      },
+      {
+       "first_step": 105,
+       "out_max_tol_ratio": 0.9718053691275568,
+       "out_max_abs": 0.0004858550745993062,
+       "out_max_rel": 0.003887922942048118,
+       "out_max_rel_rms": 0.0017934103840484324,
+       "ideal_max_rel_rms": 0.0032141050074596593,
+       "ideal_mean_rel_rms": 0.0028267640103357243
+      },
+      {
+       "first_step": 158,
+       "out_max_tol_ratio": 0.9597608436900485,
+       "out_max_abs": 0.0004855134932277294,
+       "out_max_rel": 0.0038868907178492593,
+       "out_max_rel_rms": 0.0018150009167489576,
+       "ideal_max_rel_rms": 0.0032546486684074706,
+       "ideal_mean_rel_rms": 0.002871077092250023
+      },
+      {
+       "first_step": 211,
+       "out_max_tol_ratio": 0.9647170928007482,
+       "out_max_abs": 0.00048718956591345397,
+       "out_max_rel": 0.003890823976384412,
+       "out_max_rel_rms": 0.0018810980768835738,
+       "ideal_max_rel_rms": 0.0033024062855320736,
+       "ideal_mean_rel_rms": 0.0029400827153572536
+      },
+      {
+       "first_step": 263,
+       "out_max_tol_ratio": 1.6688972297119085,
+       "out_max_abs": 0.00048817397476275115,
+       "out_max_rel": 0.0038757702985250356,
+       "out_max_rel_rms": 0.001797871650214433,
+       "ideal_max_rel_rms": 0.00321853386032087,
+       "ideal_mean_rel_rms": 0.002955185552884144
+      },
+      {
+       "first_step": 316,
+       "out_max_tol_ratio": 0.9654074555753785,
+       "out_max_abs": 0.0004849109640726046,
+       "out_max_rel": 0.003875003094060903,
+       "out_max_rel_rms": 0.0018793930012875625,
+       "ideal_max_rel_rms": 0.003341086466943118,
+       "ideal_mean_rel_rms": 0.003005936720936338
+      },
+      {
+       "first_step": 369,
+       "out_max_tol_ratio": 0.9682732903128852,
+       "out_max_abs": 0.0004849535435412222,
+       "out_max_rel": 0.003889990551250448,
+       "out_max_rel_rms": 0.0018182411658420334,
+       "ideal_max_rel_rms": 0.0033128073378016877,
+       "ideal_mean_rel_rms": 0.003011843338730001
+      }
+     ],
+     "sd": [
+      {
+       "first_step": 0,
+       "out_max_tol_ratio": 0.9678591813565065,
+       "out_max_abs": 0.000303105707819773,
+       "out_max_rel": 0.0038882487419063753,
+       "out_max_rel_rms": 0.0017690443997838987,
+       "ideal_max_rel_rms": 0.002797498424505987,
+       "ideal_mean_rel_rms": 0.0022855649573844112
+      },
+      {
+       "first_step": 32,
+       "out_max_tol_ratio": 0.9612952119320534,
+       "out_max_abs": 0.0004721397882369305,
+       "out_max_rel": 0.003885974934486948,
+       "out_max_rel_rms": 0.0017630530263680472,
+       "ideal_max_rel_rms": 0.002932001532564684,
+       "ideal_mean_rel_rms": 0.002610378962744579
+      },
+      {
+       "first_step": 65,
+       "out_max_tol_ratio": 0.9713339947784833,
+       "out_max_abs": 0.00048578987184980105,
+       "out_max_rel": 0.003887058321370326,
+       "out_max_rel_rms": 0.0018583694913990062,
+       "ideal_max_rel_rms": 0.003021733917377898,
+       "ideal_mean_rel_rms": 0.0027431376201952577
+      },
+      {
+       "first_step": 98,
+       "out_max_tol_ratio": 0.97006712307953,
+       "out_max_abs": 0.000488097090574624,
+       "out_max_rel": 0.0038799325012890285,
+       "out_max_rel_rms": 0.001812875454358669,
+       "ideal_max_rel_rms": 0.00305069618423321,
+       "ideal_mean_rel_rms": 0.0027893953026111797
+      },
+      {
+       "first_step": 131,
+       "out_max_tol_ratio": 0.9688295472835738,
+       "out_max_abs": 0.00048596129353506434,
+       "out_max_rel": 0.0038910719468233487,
+       "out_max_rel_rms": 0.001807353758110063,
+       "ideal_max_rel_rms": 0.0031200771539456407,
+       "ideal_mean_rel_rms": 0.0028501643492460757
+      },
+      {
+       "first_step": 163,
+       "out_max_tol_ratio": 0.9715501297891215,
+       "out_max_abs": 0.0004867762173306478,
+       "out_max_rel": 0.0038914344797996905,
+       "out_max_rel_rms": 0.0018037693630699168,
+       "ideal_max_rel_rms": 0.0032553894748487246,
+       "ideal_mean_rel_rms": 0.0028679533288849977
+      },
+      {
+       "first_step": 196,
+       "out_max_tol_ratio": 0.9701764987175395,
+       "out_max_abs": 0.00048692792796717344,
+       "out_max_rel": 0.003883456390149964,
+       "out_max_rel_rms": 0.0017984396214867303,
+       "ideal_max_rel_rms": 0.003215618684145914,
+       "ideal_mean_rel_rms": 0.002905472233005236
+      },
+      {
+       "first_step": 229,
+       "out_max_tol_ratio": 0.9679916103806346,
+       "out_max_abs": 0.0004872401449578234,
+       "out_max_rel": 0.003890138100015488,
+       "out_max_rel_rms": 0.0018229793875684176,
+       "ideal_max_rel_rms": 0.0032298288360528174,
+       "ideal_mean_rel_rms": 0.0029149857974388187
+      }
+     ],
+     "win": [
+      {
+       "first_step": 0,
+       "out_max_tol_ratio": 0.9697295196988986,
+       "out_max_abs": 0.00048787974533945344,
+       "out_max_rel": 0.0038907626458332244,
+       "out_max_rel_rms": 0.001779551636340577,
+       "ideal_max_rel_rms": 0.0030600946519203616,
+       "ideal_mean_rel_rms": 0.002697553159896432
+      },
+      {
+       "first_step": 258,
+       "out_max_tol_ratio": 0.9714571592991618,
+       "out_max_abs": 0.0004875324561388894,
+       "out_max_rel": 0.003890129871300205,
+       "out_max_rel_rms": 0.001737466927786235,
+       "ideal_max_rel_rms": 0.0031990255139542037,
+       "ideal_mean_rel_rms": 0.0029517727918797827
+      },
+      {
+       "first_step": 516,
+       "out_max_tol_ratio": 0.971178201215688,
+       "out_max_abs": 0.0005399666538558612,
+       "out_max_rel": 0.0038914936900220428,
+       "out_max_rel_rms": 0.0018251890230406127,
+       "ideal_max_rel_rms": 0.0033683976557874,
+       "ideal_mean_rel_rms": 0.0029959855944739025
+      },
+      {
+       "first_step": 774,
+       "out_max_tol_ratio": 0.9748022814053959,
+       "out_max_abs": 0.0004881394761093172,
+       "out_max_rel": 0.0038899252004788083,
+       "out_max_rel_rms": 0.0017540726550661525,
+       "ideal_max_rel_rms": 0.0034301053269573892,
+       "ideal_mean_rel_rms": 0.0030032191803294256
+      },
+      {
+       "first_step": 1032,
+       "out_max_tol_ratio": 1.0493536137336286,
+       "out_max_abs": 0.00048788024530915797,
+       "out_max_rel": 0.0038869195061059796,
+       "out_max_rel_rms": 0.0017867916886474358,
+       "ideal_max_rel_rms": 0.003220184926458874,
+       "ideal_mean_rel_rms": 0.0029780459287495
+      },
+      {
+       "first_step": 1290,
+       "out_max_tol_ratio": 1.3783554344370668,
+       "out_max_abs": 0.0004881678924429922,
+       "out_max_rel": 0.0038893825176657504,
+       "out_max_rel_rms": 0.0017334848061964522,
+       "ideal_max_rel_rms": 0.0031818538237877365,
+       "ideal_mean_rel_rms": 0.002990222143343812
+      },
+      {
+       "first_step": 1548,
+       "out_max_tol_ratio": 0.9699531328934935,
+       "out_max_abs": 0.0004881955212634459,
+       "out_max_rel": 0.0038902637360361146,
+       "out_max_rel_rms": 0.0017610155344739715,
+       "ideal_max_rel_rms": 0.0031738284290810147,
+       "ideal_mean_rel_rms": 0.0029853346377164665
+      },
+      {
+       "first_step": 1806,
+       "out_max_tol_ratio": 1.2755112379879407,
+       "out_max_abs": 0.0004882255290378501,
+       "out_max_rel": 0.0038900307126892397,
+       "out_max_rel_rms": 0.0017427777872078185,
+       "ideal_max_rel_rms": 0.003180883680036056,
+       "ideal_mean_rel_rms": 0.0029908486044216524
+      }
+     ]
+    }
+   }
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py::test_long_trajectory_many_wraps_and_folds[32]": {
+   "outcome": "failed",
+   "failure": "    w.call(specs, fold=fold, tag=\"traj\")\n            counts[\"calls\"] += 1\n            for s, T in advance.items():\n                s.p += T\n            if not fold:\n                N, i = draft\n                if i < N:\n                    draft[1] += 1\n                else:\n                    sd.p += rng.randint(0, N) + 1\n                    draft = None\n                    counts[\"verifies\"] += 1\n        counts[\"flushes\"], counts[\"flushed_records\"] = w.expect_stats\n        counts[\"ring_wraps_per_request\"] = {s.name: (s.p - s.p0) / R for s in reqs}\n        extra[\"counts\"] = counts\n        # error as a function of steps: 8 equal bins over each request's own trajectory\n        series = {}\n        for name in (\"ar\", \"sd\", \"win\"):\n            es = [e for e in log if e.get(\"tag\") == \"traj\" and e.get(\"name\") == name]\n            last = max(e[\"step\"] for e in es) + 1\n            bins = [dict(first_step=j * last // 8, out_max_tol_ratio=0.0, out_max_abs=0.0, out_max_rel=0.0,\n                         out_max_rel_rms=0.0, ideal_max_rel_rms=0.0, ideal_mean_rel_rms=[]) for j in range(8)]\n            for e in es:\n                bn = bins[e[\"step\"] * 8 // last]\n                if e[\"kind\"] == \"out\":\n                    bn[\"out_max_tol_ratio\"] = max(bn[\"out_max_tol_ratio\"], e[\"tol_ratio\"])\n                    bn[\"out_max_abs\"] = max(bn[\"out_max_abs\"], e[\"max_abs\"])\n                    bn[\"out_max_rel\"] = max(bn[\"out_max_rel\"], e[\"max_rel\"])\n                    bn[\"out_max_rel_rms\"] = max(bn[\"out_max_rel_rms\"], e[\"rel_rms\"])\n                elif e[\"kind\"] == \"out_vs_ideal\":\n                    bn[\"ideal_max_rel_rms\"] = max(bn[\"ideal_max_rel_rms\"], e[\"rel_rms\"])\n                    bn[\"ideal_mean_rel_rms\"].append(e[\"rel_rms\"])\n            for bn in bins:\n                vals = bn[\"ideal_mean_rel_rms\"]\n                bn[\"ideal_mean_rel_rms\"] = sum(vals) / len(vals) if vals else None\n            series[name] = bins\n        extra[\"error_by_step_bins\"] = series\n>       assert_within_tolerance(log)\n\nblackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py:309: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nlog = [{'kind': 'fold_ran', 'tag': 'prefold', 'value': [False, False, False]}, {'kind': 'out', 'tag': 'traj', 'layer': 0, 'n...', 'tag': 'traj', 'layer': 0, 'name': 'sd', ...}, {'kind': 'rec_g', 'tag': 'traj', 'layer': 0, 'name': 'sd', ...}, ...]\n\n    def assert_within_tolerance(log):\n        bad = {}\n        for e in log:\n            if e[\"kind\"] != \"negative_control\" and e.get(\"tol_ratio\", 0.0) > 1.0:\n                worst = bad.setdefault(e[\"kind\"], [0, e])\n                worst[0] += 1\n                if e[\"tol_ratio\"] > worst[1][\"tol_ratio\"]:\n                    worst[1] = e\n>       assert not bad, \"outside tolerance: \" + \"; \".join(\n               ^^^^^^^\n            f\"{kind}: {n} checks, worst {e}\" for kind, (n, e) in bad.items())\nE       AssertionError: outside tolerance: fold_state: 175 checks, worst {'kind': 'fold_state', 'tag': 'prefold', 'layer': 1, 'src': 2, 'dst': 2, 'b': 201318, 'end': 201350, 'width': 5, 'tol_ratio': 38.719731649413276, 'max_abs': 0.00020910799503326416, 'max_rel': 0.0009769105761690904, 'rel_rms': 1.9155031268465768e-05}; replay_fold_state: 15 checks, worst {'kind': 'replay_fold_state', 'tag': 'traj', 'layer': 1, 'name': 'win', 'step': 49, 'phase': 'ar', 'T': 9, 'hist': 24, 'fold': True, 'tol_ratio': 17.06455609595878, 'max_abs': 0.00029730796813964844, 'max_rel': 0.0004883780187423912, 'rel_rms': 4.3868644026842206e-05}; out: 4 checks, worst {'kind': 'out', 'tag': 'traj', 'layer': 0, 'name': 'win', 'step': 356, 'phase': 'win', 'T': 9, 'hist': 20, 'fold': False, 'tol_ratio': 22.107160711706303, 'max_abs': 0.0004801953878190157, 'max_rel': 0.003872353963915017, 'rel_rms': 0.0016697557661255339, 'excess_over_terms': 3.4946004124140376e-08, 'worst_head_y_rms_over_terms_rms': 6.25546838441743e-07}\n\nblackbox_tests/gdn_replayssm_numeric/gdn_numeric_ref.py:153: AssertionError",
+   "peak_allocated_bytes": 322498048,
+   "summary": {
+    "fold_ran": {
+     "count": 424,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "out": {
+     "count": 2532,
+     "max_tol_ratio": 22.107160711706303,
+     "max_abs": 0.000788604208646182,
+     "max_rel": 0.0038915926437772907,
+     "max_rel_rms": 0.0018534100237104203,
+     "max_excess_over_terms": 4.1735485024044835e-06,
+     "violations": 4,
+     "worst_violations": [
+      {
+       "kind": "out",
+       "tag": "traj",
+       "layer": 0,
+       "name": "win",
+       "step": 356,
+       "phase": "win",
+       "T": 9,
+       "hist": 20,
+       "fold": false,
+       "tol_ratio": 22.107160711706303,
+       "max_abs": 0.0004801953878190157,
+       "max_rel": 0.003872353963915017,
+       "rel_rms": 0.0016697557661255339,
+       "excess_over_terms": 3.4946004124140376e-08,
+       "worst_head_y_rms_over_terms_rms": 6.25546838441743e-07
+      },
+      {
+       "kind": "out",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 639,
+       "phase": "win",
+       "T": 9,
+       "hist": 12,
+       "fold": false,
+       "tol_ratio": 1.3986878331079968,
+       "max_abs": 0.0004621564202141326,
+       "max_rel": 0.0037773771490720916,
+       "rel_rms": 0.0016660670820155732,
+       "excess_over_terms": 1.4504943370449012e-08,
+       "worst_head_y_rms_over_terms_rms": 1.5315331153022306e-05
+      },
+      {
+       "kind": "out",
+       "tag": "traj",
+       "layer": 0,
+       "name": "win",
+       "step": 1311,
+       "phase": "win",
+       "T": 4,
+       "hist": 26,
+       "fold": false,
+       "tol_ratio": 1.1652561280787264,
+       "max_abs": 0.00043225179897501964,
+       "max_rel": 0.0038790033730955087,
+       "rel_rms": 0.0016775467629049294,
+       "excess_over_terms": 2.4069092233090594e-07,
+       "worst_head_y_rms_over_terms_rms": 9.252823366496027e-06
+      },
+      {
+       "kind": "out",
+       "tag": "traj",
+       "layer": 1,
+       "name": "sd",
+       "step": 135,
+       "phase": "ar",
+       "T": 1,
+       "hist": 14,
+       "fold": true,
+       "tol_ratio": 1.1333226970565526,
+       "max_abs": 0.00025481428106166604,
+       "max_rel": 0.0038278490744589667,
+       "rel_rms": 0.0016518410241848443,
+       "excess_over_terms": 9.322906929381896e-09,
+       "worst_head_y_rms_over_terms_rms": 8.918789446686404e-06
+      }
+     ]
+    },
+    "out_vs_ideal": {
+     "count": 2532,
+     "max_tol_ratio": 0.21574484831103327,
+     "max_abs": 0.000930438005346923,
+     "max_rel_rms": 0.003371013254859895,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_u": {
+     "count": 2532,
+     "max_tol_ratio": 0.9795878904877144,
+     "max_abs": 0.014977626925445797,
+     "max_rel": 0.0038911519875696877,
+     "max_rel_rms": 0.0017533786183754408,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_k": {
+     "count": 2532,
+     "max_tol_ratio": 0.9742664164443017,
+     "max_abs": 0.0009765519813623724,
+     "max_rel": 0.0038908537846011324,
+     "max_rel_rms": 0.0017639281402237988,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_g": {
+     "count": 2532,
+     "max_tol_ratio": 0.05923562208212522,
+     "max_abs": 0.00011284601583838594,
+     "max_rel": 4.5650090706784755e-07,
+     "max_rel_rms": 2.450929989566584e-07,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "fold_state": {
+     "count": 258,
+     "max_tol_ratio": 38.719731649413276,
+     "max_abs": 0.0005106329917907715,
+     "max_rel": 0.0009771930827593628,
+     "max_rel_rms": 6.162602277776361e-05,
+     "violations": 175,
+     "worst_violations": [
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 2,
+       "dst": 2,
+       "b": 201318,
+       "end": 201350,
+       "width": 5,
+       "tol_ratio": 38.719731649413276,
+       "max_abs": 0.00020910799503326416,
+       "max_rel": 0.0009769105761690904,
+       "rel_rms": 1.9155031268465768e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 2,
+       "dst": 2,
+       "b": 201739,
+       "end": 201771,
+       "width": 4,
+       "tol_ratio": 29.021253366998963,
+       "max_abs": 0.0005106329917907715,
+       "max_rel": 0.0009771930827593628,
+       "rel_rms": 6.162602277776361e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 0,
+       "dst": 0,
+       "b": 357,
+       "end": 389,
+       "width": 1,
+       "tol_ratio": 27.403891241027317,
+       "max_abs": 0.00014653801918029785,
+       "max_rel": 3.015922619606223e-06,
+       "rel_rms": 1.9497740524335753e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 0,
+       "src": 2,
+       "dst": 2,
+       "b": 200925,
+       "end": 200955,
+       "width": 4,
+       "tol_ratio": 27.055960870909296,
+       "max_abs": 0.0004855990409851074,
+       "max_rel": 0.0004883702387461272,
+       "rel_rms": 2.744382534008441e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 0,
+       "dst": 0,
+       "b": 165,
+       "end": 197,
+       "width": 1,
+       "tol_ratio": 26.18331146450929,
+       "max_abs": 0.00029519200325012207,
+       "max_rel": 0.000976171343026516,
+       "rel_rms": 4.3935575802934445e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 2,
+       "dst": 2,
+       "b": 201286,
+       "end": 201318,
+       "width": 9,
+       "tol_ratio": 22.75408101960233,
+       "max_abs": 6.812810897827148e-05,
+       "max_rel": 5.260914240985922e-06,
+       "rel_rms": 1.056242347749895e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 2,
+       "dst": 2,
+       "b": 201830,
+       "end": 201861,
+       "width": 8,
+       "tol_ratio": 21.290946300198467,
+       "max_abs": 0.0002740025520324707,
+       "max_rel": 0.0004885441742421843,
+       "rel_rms": 2.2744607872761368e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 2,
+       "dst": 2,
+       "b": 201771,
+       "end": 201803,
+       "width": 1,
+       "tol_ratio": 20.728173993101358,
+       "max_abs": 0.00017690658569335938,
+       "max_rel": 0.0004884902446854045,
+       "rel_rms": 1.6099087889774217e-05
+      }
+     ]
+    },
+    "fold_state_vs_ideal": {
+     "count": 258,
+     "max_tol_ratio": 0.17116428019773294,
+     "max_abs": 0.008305200755842845,
+     "max_rel_rms": 0.0026744418780895772,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "replay_fold_state": {
+     "count": 24,
+     "max_tol_ratio": 17.06455609595878,
+     "max_abs": 0.00029730796813964844,
+     "max_rel": 0.0004885281238714337,
+     "max_rel_rms": 4.3868644026842206e-05,
+     "violations": 15,
+     "worst_violations": [
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 49,
+       "phase": "ar",
+       "T": 9,
+       "hist": 24,
+       "fold": true,
+       "tol_ratio": 17.06455609595878,
+       "max_abs": 0.00029730796813964844,
+       "max_rel": 0.0004883780187423912,
+       "rel_rms": 4.3868644026842206e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 132,
+       "phase": "ar",
+       "T": 8,
+       "hist": 27,
+       "fold": true,
+       "tol_ratio": 16.91163014062978,
+       "max_abs": 0.00011813864900128701,
+       "max_rel": 0.000488325756539969,
+       "rel_rms": 1.7538733066897712e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 0,
+       "name": "win",
+       "step": 1738,
+       "phase": "ar",
+       "T": 4,
+       "hist": 32,
+       "fold": true,
+       "tol_ratio": 15.837579888048518,
+       "max_abs": 0.00019812583923339844,
+       "max_rel": 0.0004885234530009921,
+       "rel_rms": 1.9737680423394455e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 867,
+       "phase": "ar",
+       "T": 5,
+       "hist": 30,
+       "fold": true,
+       "tol_ratio": 14.553605004680973,
+       "max_abs": 0.00022330880165100098,
+       "max_rel": 0.0004883805374001453,
+       "rel_rms": 2.704893026540721e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 2084,
+       "phase": "ar",
+       "T": 8,
+       "hist": 26,
+       "fold": true,
+       "tol_ratio": 14.195182467014229,
+       "max_abs": 0.00014129281044006348,
+       "max_rel": 0.0004885281238714337,
+       "rel_rms": 2.027606427598898e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "ar",
+       "step": 64,
+       "phase": "ar",
+       "T": 1,
+       "hist": 32,
+       "fold": true,
+       "tol_ratio": 13.483747058149172,
+       "max_abs": 0.0001875758171081543,
+       "max_rel": 0.0004883792394140077,
+       "rel_rms": 3.3048508787437656e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 0,
+       "name": "win",
+       "step": 132,
+       "phase": "ar",
+       "T": 8,
+       "hist": 27,
+       "fold": true,
+       "tol_ratio": 10.45619186587126,
+       "max_abs": 6.744265556335449e-05,
+       "max_rel": 0.000244140625,
+       "rel_rms": 6.1079379505374875e-06
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 0,
+       "name": "win",
+       "step": 2084,
+       "phase": "ar",
+       "T": 8,
+       "hist": 26,
+       "fold": true,
+       "tol_ratio": 9.224412016312957,
+       "max_abs": 0.00016951560974121094,
+       "max_rel": 0.000244140625,
+       "rel_rms": 1.414868121270198e-05
+      }
+     ]
+    },
+    "replay_fold_state_vs_ideal": {
+     "count": 24,
+     "max_tol_ratio": 0.17021600528612596,
+     "max_abs": 0.008150871149818495,
+     "max_rel_rms": 0.002659625082595718,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "fold_count0_bitwise_copy": {
+     "count": 16,
+     "violations": 0,
+     "worst_violations": [],
+     "all_bitwise": true
+    }
+   },
+   "extra": {
+    "counts": {
+     "calls": 422,
+     "ar_steps": 46,
+     "sd_steps": 376,
+     "verifies": 67,
+     "exports": 48,
+     "flushes": 93,
+     "flushed_records": 2760,
+     "ring_wraps_per_request": {
+      "ar": 13.1875,
+      "sd": 8.0,
+      "win": 66.875
+     }
+    },
+    "error_by_step_bins": {
+     "ar": [
+      {
+       "first_step": 0,
+       "out_max_tol_ratio": 0.9654222760257571,
+       "out_max_abs": 0.00028963646265411924,
+       "out_max_rel": 0.0038884153291905803,
+       "out_max_rel_rms": 0.0017576392264607595,
+       "ideal_max_rel_rms": 0.0028086776145227837,
+       "ideal_mean_rel_rms": 0.0024293561044010014
+      },
+      {
+       "first_step": 52,
+       "out_max_tol_ratio": 0.9642622640470147,
+       "out_max_abs": 0.00047672098096035453,
+       "out_max_rel": 0.0038887044243387232,
+       "out_max_rel_rms": 0.0018534100237104203,
+       "ideal_max_rel_rms": 0.0029901290354483103,
+       "ideal_mean_rel_rms": 0.002748178073994956
+      },
+      {
+       "first_step": 105,
+       "out_max_tol_ratio": 0.9643930112315966,
+       "out_max_abs": 0.00048753084022878923,
+       "out_max_rel": 0.0038909924907284477,
+       "out_max_rel_rms": 0.0017797289443616737,
+       "ideal_max_rel_rms": 0.003191976239642363,
+       "ideal_mean_rel_rms": 0.002843595383741908
+      },
+      {
+       "first_step": 158,
+       "out_max_tol_ratio": 0.962020189541174,
+       "out_max_abs": 0.00048626805044085786,
+       "out_max_rel": 0.0038833017982794885,
+       "out_max_rel_rms": 0.0017932799836919225,
+       "ideal_max_rel_rms": 0.0031320262185960887,
+       "ideal_mean_rel_rms": 0.002887371397802609
+      },
+      {
+       "first_step": 211,
+       "out_max_tol_ratio": 0.9663168731618058,
+       "out_max_abs": 0.0004874889733886001,
+       "out_max_rel": 0.0038867020152374933,
+       "out_max_rel_rms": 0.0018155455388985781,
+       "ideal_max_rel_rms": 0.0032175072801789244,
+       "ideal_mean_rel_rms": 0.0029212488816791745
+      },
+      {
+       "first_step": 263,
+       "out_max_tol_ratio": 0.9740070287900379,
+       "out_max_abs": 0.00048582022057436225,
+       "out_max_rel": 0.0038801347598651755,
+       "out_max_rel_rms": 0.001809843410479596,
+       "ideal_max_rel_rms": 0.003263509985583467,
+       "ideal_mean_rel_rms": 0.002962741184898534
+      },
+      {
+       "first_step": 316,
+       "out_max_tol_ratio": 0.963698478968928,
+       "out_max_abs": 0.0004825724328275105,
+       "out_max_rel": 0.003890958830555386,
+       "out_max_rel_rms": 0.0018248193583011265,
+       "ideal_max_rel_rms": 0.00327651217653901,
+       "ideal_mean_rel_rms": 0.0029869297095180872
+      },
+      {
+       "first_step": 369,
+       "out_max_tol_ratio": 0.9663668732308682,
+       "out_max_abs": 0.00048812424917554775,
+       "out_max_rel": 0.003889647114471723,
+       "out_max_rel_rms": 0.001823716833382527,
+       "ideal_max_rel_rms": 0.0033551904052543124,
+       "ideal_mean_rel_rms": 0.0029780833102915597
+      }
+     ],
+     "sd": [
+      {
+       "first_step": 0,
+       "out_max_tol_ratio": 0.9772566748763258,
+       "out_max_abs": 0.0004616415526595419,
+       "out_max_rel": 0.0038901728484143057,
+       "out_max_rel_rms": 0.0017509235180452577,
+       "ideal_max_rel_rms": 0.002655424992650744,
+       "ideal_mean_rel_rms": 0.0022608614416523105
+      },
+      {
+       "first_step": 32,
+       "out_max_tol_ratio": 0.9720036000440783,
+       "out_max_abs": 0.0004782711564751685,
+       "out_max_rel": 0.003889188712539717,
+       "out_max_rel_rms": 0.0017753952922600158,
+       "ideal_max_rel_rms": 0.0030184335613535635,
+       "ideal_mean_rel_rms": 0.0026412073189154765
+      },
+      {
+       "first_step": 64,
+       "out_max_tol_ratio": 0.9679053623640815,
+       "out_max_abs": 0.00048276952077655477,
+       "out_max_rel": 0.0038915926437772907,
+       "out_max_rel_rms": 0.0017654380711991113,
+       "ideal_max_rel_rms": 0.002980528715034412,
+       "ideal_mean_rel_rms": 0.002738941425667974
+      },
+      {
+       "first_step": 96,
+       "out_max_tol_ratio": 0.9687497222426842,
+       "out_max_abs": 0.0004825801114613504,
+       "out_max_rel": 0.003890528743972398,
+       "out_max_rel_rms": 0.0017977915030779085,
+       "ideal_max_rel_rms": 0.00309891783382518,
+       "ideal_mean_rel_rms": 0.002799268097932542
+      },
+      {
+       "first_step": 128,
+       "out_max_tol_ratio": 1.1333226970565526,
+       "out_max_abs": 0.0004862414763746603,
+       "out_max_rel": 0.0038899164403725316,
+       "out_max_rel_rms": 0.0018235766198341713,
+       "ideal_max_rel_rms": 0.0030322509799400907,
+       "ideal_mean_rel_rms": 0.002833620511339809
+      },
+      {
+       "first_step": 160,
+       "out_max_tol_ratio": 0.966582816221403,
+       "out_max_abs": 0.0004868999434872179,
+       "out_max_rel": 0.0038881168823265604,
+       "out_max_rel_rms": 0.0017723546514908715,
+       "ideal_max_rel_rms": 0.003242206597463991,
+       "ideal_mean_rel_rms": 0.0028769078683168223
+      },
+      {
+       "first_step": 192,
+       "out_max_tol_ratio": 0.9699306032995537,
+       "out_max_abs": 0.0004877819387843485,
+       "out_max_rel": 0.0038863981055613475,
+       "out_max_rel_rms": 0.0017778277658880527,
+       "ideal_max_rel_rms": 0.0031283050821507034,
+       "ideal_mean_rel_rms": 0.0029073640529625384
+      },
+      {
+       "first_step": 224,
+       "out_max_tol_ratio": 0.9735758310117709,
+       "out_max_abs": 0.00048769878544704937,
+       "out_max_rel": 0.0038894574794444974,
+       "out_max_rel_rms": 0.001764833694370575,
+       "ideal_max_rel_rms": 0.0031668148843849433,
+       "ideal_mean_rel_rms": 0.002925746497459672
+      }
+     ],
+     "win": [
+      {
+       "first_step": 0,
+       "out_max_tol_ratio": 0.9713510719836072,
+       "out_max_abs": 0.0004876849024054164,
+       "out_max_rel": 0.0038905966840379683,
+       "out_max_rel_rms": 0.001757712242761186,
+       "ideal_max_rel_rms": 0.003054684471257281,
+       "ideal_mean_rel_rms": 0.002670816337633124
+      },
+      {
+       "first_step": 267,
+       "out_max_tol_ratio": 22.107160711706303,
+       "out_max_abs": 0.0004882491159663438,
+       "out_max_rel": 0.0038908098836208946,
+       "out_max_rel_rms": 0.0018516425293561415,
+       "ideal_max_rel_rms": 0.0032725107853459508,
+       "ideal_mean_rel_rms": 0.0029420968271871217
+      },
+      {
+       "first_step": 534,
+       "out_max_tol_ratio": 1.3986878331079968,
+       "out_max_abs": 0.0004881758373737888,
+       "out_max_rel": 0.0038871330589237674,
+       "out_max_rel_rms": 0.0018452498931230748,
+       "ideal_max_rel_rms": 0.003269396373686836,
+       "ideal_mean_rel_rms": 0.0030069641643950293
+      },
+      {
+       "first_step": 801,
+       "out_max_tol_ratio": 0.973158566975515,
+       "out_max_abs": 0.0004879339561120466,
+       "out_max_rel": 0.0038905605110619553,
+       "out_max_rel_rms": 0.00179678669001317,
+       "ideal_max_rel_rms": 0.003274454386069734,
+       "ideal_mean_rel_rms": 0.0030206834413135015
+      },
+      {
+       "first_step": 1069,
+       "out_max_tol_ratio": 1.1652561280787264,
+       "out_max_abs": 0.00048811571212081795,
+       "out_max_rel": 0.003889963934308077,
+       "out_max_rel_rms": 0.00177148944591066,
+       "ideal_max_rel_rms": 0.003371013254859895,
+       "ideal_mean_rel_rms": 0.003024469059675846
+      },
+      {
+       "first_step": 1336,
+       "out_max_tol_ratio": 0.9717969742720635,
+       "out_max_abs": 0.0004881600323079216,
+       "out_max_rel": 0.003889827347271914,
+       "out_max_rel_rms": 0.0017746140632303755,
+       "ideal_max_rel_rms": 0.003275687856869301,
+       "ideal_mean_rel_rms": 0.003016446209893406
+      },
+      {
+       "first_step": 1603,
+       "out_max_tol_ratio": 0.9748285531918839,
+       "out_max_abs": 0.000788604208646182,
+       "out_max_rel": 0.0038897806215707335,
+       "out_max_rel_rms": 0.001762826504721792,
+       "ideal_max_rel_rms": 0.003243040548484848,
+       "ideal_mean_rel_rms": 0.003000314840221708
+      },
+      {
+       "first_step": 1870,
+       "out_max_tol_ratio": 0.9739818201182913,
+       "out_max_abs": 0.00048817452575652953,
+       "out_max_rel": 0.00389087326099719,
+       "out_max_rel_rms": 0.0017383742965654265,
+       "ideal_max_rel_rms": 0.0032805358692293437,
+       "ideal_mean_rel_rms": 0.003011189538015539
+      }
+     ]
+    }
+   }
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py::test_long_trajectory_many_wraps_and_folds[64]": {
+   "outcome": "failed",
+   "failure": "\n            w.call(specs, fold=fold, tag=\"traj\")\n            counts[\"calls\"] += 1\n            for s, T in advance.items():\n                s.p += T\n            if not fold:\n                N, i = draft\n                if i < N:\n                    draft[1] += 1\n                else:\n                    sd.p += rng.randint(0, N) + 1\n                    draft = None\n                    counts[\"verifies\"] += 1\n        counts[\"flushes\"], counts[\"flushed_records\"] = w.expect_stats\n        counts[\"ring_wraps_per_request\"] = {s.name: (s.p - s.p0) / R for s in reqs}\n        extra[\"counts\"] = counts\n        # error as a function of steps: 8 equal bins over each request's own trajectory\n        series = {}\n        for name in (\"ar\", \"sd\", \"win\"):\n            es = [e for e in log if e.get(\"tag\") == \"traj\" and e.get(\"name\") == name]\n            last = max(e[\"step\"] for e in es) + 1\n            bins = [dict(first_step=j * last // 8, out_max_tol_ratio=0.0, out_max_abs=0.0, out_max_rel=0.0,\n                         out_max_rel_rms=0.0, ideal_max_rel_rms=0.0, ideal_mean_rel_rms=[]) for j in range(8)]\n            for e in es:\n                bn = bins[e[\"step\"] * 8 // last]\n                if e[\"kind\"] == \"out\":\n                    bn[\"out_max_tol_ratio\"] = max(bn[\"out_max_tol_ratio\"], e[\"tol_ratio\"])\n                    bn[\"out_max_abs\"] = max(bn[\"out_max_abs\"], e[\"max_abs\"])\n                    bn[\"out_max_rel\"] = max(bn[\"out_max_rel\"], e[\"max_rel\"])\n                    bn[\"out_max_rel_rms\"] = max(bn[\"out_max_rel_rms\"], e[\"rel_rms\"])\n                elif e[\"kind\"] == \"out_vs_ideal\":\n                    bn[\"ideal_max_rel_rms\"] = max(bn[\"ideal_max_rel_rms\"], e[\"rel_rms\"])\n                    bn[\"ideal_mean_rel_rms\"].append(e[\"rel_rms\"])\n            for bn in bins:\n                vals = bn[\"ideal_mean_rel_rms\"]\n                bn[\"ideal_mean_rel_rms\"] = sum(vals) / len(vals) if vals else None\n            series[name] = bins\n        extra[\"error_by_step_bins\"] = series\n>       assert_within_tolerance(log)\n\nblackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py:309: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nlog = [{'kind': 'out', 'tag': 'traj', 'layer': 0, 'name': 'sd', ...}, {'kind': 'out_vs_ideal', 'tag': 'traj', 'layer': 0, 'n..._g', 'tag': 'traj', 'layer': 0, 'name': 'sd', ...}, {'kind': 'out', 'tag': 'traj', 'layer': 0, 'name': 'ar', ...}, ...]\n\n    def assert_within_tolerance(log):\n        bad = {}\n        for e in log:\n            if e[\"kind\"] != \"negative_control\" and e.get(\"tol_ratio\", 0.0) > 1.0:\n                worst = bad.setdefault(e[\"kind\"], [0, e])\n                worst[0] += 1\n                if e[\"tol_ratio\"] > worst[1][\"tol_ratio\"]:\n                    worst[1] = e\n>       assert not bad, \"outside tolerance: \" + \"; \".join(\n               ^^^^^^^\n            f\"{kind}: {n} checks, worst {e}\" for kind, (n, e) in bad.items())\nE       AssertionError: outside tolerance: fold_state: 206 checks, worst {'kind': 'fold_state', 'tag': 'prefold', 'layer': 1, 'src': 1, 'dst': 1, 'b': 565, 'end': 628, 'width': 8, 'tol_ratio': 81.2865060619007, 'max_abs': 0.0007447898387908936, 'max_rel': 0.00195512037183823, 'rel_rms': 6.786874894162768e-05}; replay_fold_state: 23 checks, worst {'kind': 'replay_fold_state', 'tag': 'traj', 'layer': 1, 'name': 'win', 'step': 987, 'phase': 'ar', 'T': 3, 'hist': 62, 'fold': True, 'tol_ratio': 32.72523885106979, 'max_abs': 0.0005686283111572266, 'max_rel': 0.0009772105175846052, 'rel_rms': 6.276966803430219e-05}; out: 6 checks, worst {'kind': 'out', 'tag': 'traj', 'layer': 0, 'name': 'sd', 'step': 409, 'phase': 'verify', 'T': 2, 'hist': 43, 'fold': False, 'tol_ratio': 7.191692834967815, 'max_abs': 0.0004871291418804824, 'max_rel': 0.0037605768956660806, 'rel_rms': 0.0017420890161361407, 'excess_over_terms': 3.1038242649630537e-08, 'worst_head_y_rms_over_terms_rms': 1.2069155310812113e-06}\n\nblackbox_tests/gdn_replayssm_numeric/gdn_numeric_ref.py:153: AssertionError",
+   "peak_allocated_bytes": 318691840,
+   "summary": {
+    "out": {
+     "count": 4716,
+     "max_tol_ratio": 7.191692834967815,
+     "max_abs": 0.0005137781957454957,
+     "max_rel": 0.00389264091934462,
+     "max_rel_rms": 0.0018767168716148936,
+     "max_excess_over_terms": 5.054095378831939e-05,
+     "violations": 6,
+     "worst_violations": [
+      {
+       "kind": "out",
+       "tag": "traj",
+       "layer": 0,
+       "name": "sd",
+       "step": 409,
+       "phase": "verify",
+       "T": 2,
+       "hist": 43,
+       "fold": false,
+       "tol_ratio": 7.191692834967815,
+       "max_abs": 0.0004871291418804824,
+       "max_rel": 0.0037605768956660806,
+       "rel_rms": 0.0017420890161361407,
+       "excess_over_terms": 3.1038242649630537e-08,
+       "worst_head_y_rms_over_terms_rms": 1.2069155310812113e-06
+      },
+      {
+       "kind": "out",
+       "tag": "traj",
+       "layer": 1,
+       "name": "sd",
+       "step": 174,
+       "phase": "draft",
+       "T": 1,
+       "hist": 49,
+       "fold": false,
+       "tol_ratio": 1.7135027055025376,
+       "max_abs": 0.0004168946907273374,
+       "max_rel": 0.003836574534258894,
+       "rel_rms": 0.0016766547095859385,
+       "excess_over_terms": 1.808812838123274e-08,
+       "worst_head_y_rms_over_terms_rms": 5.398525289382096e-06
+      },
+      {
+       "kind": "out",
+       "tag": "traj",
+       "layer": 0,
+       "name": "win",
+       "step": 298,
+       "phase": "win",
+       "T": 9,
+       "hist": 47,
+       "fold": false,
+       "tol_ratio": 1.1660271077455588,
+       "max_abs": 0.00046344444511992045,
+       "max_rel": 0.0038633440142476854,
+       "rel_rms": 0.001672236866171034,
+       "excess_over_terms": 1.6538640562788692e-07,
+       "worst_head_y_rms_over_terms_rms": 1.1457762756221164e-05
+      },
+      {
+       "kind": "out",
+       "tag": "traj",
+       "layer": 1,
+       "name": "sd",
+       "step": 421,
+       "phase": "verify",
+       "T": 7,
+       "hist": 55,
+       "fold": false,
+       "tol_ratio": 1.0454039546041018,
+       "max_abs": 0.00045282067107321744,
+       "max_rel": 0.0038879038025072307,
+       "rel_rms": 0.0016733485133773758,
+       "excess_over_terms": 7.004934143847457e-09,
+       "worst_head_y_rms_over_terms_rms": 2.397891304761065e-05
+      },
+      {
+       "kind": "out",
+       "tag": "traj",
+       "layer": 1,
+       "name": "sd",
+       "step": 361,
+       "phase": "verify",
+       "T": 5,
+       "hist": 59,
+       "fold": false,
+       "tol_ratio": 1.0208232713830314,
+       "max_abs": 0.00046354787347024917,
+       "max_rel": 0.0038045316143958626,
+       "rel_rms": 0.0016476290708224534,
+       "excess_over_terms": 2.423336333733744e-08,
+       "worst_head_y_rms_over_terms_rms": 8.510602537956727e-05
+      },
+      {
+       "kind": "out",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 1422,
+       "phase": "win",
+       "T": 6,
+       "hist": 6,
+       "fold": false,
+       "tol_ratio": 1.0199797451258494,
+       "max_abs": 0.00048070977320413544,
+       "max_rel": 0.0037904218625746094,
+       "rel_rms": 0.0016795800108837745,
+       "excess_over_terms": 3.479640555478047e-08,
+       "worst_head_y_rms_over_terms_rms": 1.7675699178479252e-05
+      }
+     ]
+    },
+    "out_vs_ideal": {
+     "count": 4716,
+     "max_tol_ratio": 0.2199659810846794,
+     "max_abs": 0.0010366398890773731,
+     "max_rel_rms": 0.0034369684544481157,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_u": {
+     "count": 4716,
+     "max_tol_ratio": 0.9779388540194538,
+     "max_abs": 0.01558680771250387,
+     "max_rel": 0.0038910403043418305,
+     "max_rel_rms": 0.0017721777525854356,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_k": {
+     "count": 4716,
+     "max_tol_ratio": 0.974535084219546,
+     "max_abs": 0.0009765892435307788,
+     "max_rel": 0.0038911038528742863,
+     "max_rel_rms": 0.001774376898124895,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "rec_g": {
+     "count": 4716,
+     "max_tol_ratio": 0.059385117366524805,
+     "max_abs": 6.633958753354818e-05,
+     "max_rel": 3.259133255945728e-07,
+     "max_rel_rms": 2.0378655948110946e-07,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "fold_state": {
+     "count": 280,
+     "max_tol_ratio": 81.2865060619007,
+     "max_abs": 0.0008157491683959961,
+     "max_rel": 0.0019551584461218116,
+     "max_rel_rms": 7.202000504789368e-05,
+     "violations": 206,
+     "worst_violations": [
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 1,
+       "dst": 1,
+       "b": 565,
+       "end": 628,
+       "width": 8,
+       "tol_ratio": 81.2865060619007,
+       "max_abs": 0.0007447898387908936,
+       "max_rel": 0.00195512037183823,
+       "rel_rms": 6.786874894162768e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 2,
+       "dst": 2,
+       "b": 203375,
+       "end": 203435,
+       "width": 9,
+       "tol_ratio": 71.82219775692205,
+       "max_abs": 0.0005384087562561035,
+       "max_rel": 0.001951265471278959,
+       "rel_rms": 5.4600586646482544e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 1,
+       "dst": 1,
+       "b": 628,
+       "end": 689,
+       "width": 7,
+       "tol_ratio": 61.7579000731308,
+       "max_abs": 0.0004028528928756714,
+       "max_rel": 0.0019551584461218116,
+       "rel_rms": 4.807264919467854e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export",
+       "layer": 1,
+       "src": 1,
+       "dst": 4,
+       "b": 689,
+       "end": 689,
+       "width": 0,
+       "tol_ratio": 61.7579000731308,
+       "max_abs": 0.0004028528928756714,
+       "max_rel": 0.0019551584461218116,
+       "rel_rms": 4.807264919467854e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export",
+       "layer": 1,
+       "src": 1,
+       "dst": 3,
+       "b": 689,
+       "end": 689,
+       "width": 0,
+       "tol_ratio": 61.7579000731308,
+       "max_abs": 0.0004028528928756714,
+       "max_rel": 0.0019551584461218116,
+       "rel_rms": 4.807264919467854e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 2,
+       "dst": 2,
+       "b": 201965,
+       "end": 202028,
+       "width": 8,
+       "tol_ratio": 43.203007373594076,
+       "max_abs": 0.00012665987015239577,
+       "max_rel": 6.105067353491523e-05,
+       "rel_rms": 1.0765425405681448e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "export",
+       "layer": 1,
+       "src": 2,
+       "dst": 4,
+       "b": 202028,
+       "end": 202028,
+       "width": 0,
+       "tol_ratio": 43.203007373594076,
+       "max_abs": 0.00012665987015239577,
+       "max_rel": 6.105067353491523e-05,
+       "rel_rms": 1.0765425405681448e-05
+      },
+      {
+       "kind": "fold_state",
+       "tag": "prefold",
+       "layer": 1,
+       "src": 2,
+       "dst": 2,
+       "b": 201477,
+       "end": 201535,
+       "width": 7,
+       "tol_ratio": 42.69919405341004,
+       "max_abs": 0.0008157491683959961,
+       "max_rel": 0.0009762419046766347,
+       "rel_rms": 6.93883970741266e-05
+      }
+     ]
+    },
+    "fold_state_vs_ideal": {
+     "count": 280,
+     "max_tol_ratio": 0.17028478135846667,
+     "max_abs": 0.00909876413471844,
+     "max_rel_rms": 0.0026606997087260417,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "fold_ran": {
+     "count": 773,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "replay_fold_state": {
+     "count": 26,
+     "max_tol_ratio": 32.72523885106979,
+     "max_abs": 0.0005686283111572266,
+     "max_rel": 0.000977222488173012,
+     "max_rel_rms": 7.635430719725083e-05,
+     "violations": 23,
+     "worst_violations": [
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 987,
+       "phase": "ar",
+       "T": 3,
+       "hist": 62,
+       "fold": true,
+       "tol_ratio": 32.72523885106979,
+       "max_abs": 0.0005686283111572266,
+       "max_rel": 0.0009772105175846052,
+       "rel_rms": 6.276966803430219e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 1964,
+       "phase": "ar",
+       "T": 9,
+       "hist": 63,
+       "fold": true,
+       "tol_ratio": 32.09240441723966,
+       "max_abs": 0.0002785623073577881,
+       "max_rel": 0.000976172546398375,
+       "rel_rms": 3.24388611050499e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 1295,
+       "phase": "ar",
+       "T": 4,
+       "hist": 62,
+       "fold": true,
+       "tol_ratio": 29.47378983600355,
+       "max_abs": 8.681416511535645e-05,
+       "max_rel": 3.063313649602239e-05,
+       "rel_rms": 1.107191978857749e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "ar",
+       "step": 64,
+       "phase": "ar",
+       "T": 1,
+       "hist": 64,
+       "fold": true,
+       "tol_ratio": 28.34661737252865,
+       "max_abs": 0.0003470182418823242,
+       "max_rel": 0.0009772090466282038,
+       "rel_rms": 5.50624072338499e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 3128,
+       "phase": "ar",
+       "T": 6,
+       "hist": 61,
+       "fold": true,
+       "tol_ratio": 25.20213593795385,
+       "max_abs": 0.00039070844650268555,
+       "max_rel": 0.000977157474106727,
+       "rel_rms": 5.483964736637007e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "ar",
+       "step": 192,
+       "phase": "ar",
+       "T": 1,
+       "hist": 64,
+       "fold": true,
+       "tol_ratio": 25.155623884065403,
+       "max_abs": 0.0004321932792663574,
+       "max_rel": 0.0009762256381510866,
+       "rel_rms": 7.635430719725083e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 1,
+       "name": "win",
+       "step": 3067,
+       "phase": "ar",
+       "T": 7,
+       "hist": 61,
+       "fold": true,
+       "tol_ratio": 23.19386071514919,
+       "max_abs": 0.000383526086807251,
+       "max_rel": 0.000977222488173012,
+       "rel_rms": 5.9908293139908326e-05
+      },
+      {
+       "kind": "replay_fold_state",
+       "tag": "traj",
+       "layer": 0,
+       "name": "win",
+       "step": 3067,
+       "phase": "ar",
+       "T": 7,
+       "hist": 61,
+       "fold": true,
+       "tol_ratio": 17.996379249811426,
+       "max_abs": 0.00029206275939941406,
+       "max_rel": 0.0004885428626100268,
+       "rel_rms": 3.663547949992207e-05
+      }
+     ]
+    },
+    "replay_fold_state_vs_ideal": {
+     "count": 26,
+     "max_tol_ratio": 0.1703840350128404,
+     "max_abs": 0.009102717145551692,
+     "max_rel_rms": 0.0026622505470756314,
+     "violations": 0,
+     "worst_violations": []
+    },
+    "fold_count0_bitwise_copy": {
+     "count": 22,
+     "violations": 0,
+     "worst_violations": [],
+     "all_bitwise": true
+    }
+   },
+   "extra": {
+    "counts": {
+     "calls": 786,
+     "ar_steps": 80,
+     "sd_steps": 706,
+     "verifies": 135,
+     "exports": 67,
+     "flushes": 86,
+     "flushed_records": 5301,
+     "ring_wraps_per_request": {
+      "ar": 12.28125,
+      "sd": 8.0625,
+      "win": 63.734375
+     }
+    },
+    "error_by_step_bins": {
+     "ar": [
+      {
+       "first_step": 0,
+       "out_max_tol_ratio": 0.9742695207856474,
+       "out_max_abs": 0.00045308224210305337,
+       "out_max_rel": 0.003887028906115262,
+       "out_max_rel_rms": 0.0017971207300515964,
+       "ideal_max_rel_rms": 0.0030385960120519156,
+       "ideal_mean_rel_rms": 0.0025758404686288985
+      },
+      {
+       "first_step": 98,
+       "out_max_tol_ratio": 0.9695273413080497,
+       "out_max_abs": 0.00048742654433570065,
+       "out_max_rel": 0.0038822737395837756,
+       "out_max_rel_rms": 0.0018767168716148936,
+       "ideal_max_rel_rms": 0.003164561873456458,
+       "ideal_mean_rel_rms": 0.002851715962807716
+      },
+      {
+       "first_step": 196,
+       "out_max_tol_ratio": 0.9750423504073115,
+       "out_max_abs": 0.000488027734229346,
+       "out_max_rel": 0.003891086595246245,
+       "out_max_rel_rms": 0.0018341338033576885,
+       "ideal_max_rel_rms": 0.003247767339506676,
+       "ideal_mean_rel_rms": 0.002922138828641308
+      },
+      {
+       "first_step": 294,
+       "out_max_tol_ratio": 0.9742720859862152,
+       "out_max_abs": 0.0004879839095589533,
+       "out_max_rel": 0.0038902541158863943,
+       "out_max_rel_rms": 0.0018135299973339027,
+       "ideal_max_rel_rms": 0.003269971441973456,
+       "ideal_mean_rel_rms": 0.0029406450211935924
+      },
+      {
+       "first_step": 393,
+       "out_max_tol_ratio": 0.9797857228962565,
+       "out_max_abs": 0.0004875933558502743,
+       "out_max_rel": 0.0038901468907974806,
+       "out_max_rel_rms": 0.001839579816230992,
+       "ideal_max_rel_rms": 0.00342079037567929,
+       "ideal_mean_rel_rms": 0.0029891465491992623
+      },
+      {
+       "first_step": 491,
+       "out_max_tol_ratio": 0.9685070268268348,
+       "out_max_abs": 0.00048783641290467417,
+       "out_max_rel": 0.0038902791328999597,
+       "out_max_rel_rms": 0.0018553100325978185,
+       "ideal_max_rel_rms": 0.0033690961970138547,
+       "ideal_mean_rel_rms": 0.00300850785356049
+      },
+      {
+       "first_step": 589,
+       "out_max_tol_ratio": 0.9597758261453355,
+       "out_max_abs": 0.0005137781957454957,
+       "out_max_rel": 0.0038821913077033603,
+       "out_max_rel_rms": 0.0017988391097392624,
+       "ideal_max_rel_rms": 0.003390786295305375,
+       "ideal_mean_rel_rms": 0.003000603612034715
+      },
+      {
+       "first_step": 687,
+       "out_max_tol_ratio": 0.9687450918203808,
+       "out_max_abs": 0.00048822968074685447,
+       "out_max_rel": 0.0038902798986300436,
+       "out_max_rel_rms": 0.0018218731340301022,
+       "ideal_max_rel_rms": 0.0034130442420229174,
+       "ideal_mean_rel_rms": 0.0030168979135643875
+      }
+     ],
+     "sd": [
+      {
+       "first_step": 0,
+       "out_max_tol_ratio": 0.9718829920733555,
+       "out_max_abs": 0.0004601770603793187,
+       "out_max_rel": 0.003890223131998689,
+       "out_max_rel_rms": 0.0017634966055057725,
+       "ideal_max_rel_rms": 0.0028616160774501426,
+       "ideal_mean_rel_rms": 0.002441640059999179
+      },
+      {
+       "first_step": 64,
+       "out_max_tol_ratio": 0.9683804840851318,
+       "out_max_abs": 0.00048768563749829186,
+       "out_max_rel": 0.0038910203722450016,
+       "out_max_rel_rms": 0.0017983996475282548,
+       "ideal_max_rel_rms": 0.0032561413102565246,
+       "ideal_mean_rel_rms": 0.002779199239391669
+      },
+      {
+       "first_step": 129,
+       "out_max_tol_ratio": 1.7135027055025376,
+       "out_max_abs": 0.0004880786456742392,
+       "out_max_rel": 0.003890387775858182,
+       "out_max_rel_rms": 0.0017880265112579998,
+       "ideal_max_rel_rms": 0.003186493305071117,
+       "ideal_mean_rel_rms": 0.002881634104922239
+      },
+      {
+       "first_step": 193,
+       "out_max_tol_ratio": 0.9721949117129027,
+       "out_max_abs": 0.0004881985339479922,
+       "out_max_rel": 0.003890388865696449,
+       "out_max_rel_rms": 0.0018133571102447036,
+       "ideal_max_rel_rms": 0.003329711526865425,
+       "ideal_mean_rel_rms": 0.002925845467539307
+      },
+      {
+       "first_step": 258,
+       "out_max_tol_ratio": 0.9746015381447809,
+       "out_max_abs": 0.0004880441195871943,
+       "out_max_rel": 0.003888989114776164,
+       "out_max_rel_rms": 0.0018225497088100596,
+       "ideal_max_rel_rms": 0.0032759520466275906,
+       "ideal_mean_rel_rms": 0.0029434029182028444
+      },
+      {
+       "first_step": 322,
+       "out_max_tol_ratio": 1.0208232713830314,
+       "out_max_abs": 0.0004862383738926668,
+       "out_max_rel": 0.003887311278515703,
+       "out_max_rel_rms": 0.0018067458391766036,
+       "ideal_max_rel_rms": 0.0033159266124912355,
+       "ideal_mean_rel_rms": 0.0029667608198950335
+      },
+      {
+       "first_step": 387,
+       "out_max_tol_ratio": 7.191692834967815,
+       "out_max_abs": 0.00048805436092133614,
+       "out_max_rel": 0.0038887407973659796,
+       "out_max_rel_rms": 0.0018016271471180477,
+       "ideal_max_rel_rms": 0.003402954440830927,
+       "ideal_mean_rel_rms": 0.0029772677798769265
+      },
+      {
+       "first_step": 451,
+       "out_max_tol_ratio": 0.9665467892140197,
+       "out_max_abs": 0.0004882507154766458,
+       "out_max_rel": 0.0038862839730523808,
+       "out_max_rel_rms": 0.0018260956886146755,
+       "ideal_max_rel_rms": 0.0034369684544481157,
+       "ideal_mean_rel_rms": 0.0029808051132267925
+      }
+     ],
+     "win": [
+      {
+       "first_step": 0,
+       "out_max_tol_ratio": 1.1660271077455588,
+       "out_max_abs": 0.00048794031907653523,
+       "out_max_rel": 0.003891357731005929,
+       "out_max_rel_rms": 0.001765818983843813,
+       "ideal_max_rel_rms": 0.0032016674169403027,
+       "ideal_mean_rel_rms": 0.0028063175518953506
+      },
+      {
+       "first_step": 509,
+       "out_max_tol_ratio": 0.9732762230302454,
+       "out_max_abs": 0.0004882649797471328,
+       "out_max_rel": 0.0038903490307119924,
+       "out_max_rel_rms": 0.0017244663794229807,
+       "ideal_max_rel_rms": 0.00316594753027966,
+       "ideal_mean_rel_rms": 0.0029671149170146134
+      },
+      {
+       "first_step": 1019,
+       "out_max_tol_ratio": 1.0199797451258494,
+       "out_max_abs": 0.0004882862187929327,
+       "out_max_rel": 0.003889542098331215,
+       "out_max_rel_rms": 0.0018195409858967526,
+       "ideal_max_rel_rms": 0.003205670737695258,
+       "ideal_mean_rel_rms": 0.0029822373827111414
+      },
+      {
+       "first_step": 1529,
+       "out_max_tol_ratio": 0.9739798838829243,
+       "out_max_abs": 0.0004882018038958047,
+       "out_max_rel": 0.0038888478046526973,
+       "out_max_rel_rms": 0.001733727714887078,
+       "ideal_max_rel_rms": 0.0032495666903657144,
+       "ideal_mean_rel_rms": 0.0029852491895902954
+      },
+      {
+       "first_step": 2039,
+       "out_max_tol_ratio": 0.9756859811946024,
+       "out_max_abs": 0.00048820598347573685,
+       "out_max_rel": 0.003889813440689749,
+       "out_max_rel_rms": 0.0018607212876785748,
+       "ideal_max_rel_rms": 0.003327599453541868,
+       "ideal_mean_rel_rms": 0.0029839740354421183
+      },
+      {
+       "first_step": 2549,
+       "out_max_tol_ratio": 0.9736169540998542,
+       "out_max_abs": 0.0004881562832780295,
+       "out_max_rel": 0.003891415492896951,
+       "out_max_rel_rms": 0.0018034720619980189,
+       "ideal_max_rel_rms": 0.0033111131634009543,
+       "ideal_mean_rel_rms": 0.002989530871879149
+      },
+      {
+       "first_step": 3059,
+       "out_max_tol_ratio": 0.971146535852574,
+       "out_max_abs": 0.00048815453206910164,
+       "out_max_rel": 0.00389264091934462,
+       "out_max_rel_rms": 0.0017441975818454207,
+       "ideal_max_rel_rms": 0.003343606853443282,
+       "ideal_mean_rel_rms": 0.002980474703399356
+      },
+      {
+       "first_step": 3569,
+       "out_max_tol_ratio": 0.9733928658349593,
+       "out_max_abs": 0.0004882432705661799,
+       "out_max_rel": 0.003889689007330687,
+       "out_max_rel_rms": 0.0018284560145179003,
+       "ideal_max_rel_rms": 0.003253999547993586,
+       "ideal_mean_rel_rms": 0.002987527057716766
+      }
+     ]
+    }
+   }
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py::test_fold_precision_with_strong_varying_decay[4]": {
+   "outcome": "failed",
+   "failure": "count = 4\nlog = [{'kind': 'fold_state', 'head': 0, 'count': 4, 'sum_g': -0.07699830830097198, ...}, {'kind': 'fold_state', 'head': 1, ..._g': -0.27203967422246933, ...}, {'kind': 'fold_state', 'head': 5, 'count': 4, 'sum_g': -0.3994279280304909, ...}, ...]\nextra = {'per_head': [{'head': 0, 'sum_g': -0.07699830830097198, 'tol_ratio': 0.0022418475054824284, 'max_rel': 3.367747529328...d': 5, 'sum_g': -0.3994279280304909, 'tol_ratio': 0.0021650398411373344, 'max_rel': 2.8226538294572004e-07, ...}, ...]}\n\n    @pytest.mark.parametrize(\"count\", [4, 16, 64])\n    def test_fold_precision_with_strong_varying_decay(count, log, extra):\n        \"\"\"Detects: fold accuracy far from fp32 when the folded records carry large per-token decays\n        that vary between tokens (the checkpoint has heads with g near -92 per token at a=0 in\n        layer 0, and |g| > 8 in six layers). Records are written directly: fold's published input.\"\"\"\n        R = 64\n        gen = torch.Generator(device=DEV).manual_seed(700 + count)\n        randn = lambda *shape: torch.randn(*shape, generator=gen, device=DEV)\n        state = torch.zeros(1, 2, HV, V, K, device=DEV)\n        state[0, 0] = 0.1 * randn(HV, V, K)\n        u = (0.5 * randn(1, 1, HV, R, V)).to(BF16)\n        k = l2norm(randn(1, 1, H, R, K)).to(BF16)\n        typical = 2.0 ** (torch.arange(HV, device=DEV) / 2 - 6)  # per-head |g|: 2^-6 .. 2^9.5\n        g = -typical[None, None, :, None] * (0.5 + torch.rand(1, 1, HV, R, generator=gen, device=DEV))\n        b = 1000\n        start = torch.tensor([b], dtype=I32, device=DEV)\n        gdn_replay_fold(state, u, k, g, start, torch.tensor([[0, 1, 0, b + count, 0]], dtype=I32, device=DEV))\n        idx = torch.arange(b, b + count, device=DEV) & (R - 1)\n        ref = replay_records(state[0, 0].to(F64), u[0, 0][:, idx].transpose(0, 1).to(F64),\n                             k[0, 0][:, idx].transpose(0, 1).to(F64), g[0, 0][:, idx].T.to(F64))\n        cum = g[0, 0][:, idx].to(F64).sum(-1)\n        for j in range(HV):\n            compare(log, \"fold_state\", state[0, 1, j], ref[j], STATE_RTOL, STATE_ATOL * rms(ref[j], (-2, -1)),\n                    head=j, count=count, sum_g=cum[j].item())\n        extra[\"per_head\"] = [dict(head=e[\"head\"], sum_g=e[\"sum_g\"], tol_ratio=e[\"tol_ratio\"], max_rel=e[\"max_rel\"],\n                                  rel_rms=e[\"rel_rms\"]) for e in log]\n>       assert_within_tolerance(log)\n\nblackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py:338: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nlog = [{'kind': 'fold_state', 'head': 0, 'count': 4, 'sum_g': -0.07699830830097198, ...}, {'kind': 'fold_state', 'head': 1, ..._g': -0.27203967422246933, ...}, {'kind': 'fold_state', 'head': 5, 'count': 4, 'sum_g': -0.3994279280304909, ...}, ...]\n\n    def assert_within_tolerance(log):\n        bad = {}\n        for e in log:\n            if e[\"kind\"] != \"negative_control\" and e.get(\"tol_ratio\", 0.0) > 1.0:\n                worst = bad.setdefault(e[\"kind\"], [0, e])\n                worst[0] += 1\n                if e[\"tol_ratio\"] > worst[1][\"tol_ratio\"]:\n                    worst[1] = e\n>       assert not bad, \"outside tolerance: \" + \"; \".join(\n               ^^^^^^^\n            f\"{kind}: {n} checks, worst {e}\" for kind, (n, e) in bad.items())\nE       AssertionError: outside tolerance: fold_state: 1 checks, worst {'kind': 'fold_state', 'head': 27, 'count': 4, 'sum_g': -648.1467666625977, 'tol_ratio': 1.4888089928037505, 'max_abs': 1.5944242477416992e-05, 'max_rel': 6.103515625e-05, 'rel_rms': 6.099554757832057e-05}\n\nblackbox_tests/gdn_replayssm_numeric/gdn_numeric_ref.py:153: AssertionError",
+   "peak_allocated_bytes": 149113344,
+   "summary": {
+    "fold_state": {
+     "count": 32,
+     "max_tol_ratio": 1.4888089928037505,
+     "max_abs": 1.5944242477416992e-05,
+     "max_rel": 6.103515625e-05,
+     "max_rel_rms": 6.099554757832057e-05,
+     "violations": 1,
+     "worst_violations": [
+      {
+       "kind": "fold_state",
+       "head": 27,
+       "count": 4,
+       "sum_g": -648.1467666625977,
+       "tol_ratio": 1.4888089928037505,
+       "max_abs": 1.5944242477416992e-05,
+       "max_rel": 6.103515625e-05,
+       "rel_rms": 6.099554757832057e-05
+      }
+     ]
+    }
+   },
+   "extra": {
+    "per_head": [
+     {
+      "head": 0,
+      "sum_g": -0.07699830830097198,
+      "tol_ratio": 0.0022418475054824284,
+      "max_rel": 3.367747529328472e-07,
+      "rel_rms": 6.714803302134246e-08
+     },
+     {
+      "head": 1,
+      "sum_g": -0.09052634425461292,
+      "tol_ratio": 0.003570969933469616,
+      "max_rel": 4.926404656336427e-07,
+      "rel_rms": 9.019579987910919e-08
+     },
+     {
+      "head": 2,
+      "sum_g": -0.10340032540261745,
+      "tol_ratio": 0.002185920485509137,
+      "max_rel": 3.035992890851788e-07,
+      "rel_rms": 6.701084994966159e-08
+     },
+     {
+      "head": 3,
+      "sum_g": -0.18589244782924652,
+      "tol_ratio": 0.0028067954219935195,
+      "max_rel": 3.1197044923741597e-07,
+      "rel_rms": 7.529765162443878e-08
+     },
+     {
+      "head": 4,
+      "sum_g": -0.27203967422246933,
+      "tol_ratio": 0.0024789419782408183,
+      "max_rel": 4.135839710123072e-07,
+      "rel_rms": 7.79815614978045e-08
+     },
+     {
+      "head": 5,
+      "sum_g": -0.3994279280304909,
+      "tol_ratio": 0.0021650398411373344,
+      "max_rel": 2.8226538294572004e-07,
+      "rel_rms": 7.516271512641668e-08
+     },
+     {
+      "head": 6,
+      "sum_g": -0.5087020099163055,
+      "tol_ratio": 0.0028204466375695964,
+      "max_rel": 3.326588971309361e-07,
+      "rel_rms": 8.25680867778378e-08
+     },
+     {
+      "head": 7,
+      "sum_g": -0.6223869696259499,
+      "tol_ratio": 0.00214499202304044,
+      "max_rel": 3.1458675274375966e-07,
+      "rel_rms": 7.009421764010645e-08
+     },
+     {
+      "head": 8,
+      "sum_g": -0.7895785719156265,
+      "tol_ratio": 0.0029271926107647564,
+      "max_rel": 3.9631084704953246e-07,
+      "rel_rms": 8.289208362883122e-08
+     },
+     {
+      "head": 9,
+      "sum_g": -1.2541846483945847,
+      "tol_ratio": 0.004029221620466755,
+      "max_rel": 5.943258205875542e-07,
+      "rel_rms": 1.1564461240002913e-07
+     },
+     {
+      "head": 10,
+      "sum_g": -2.2348437309265137,
+      "tol_ratio": 0.002784432210603941,
+      "max_rel": 3.207401596265838e-07,
+      "rel_rms": 7.612567731039902e-08
+     },
+     {
+      "head": 11,
+      "sum_g": -2.556852877140045,
+      "tol_ratio": 0.003003392292448545,
+      "max_rel": 3.063454370208236e-07,
+      "rel_rms": 6.842478120620951e-08
+     },
+     {
+      "head": 12,
+      "sum_g": -4.444205582141876,
+      "tol_ratio": 0.002211491762379597,
+      "max_rel": 4.635482430647398e-07,
+      "rel_rms": 9.24319357662943e-08
+     },
+     {
+      "head": 13,
+      "sum_g": -5.299619257450104,
+      "tol_ratio": 0.0022433310608153795,
+      "max_rel": 2.4796857978831736e-07,
+      "rel_rms": 6.27367721429469e-08
+     },
+     {
+      "head": 14,
+      "sum_g": -5.9659740924835205,
+      "tol_ratio": 0.004351768095961087,
+      "max_rel": 7.23860252091252e-07,
+      "rel_rms": 1.4483071044790323e-07
+     },
+     {
+      "head": 15,
+      "sum_g": -10.622158408164978,
+      "tol_ratio": 0.0031042686807257612,
+      "max_rel": 4.4315921255639223e-07,
+      "rel_rms": 6.591015118137295e-08
+     },
+     {
+      "head": 16,
+      "sum_g": -16.062002182006836,
+      "tol_ratio": 0.0029098062202986144,
+      "max_rel": 2.013870779861953e-07,
+      "rel_rms": 5.256624666884818e-08
+     },
+     {
+      "head": 17,
+      "sum_g": -20.49307942390442,
+      "tol_ratio": 0.0021192899667996784,
+      "max_rel": 1.4316463261304381e-07,
+      "rel_rms": 4.613216419155119e-08
+     },
+     {
+      "head": 18,
+      "sum_g": -30.897825241088867,
+      "tol_ratio": 0.0027527061152956664,
+      "max_rel": 1.3500968428026765e-07,
+      "rel_rms": 4.491455787834051e-08
+     },
+     {
+      "head": 19,
+      "sum_g": -45.89185857772827,
+      "tol_ratio": 0.08925974578746876,
+      "max_rel": 3.976046508758269e-06,
+      "rel_rms": 3.8862340892664525e-06
+     },
+     {
+      "head": 20,
+      "sum_g": -55.94087314605713,
+      "tol_ratio": 0.0011386834808444972,
+      "max_rel": 1.0758513289453319e-07,
+      "rel_rms": 2.5127249911698057e-08
+     },
+     {
+      "head": 21,
+      "sum_g": -116.80634117126465,
+      "tol_ratio": 2.757303850685748e-10,
+      "max_rel": 4.3878177635094236e-14,
+      "rel_rms": 7.444177017205367e-15
+     },
+     {
+      "head": 22,
+      "sum_g": -167.28911972045898,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     },
+     {
+      "head": 23,
+      "sum_g": -150.10556602478027,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     },
+     {
+      "head": 24,
+      "sum_g": -214.91733932495117,
+      "tol_ratio": 4.4979783922124443e-10,
+      "max_rel": 6.317651715779622e-14,
+      "rel_rms": 1.1224142864793807e-14
+     },
+     {
+      "head": 25,
+      "sum_g": -325.1620864868164,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     },
+     {
+      "head": 26,
+      "sum_g": -441.953857421875,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     },
+     {
+      "head": 27,
+      "sum_g": -648.1467666625977,
+      "tol_ratio": 1.4888089928037505,
+      "max_rel": 6.103515625e-05,
+      "rel_rms": 6.099554757832057e-05
+     },
+     {
+      "head": 28,
+      "sum_g": -757.2670135498047,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     },
+     {
+      "head": 29,
+      "sum_g": -1441.2617645263672,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     },
+     {
+      "head": 30,
+      "sum_g": -1735.3857727050781,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     },
+     {
+      "head": 31,
+      "sum_g": -3327.252685546875,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     }
+    ]
+   }
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py::test_fold_precision_with_strong_varying_decay[16]": {
+   "outcome": "failed",
+   "failure": "count = 16\nlog = [{'kind': 'fold_state', 'head': 0, 'count': 16, 'sum_g': -0.26661999709904194, ...}, {'kind': 'fold_state', 'head': 1,..._g': -0.8495691530406475, ...}, {'kind': 'fold_state', 'head': 5, 'count': 16, 'sum_g': -1.3858266063034534, ...}, ...]\nextra = {'per_head': [{'head': 0, 'sum_g': -0.26661999709904194, 'tol_ratio': 0.0031263679682166185, 'max_rel': 4.134053242950...ad': 5, 'sum_g': -1.3858266063034534, 'tol_ratio': 0.0031602755845035347, 'max_rel': 5.608805657801282e-07, ...}, ...]}\n\n    @pytest.mark.parametrize(\"count\", [4, 16, 64])\n    def test_fold_precision_with_strong_varying_decay(count, log, extra):\n        \"\"\"Detects: fold accuracy far from fp32 when the folded records carry large per-token decays\n        that vary between tokens (the checkpoint has heads with g near -92 per token at a=0 in\n        layer 0, and |g| > 8 in six layers). Records are written directly: fold's published input.\"\"\"\n        R = 64\n        gen = torch.Generator(device=DEV).manual_seed(700 + count)\n        randn = lambda *shape: torch.randn(*shape, generator=gen, device=DEV)\n        state = torch.zeros(1, 2, HV, V, K, device=DEV)\n        state[0, 0] = 0.1 * randn(HV, V, K)\n        u = (0.5 * randn(1, 1, HV, R, V)).to(BF16)\n        k = l2norm(randn(1, 1, H, R, K)).to(BF16)\n        typical = 2.0 ** (torch.arange(HV, device=DEV) / 2 - 6)  # per-head |g|: 2^-6 .. 2^9.5\n        g = -typical[None, None, :, None] * (0.5 + torch.rand(1, 1, HV, R, generator=gen, device=DEV))\n        b = 1000\n        start = torch.tensor([b], dtype=I32, device=DEV)\n        gdn_replay_fold(state, u, k, g, start, torch.tensor([[0, 1, 0, b + count, 0]], dtype=I32, device=DEV))\n        idx = torch.arange(b, b + count, device=DEV) & (R - 1)\n        ref = replay_records(state[0, 0].to(F64), u[0, 0][:, idx].transpose(0, 1).to(F64),\n                             k[0, 0][:, idx].transpose(0, 1).to(F64), g[0, 0][:, idx].T.to(F64))\n        cum = g[0, 0][:, idx].to(F64).sum(-1)\n        for j in range(HV):\n            compare(log, \"fold_state\", state[0, 1, j], ref[j], STATE_RTOL, STATE_ATOL * rms(ref[j], (-2, -1)),\n                    head=j, count=count, sum_g=cum[j].item())\n        extra[\"per_head\"] = [dict(head=e[\"head\"], sum_g=e[\"sum_g\"], tol_ratio=e[\"tol_ratio\"], max_rel=e[\"max_rel\"],\n                                  rel_rms=e[\"rel_rms\"]) for e in log]\n>       assert_within_tolerance(log)\n\nblackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py:338: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nlog = [{'kind': 'fold_state', 'head': 0, 'count': 16, 'sum_g': -0.26661999709904194, ...}, {'kind': 'fold_state', 'head': 1,..._g': -0.8495691530406475, ...}, {'kind': 'fold_state', 'head': 5, 'count': 16, 'sum_g': -1.3858266063034534, ...}, ...]\n\n    def assert_within_tolerance(log):\n        bad = {}\n        for e in log:\n            if e[\"kind\"] != \"negative_control\" and e.get(\"tol_ratio\", 0.0) > 1.0:\n                worst = bad.setdefault(e[\"kind\"], [0, e])\n                worst[0] += 1\n                if e[\"tol_ratio\"] > worst[1][\"tol_ratio\"]:\n                    worst[1] = e\n>       assert not bad, \"outside tolerance: \" + \"; \".join(\n               ^^^^^^^\n            f\"{kind}: {n} checks, worst {e}\" for kind, (n, e) in bad.items())\nE       AssertionError: outside tolerance: fold_state: 3 checks, worst {'kind': 'fold_state', 'head': 27, 'count': 16, 'sum_g': -2754.991813659668, 'tol_ratio': 8.005863467298164, 'max_abs': 9.414553642272949e-05, 'max_rel': 0.000244140625, 'rel_rms': 0.0002441058635944239}\n\nblackbox_tests/gdn_replayssm_numeric/gdn_numeric_ref.py:153: AssertionError",
+   "peak_allocated_bytes": 41319936,
+   "summary": {
+    "fold_state": {
+     "count": 32,
+     "max_tol_ratio": 8.005863467298164,
+     "max_abs": 9.414553642272949e-05,
+     "max_rel": 0.000244140625,
+     "max_rel_rms": 0.00024410832116368724,
+     "violations": 3,
+     "worst_violations": [
+      {
+       "kind": "fold_state",
+       "head": 27,
+       "count": 16,
+       "sum_g": -2754.991813659668,
+       "tol_ratio": 8.005863467298164,
+       "max_abs": 9.414553642272949e-05,
+       "max_rel": 0.000244140625,
+       "rel_rms": 0.0002441058635944239
+      },
+      {
+       "kind": "fold_state",
+       "head": 26,
+       "count": 16,
+       "sum_g": -2257.2108001708984,
+       "tol_ratio": 7.1185857083799045,
+       "max_abs": 7.405877113342285e-05,
+       "max_rel": 0.000244140625,
+       "rel_rms": 0.00024410832116368724
+      },
+      {
+       "kind": "fold_state",
+       "head": 23,
+       "count": 16,
+       "sum_g": -778.8366012573242,
+       "tol_ratio": 1.5076557099865482,
+       "max_abs": 1.558661460876465e-05,
+       "max_rel": 6.103515625e-05,
+       "rel_rms": 6.099802207474224e-05
+      }
+     ]
+    }
+   },
+   "extra": {
+    "per_head": [
+     {
+      "head": 0,
+      "sum_g": -0.26661999709904194,
+      "tol_ratio": 0.0031263679682166185,
+      "max_rel": 4.1340532429503494e-07,
+      "rel_rms": 1.0508758465797404e-07
+     },
+     {
+      "head": 1,
+      "sum_g": -0.33200633991509676,
+      "tol_ratio": 0.003892928815197818,
+      "max_rel": 4.384064269030366e-07,
+      "rel_rms": 1.0993691907361162e-07
+     },
+     {
+      "head": 2,
+      "sum_g": -0.4942385330796242,
+      "tol_ratio": 0.0026545185836226366,
+      "max_rel": 5.775230786120823e-07,
+      "rel_rms": 1.177568762846311e-07
+     },
+     {
+      "head": 3,
+      "sum_g": -0.7070118188858032,
+      "tol_ratio": 0.0027100518057259168,
+      "max_rel": 6.30330625877612e-07,
+      "rel_rms": 1.1018518721873858e-07
+     },
+     {
+      "head": 4,
+      "sum_g": -0.8495691530406475,
+      "tol_ratio": 0.0032059993868534813,
+      "max_rel": 5.645081919000078e-07,
+      "rel_rms": 1.187199799216754e-07
+     },
+     {
+      "head": 5,
+      "sum_g": -1.3858266063034534,
+      "tol_ratio": 0.0031602755845035347,
+      "max_rel": 5.608805657801282e-07,
+      "rel_rms": 1.2133310674056115e-07
+     },
+     {
+      "head": 6,
+      "sum_g": -1.96080931276083,
+      "tol_ratio": 0.003797853225915316,
+      "max_rel": 4.3003055043529386e-07,
+      "rel_rms": 1.4820211564234229e-07
+     },
+     {
+      "head": 7,
+      "sum_g": -3.0746983736753464,
+      "tol_ratio": 0.003174102648968995,
+      "max_rel": 3.6494464775652177e-07,
+      "rel_rms": 1.1155193718991912e-07
+     },
+     {
+      "head": 8,
+      "sum_g": -4.033361166715622,
+      "tol_ratio": 0.014230363612181492,
+      "max_rel": 1.6687536657293324e-06,
+      "rel_rms": 3.6509326830792193e-07
+     },
+     {
+      "head": 9,
+      "sum_g": -5.022329077124596,
+      "tol_ratio": 0.010383947484129725,
+      "max_rel": 8.471039076037006e-07,
+      "rel_rms": 4.089196417479902e-07
+     },
+     {
+      "head": 10,
+      "sum_g": -7.411590486764908,
+      "tol_ratio": 0.0027862412270053256,
+      "max_rel": 4.3372363755890194e-07,
+      "rel_rms": 9.040192947389468e-08
+     },
+     {
+      "head": 11,
+      "sum_g": -11.503320187330246,
+      "tol_ratio": 0.006452848946538011,
+      "max_rel": 9.858258364329715e-07,
+      "rel_rms": 2.3859482866185795e-07
+     },
+     {
+      "head": 12,
+      "sum_g": -15.10379183292389,
+      "tol_ratio": 0.003572238061730789,
+      "max_rel": 6.408688173940089e-07,
+      "rel_rms": 1.1380012526768085e-07
+     },
+     {
+      "head": 13,
+      "sum_g": -23.37585288286209,
+      "tol_ratio": 0.05577000612672047,
+      "max_rel": 2.8019045958205725e-06,
+      "rel_rms": 2.0239667330041068e-06
+     },
+     {
+      "head": 14,
+      "sum_g": -35.29118049144745,
+      "tol_ratio": 0.1362242753027627,
+      "max_rel": 4.831546420227961e-06,
+      "rel_rms": 3.762473793164454e-06
+     },
+     {
+      "head": 15,
+      "sum_g": -45.53948199748993,
+      "tol_ratio": 0.020436411428407786,
+      "max_rel": 3.9432166562538525e-06,
+      "rel_rms": 5.69986562704182e-07
+     },
+     {
+      "head": 16,
+      "sum_g": -66.15568447113037,
+      "tol_ratio": 0.0029912118913329,
+      "max_rel": 2.9648256433447484e-07,
+      "rel_rms": 6.701238462635172e-08
+     },
+     {
+      "head": 17,
+      "sum_g": -84.84027147293091,
+      "tol_ratio": 0.0030817163897484826,
+      "max_rel": 1.444429205225718e-07,
+      "rel_rms": 4.696847111760379e-08
+     },
+     {
+      "head": 18,
+      "sum_g": -116.23684692382812,
+      "tol_ratio": 0.002432803856821029,
+      "max_rel": 1.1582948524893651e-07,
+      "rel_rms": 4.139878080310007e-08
+     },
+     {
+      "head": 19,
+      "sum_g": -165.46582651138306,
+      "tol_ratio": 0.46145436861688555,
+      "max_rel": 1.5347287117463347e-05,
+      "rel_rms": 1.5271439005548412e-05
+     },
+     {
+      "head": 20,
+      "sum_g": -298.0299987792969,
+      "tol_ratio": 6.514993639773718e-05,
+      "max_rel": 5.298457501472775e-09,
+      "rel_rms": 1.2606878001177833e-09
+     },
+     {
+      "head": 21,
+      "sum_g": -388.20930671691895,
+      "tol_ratio": 0.8197864756211067,
+      "max_rel": 3.060542765102362e-05,
+      "rel_rms": 3.052753491349035e-05
+     },
+     {
+      "head": 22,
+      "sum_g": -449.630823135376,
+      "tol_ratio": 2.6056620117018175e-12,
+      "max_rel": 3.9773820777241744e-16,
+      "rel_rms": 7.177414555725275e-17
+     },
+     {
+      "head": 23,
+      "sum_g": -778.8366012573242,
+      "tol_ratio": 1.5076557099865482,
+      "max_rel": 6.103515625e-05,
+      "rel_rms": 6.099802207474224e-05
+     },
+     {
+      "head": 24,
+      "sum_g": -1014.5017471313477,
+      "tol_ratio": 3.066976298534775e-13,
+      "max_rel": 0.0,
+      "rel_rms": 5.315817450890095e-18
+     },
+     {
+      "head": 25,
+      "sum_g": -1330.3589477539062,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     },
+     {
+      "head": 26,
+      "sum_g": -2257.2108001708984,
+      "tol_ratio": 7.1185857083799045,
+      "max_rel": 0.000244140625,
+      "rel_rms": 0.00024410832116368724
+     },
+     {
+      "head": 27,
+      "sum_g": -2754.991813659668,
+      "tol_ratio": 8.005863467298164,
+      "max_rel": 0.000244140625,
+      "rel_rms": 0.0002441058635944239
+     },
+     {
+      "head": 28,
+      "sum_g": -4371.709625244141,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     },
+     {
+      "head": 29,
+      "sum_g": -5194.701278686523,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     },
+     {
+      "head": 30,
+      "sum_g": -8783.377410888672,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     },
+     {
+      "head": 31,
+      "sum_g": -12066.111572265625,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     }
+    ]
+   }
+  },
+  "blackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py::test_fold_precision_with_strong_varying_decay[64]": {
+   "outcome": "failed",
+   "failure": "count = 64\nlog = [{'kind': 'fold_state', 'head': 0, 'count': 64, 'sum_g': -0.9481384344398975, ...}, {'kind': 'fold_state', 'head': 1, ...um_g': -4.014968935400248, ...}, {'kind': 'fold_state', 'head': 5, 'count': 64, 'sum_g': -6.063075676560402, ...}, ...]\nextra = {'per_head': [{'head': 0, 'sum_g': -0.9481384344398975, 'tol_ratio': 0.0038611886019582703, 'max_rel': 4.9806861907687...ead': 5, 'sum_g': -6.063075676560402, 'tol_ratio': 0.007716852023072384, 'max_rel': 1.0802761273258214e-06, ...}, ...]}\n\n    @pytest.mark.parametrize(\"count\", [4, 16, 64])\n    def test_fold_precision_with_strong_varying_decay(count, log, extra):\n        \"\"\"Detects: fold accuracy far from fp32 when the folded records carry large per-token decays\n        that vary between tokens (the checkpoint has heads with g near -92 per token at a=0 in\n        layer 0, and |g| > 8 in six layers). Records are written directly: fold's published input.\"\"\"\n        R = 64\n        gen = torch.Generator(device=DEV).manual_seed(700 + count)\n        randn = lambda *shape: torch.randn(*shape, generator=gen, device=DEV)\n        state = torch.zeros(1, 2, HV, V, K, device=DEV)\n        state[0, 0] = 0.1 * randn(HV, V, K)\n        u = (0.5 * randn(1, 1, HV, R, V)).to(BF16)\n        k = l2norm(randn(1, 1, H, R, K)).to(BF16)\n        typical = 2.0 ** (torch.arange(HV, device=DEV) / 2 - 6)  # per-head |g|: 2^-6 .. 2^9.5\n        g = -typical[None, None, :, None] * (0.5 + torch.rand(1, 1, HV, R, generator=gen, device=DEV))\n        b = 1000\n        start = torch.tensor([b], dtype=I32, device=DEV)\n        gdn_replay_fold(state, u, k, g, start, torch.tensor([[0, 1, 0, b + count, 0]], dtype=I32, device=DEV))\n        idx = torch.arange(b, b + count, device=DEV) & (R - 1)\n        ref = replay_records(state[0, 0].to(F64), u[0, 0][:, idx].transpose(0, 1).to(F64),\n                             k[0, 0][:, idx].transpose(0, 1).to(F64), g[0, 0][:, idx].T.to(F64))\n        cum = g[0, 0][:, idx].to(F64).sum(-1)\n        for j in range(HV):\n            compare(log, \"fold_state\", state[0, 1, j], ref[j], STATE_RTOL, STATE_ATOL * rms(ref[j], (-2, -1)),\n                    head=j, count=count, sum_g=cum[j].item())\n        extra[\"per_head\"] = [dict(head=e[\"head\"], sum_g=e[\"sum_g\"], tol_ratio=e[\"tol_ratio\"], max_rel=e[\"max_rel\"],\n                                  rel_rms=e[\"rel_rms\"]) for e in log]\n>       assert_within_tolerance(log)\n\nblackbox_tests/gdn_replayssm_numeric/test_gdn_replay_numeric.py:338: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nlog = [{'kind': 'fold_state', 'head': 0, 'count': 64, 'sum_g': -0.9481384344398975, ...}, {'kind': 'fold_state', 'head': 1, ...um_g': -4.014968935400248, ...}, {'kind': 'fold_state', 'head': 5, 'count': 64, 'sum_g': -6.063075676560402, ...}, ...]\n\n    def assert_within_tolerance(log):\n        bad = {}\n        for e in log:\n            if e[\"kind\"] != \"negative_control\" and e.get(\"tol_ratio\", 0.0) > 1.0:\n                worst = bad.setdefault(e[\"kind\"], [0, e])\n                worst[0] += 1\n                if e[\"tol_ratio\"] > worst[1][\"tol_ratio\"]:\n                    worst[1] = e\n>       assert not bad, \"outside tolerance: \" + \"; \".join(\n               ^^^^^^^\n            f\"{kind}: {n} checks, worst {e}\" for kind, (n, e) in bad.items())\nE       AssertionError: outside tolerance: fold_state: 4 checks, worst {'kind': 'fold_state', 'head': 30, 'count': 64, 'sum_g': -33542.777099609375, 'tol_ratio': 157.16200224132527, 'max_abs': 0.0017378628253936768, 'max_rel': 0.003914067553772135, 'rel_rms': 0.003913843497711372}\n\nblackbox_tests/gdn_replayssm_numeric/gdn_numeric_ref.py:153: AssertionError",
+   "peak_allocated_bytes": 43716096,
+   "summary": {
+    "fold_state": {
+     "count": 32,
+     "max_tol_ratio": 157.16200224132527,
+     "max_abs": 0.0017378628253936768,
+     "max_rel": 0.003914067553772135,
+     "max_rel_rms": 0.003913843497711372,
+     "violations": 4,
+     "worst_violations": [
+      {
+       "kind": "fold_state",
+       "head": 30,
+       "count": 64,
+       "sum_g": -33542.777099609375,
+       "tol_ratio": 157.16200224132527,
+       "max_abs": 0.0017378628253936768,
+       "max_rel": 0.003914067553772135,
+       "rel_rms": 0.003913843497711372
+      },
+      {
+       "kind": "fold_state",
+       "head": 29,
+       "count": 64,
+       "sum_g": -23840.342346191406,
+       "tol_ratio": 65.04009675706789,
+       "max_abs": 0.0007572472095489502,
+       "max_rel": 0.0019515659645232815,
+       "rel_rms": 0.0019512980887181415
+      },
+      {
+       "kind": "fold_state",
+       "head": 26,
+       "count": 64,
+       "sum_g": -8166.553680419922,
+       "tol_ratio": 22.121387580331813,
+       "max_abs": 0.00025719404220581055,
+       "max_rel": 0.0004885638201678241,
+       "rel_rms": 0.0004884345193434098
+      },
+      {
+       "kind": "fold_state",
+       "head": 20,
+       "count": 64,
+       "sum_g": -1016.2810916900635,
+       "tol_ratio": 3.6477290517917718,
+       "max_abs": 4.506152856159629e-05,
+       "max_rel": 0.0001220702363284736,
+       "rel_rms": 0.0001220287635000027
+      }
+     ]
+    }
+   },
+   "extra": {
+    "per_head": [
+     {
+      "head": 0,
+      "sum_g": -0.9481384344398975,
+      "tol_ratio": 0.0038611886019582703,
+      "max_rel": 4.980686190768749e-07,
+      "rel_rms": 1.531479515995063e-07
+     },
+     {
+      "head": 1,
+      "sum_g": -1.3655555434525013,
+      "tol_ratio": 0.00417768781428746,
+      "max_rel": 6.408771088624822e-07,
+      "rel_rms": 1.6764264281134402e-07
+     },
+     {
+      "head": 2,
+      "sum_g": -2.10887785628438,
+      "tol_ratio": 0.002950409767659162,
+      "max_rel": 5.345773014422489e-07,
+      "rel_rms": 1.3538930526200862e-07
+     },
+     {
+      "head": 3,
+      "sum_g": -2.9293882977217436,
+      "tol_ratio": 0.003419733223760892,
+      "max_rel": 6.497744466881585e-07,
+      "rel_rms": 1.5244887772388642e-07
+     },
+     {
+      "head": 4,
+      "sum_g": -4.014968935400248,
+      "tol_ratio": 0.003733542715462041,
+      "max_rel": 6.070800394946898e-07,
+      "rel_rms": 1.5453037501124357e-07
+     },
+     {
+      "head": 5,
+      "sum_g": -6.063075676560402,
+      "tol_ratio": 0.007716852023072384,
+      "max_rel": 1.0802761273258214e-06,
+      "rel_rms": 2.838576105255123e-07
+     },
+     {
+      "head": 6,
+      "sum_g": -8.311639189720154,
+      "tol_ratio": 0.009954541947013557,
+      "max_rel": 1.4906997650432021e-06,
+      "rel_rms": 5.260715968826805e-07
+     },
+     {
+      "head": 7,
+      "sum_g": -10.857832491397858,
+      "tol_ratio": 0.01700468526682632,
+      "max_rel": 1.701317271569156e-06,
+      "rel_rms": 6.412915863572383e-07
+     },
+     {
+      "head": 8,
+      "sum_g": -15.035757213830948,
+      "tol_ratio": 0.012662874339308166,
+      "max_rel": 1.4186099539216066e-06,
+      "rel_rms": 3.799271385759093e-07
+     },
+     {
+      "head": 9,
+      "sum_g": -23.240305691957474,
+      "tol_ratio": 0.01676485101484229,
+      "max_rel": 2.8901600039570483e-06,
+      "rel_rms": 7.967666297393229e-07
+     },
+     {
+      "head": 10,
+      "sum_g": -32.96772646903992,
+      "tol_ratio": 0.016020149971405107,
+      "max_rel": 2.666150090280985e-06,
+      "rel_rms": 6.117065143332799e-07
+     },
+     {
+      "head": 11,
+      "sum_g": -46.5146541595459,
+      "tol_ratio": 0.035305399355211514,
+      "max_rel": 6.1729818516017605e-06,
+      "rel_rms": 1.4415371339097134e-06
+     },
+     {
+      "head": 12,
+      "sum_g": -58.895806550979614,
+      "tol_ratio": 0.03767667650248632,
+      "max_rel": 6.703004726947116e-06,
+      "rel_rms": 1.379418961527414e-06
+     },
+     {
+      "head": 13,
+      "sum_g": -91.99538469314575,
+      "tol_ratio": 0.2609525314145432,
+      "max_rel": 2.070261186780069e-05,
+      "rel_rms": 8.753583451514811e-06
+     },
+     {
+      "head": 14,
+      "sum_g": -119.33696365356445,
+      "tol_ratio": 0.23527458705443147,
+      "max_rel": 1.3271711539750145e-05,
+      "rel_rms": 7.3918638049778876e-06
+     },
+     {
+      "head": 15,
+      "sum_g": -175.41626822948456,
+      "tol_ratio": 0.10155378123354196,
+      "max_rel": 1.831996636751434e-05,
+      "rel_rms": 1.877105810550609e-06
+     },
+     {
+      "head": 16,
+      "sum_g": -257.6857419013977,
+      "tol_ratio": 0.8156239746855377,
+      "max_rel": 3.071916576973454e-05,
+      "rel_rms": 3.0488617725193575e-05
+     },
+     {
+      "head": 17,
+      "sum_g": -359.16512727737427,
+      "tol_ratio": 0.879010575630246,
+      "max_rel": 3.1964609725940324e-05,
+      "rel_rms": 3.0483393537164044e-05
+     },
+     {
+      "head": 18,
+      "sum_g": -511.38617181777954,
+      "tol_ratio": 0.005200083877666898,
+      "max_rel": 6.324870425276742e-07,
+      "rel_rms": 1.8333973604839647e-07
+     },
+     {
+      "head": 19,
+      "sum_g": -757.1042351722717,
+      "tol_ratio": 0.0022790221571173884,
+      "max_rel": 1.1818799023165569e-07,
+      "rel_rms": 3.832735772768923e-08
+     },
+     {
+      "head": 20,
+      "sum_g": -1016.2810916900635,
+      "tol_ratio": 3.6477290517917718,
+      "max_rel": 0.0001220702363284736,
+      "rel_rms": 0.0001220287635000027
+     },
+     {
+      "head": 21,
+      "sum_g": -1415.6961135864258,
+      "tol_ratio": 0.00014158813438553658,
+      "max_rel": 1.5372250869161713e-08,
+      "rel_rms": 3.965086546358206e-09
+     },
+     {
+      "head": 22,
+      "sum_g": -2159.529457092285,
+      "tol_ratio": 5.914436414942529e-13,
+      "max_rel": 0.0,
+      "rel_rms": 1.1091960243668906e-17
+     },
+     {
+      "head": 23,
+      "sum_g": -2883.9293518066406,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     },
+     {
+      "head": 24,
+      "sum_g": -4096.035762786865,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     },
+     {
+      "head": 25,
+      "sum_g": -5919.359146118164,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     },
+     {
+      "head": 26,
+      "sum_g": -8166.553680419922,
+      "tol_ratio": 22.121387580331813,
+      "max_rel": 0.0004885638201678241,
+      "rel_rms": 0.0004884345193434098
+     },
+     {
+      "head": 27,
+      "sum_g": -11521.705062866211,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     },
+     {
+      "head": 28,
+      "sum_g": -15973.773132324219,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     },
+     {
+      "head": 29,
+      "sum_g": -23840.342346191406,
+      "tol_ratio": 65.04009675706789,
+      "max_rel": 0.0019515659645232815,
+      "rel_rms": 0.0019512980887181415
+     },
+     {
+      "head": 30,
+      "sum_g": -33542.777099609375,
+      "tol_ratio": 157.16200224132527,
+      "max_rel": 0.003914067553772135,
+      "rel_rms": 0.003913843497711372
+     },
+     {
+      "head": 31,
+      "sum_g": -48638.3030090332,
+      "tol_ratio": 0.0,
+      "max_rel": 0.0,
+      "rel_rms": 0.0
+     }
+    ]
+   }
+  }
+ }
+}
