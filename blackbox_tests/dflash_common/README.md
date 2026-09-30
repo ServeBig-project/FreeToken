@@ -53,6 +53,8 @@ tests interpret omission as zero and still require an explicit positive
 `cached_tokens` value when an existing prefix must be reused. Default fixtures
 fit the current 1024-token context at prefill chunk size 512; cancellation uses
 512 output tokens.
+This service accepts text strings only for `/v1/completions` prompts; token-ID
+arrays are rejected despite their availability in other OpenAI-compatible APIs.
 The default long input repeats `The red boat crosses the calm lake.\n` 72 times.
 CPU measurements with the acceptance environment's public HF tokenizers give
 576 input tokens for Qwen3 and 648 for Qwen3.6; adding 17 output tokens gives
