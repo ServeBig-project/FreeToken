@@ -22,6 +22,10 @@ def require(condition, message):
         raise ServiceError(message)
 
 
+def cached_tokens(usage):
+    return usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+
+
 def completion(result, body, cache_report=False):
     require(result["status"] == 200, f"Completion returned HTTP {result['status']}: {result['body']}")
     payload = result["body"]
@@ -40,7 +44,7 @@ def completion(result, body, cache_report=False):
         require(usage["completion_tokens"] == body["max_tokens"], "ignore_eos completion ended before max_tokens")
         require(choice["finish_reason"] == "length", "ignore_eos completion has wrong finish_reason")
     if cache_report:
-        cached = usage.get("prompt_tokens_details", {}).get("cached_tokens")
+        cached = cached_tokens(usage)
         require(isinstance(cached, int) and 0 <= cached <= usage["prompt_tokens"], "Invalid cached_tokens")
     return choice["text"]
 
@@ -213,7 +217,7 @@ def main():
         case(f"concurrency_{count}", lambda entry, count=count: concurrent(entry, count))
     case("mixed_lengths_tail_17", lambda entry: concurrent(entry, 17, mixed=True))
 
-    prefix = "The red boat crosses the calm lake. The green trees grow beside the water.\n" * 64
+    prefix = "The red boat crosses the calm lake. The green trees grow beside the water.\n" * 32
 
     def cached(entry):
         idle_rebuild(entry)
@@ -226,9 +230,9 @@ def main():
             ("isolated", prefix, "prefix-b", "cold"),
         ):
             response = generate(entry, name, body(prompt, 16, group))
-            cached_tokens = response["usage"]["prompt_tokens_details"]["cached_tokens"]
-            require((cached_tokens == 0) if expected == "cold" else (cached_tokens > 0),
-                    f"{name}: expected {expected} prefix, cached_tokens={cached_tokens}")
+            cached = cached_tokens(response["usage"])
+            require((cached == 0) if expected == "cold" else (cached > 0),
+                    f"{name}: expected {expected} prefix, cached_tokens={cached}")
             if name == "cold":
                 cold = response
             elif name != "extension":
@@ -238,7 +242,7 @@ def main():
         for index, (payload, result) in enumerate(zip(requests, results)):
             entry["requests"].append({"name": f"shared_{index}", "request": payload, "response": result})
             completion(result, payload, cache_report=True)
-            require(result["body"]["usage"]["prompt_tokens_details"]["cached_tokens"] > 0,
+            require(cached_tokens(result["body"]["usage"]) > 0,
                     f"Concurrent shared prefix {index} did not hit cache")
         response = generate(entry, "after_shared", body(prefix, 16, "prefix-a"))
         compare_text("prefix_reuse/after_shared", cold, response)
@@ -247,7 +251,7 @@ def main():
 
     def long_input(entry):
         prompt = args.long_prompt_file.read_text() if args.long_prompt_file else (
-            "The red boat crosses the calm lake.\n" * max(128, args.prefill_chunk_size // 4)
+            "The red boat crosses the calm lake.\n" * max(64, args.prefill_chunk_size // 8)
         )
         response = generate(entry, "chunked_prefill", body(prompt, 17, "long-input"))
         require(response["usage"]["prompt_tokens"] > args.prefill_chunk_size,
@@ -268,7 +272,7 @@ def main():
             if result["status"] == 200:
                 report["missing_coverage"].append("Busy rebuild: workload finished before rejection could be observed")
 
-        payload = body(limit=2048, group="cancelled")
+        payload = body(limit=512, group="cancelled")
         entry["stream"] = {"request": payload, "response": stream(
             args.url, COMPLETIONS, payload, args.timeout, cancel_after_chunks=2, on_chunk=while_active)}
         require(attempted, "Cancelled stream did not produce content before closure")
@@ -289,12 +293,12 @@ def main():
             rebuild(entry, payload, (status,))
             require(geometry(get("/v1/cache/status")) == before, f"{name} rebuild changed cache geometry")
             response = generate(entry, f"after_{name}_rebuild", body(prefix, 17, "invalid-rebuild"))
-            require(response["usage"]["prompt_tokens_details"]["cached_tokens"] > 0,
-                    f"{name} rebuild discarded the existing prefix cache")
+            require(cached_tokens(response["usage"]) > 0,
+                    f"Repeated prefix after {name} rebuild did not report a positive cache hit")
         idle_rebuild(entry)
         require(geometry(get("/v1/cache/status")) == before, "Same-size rebuild changed cache geometry")
         response = generate(entry, "after_idle_rebuild", body(prefix, 17, "prefix-a"))
-        require(response["usage"]["prompt_tokens_details"]["cached_tokens"] == 0, "Same-size rebuild retained old prefix")
+        require(cached_tokens(response["usage"]) == 0, "Same-size rebuild retained old prefix")
 
     case("rebuild_preserves_service", rebuild_lifecycle)
 

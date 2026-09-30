@@ -48,6 +48,11 @@ Use the service's configured prefill chunk size. `--long-prompt-file` supplies a
 different real long-input fixture when needed for the selected cache capacity.
 Add `--require-c16-n8` only when the selected mode and capacity support eight
 draft tokens at C16. A 96-slot non-Replay baseline can cap that batch at N4.
+The public API omits `usage.prompt_tokens_details` for zero cache hits; the
+tests interpret omission as zero and still require an explicit positive
+`cached_tokens` value when an existing prefix must be reused. Default fixtures
+fit the current 1024-token context at prefill chunk size 512; cancellation uses
+512 output tokens.
 
 ```sh
 python blackbox_tests/dflash_common/compare_service.py \
