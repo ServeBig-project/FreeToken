@@ -50,7 +50,7 @@ def _summary(entries):
     out = {}
     for kind, es in by_kind.items():
         s = {"count": len(es)}
-        for key in ("tol_ratio", "max_abs", "max_rel", "rel_rms", "excess_over_terms"):
+        for key in ("tol_ratio", "max_abs", "max_rel", "rel_rms", "tol_ratio_old"):
             vals = [e[key] for e in es if key in e]
             if vals:
                 s["max_" + key if not key.startswith("max_") else key] = max(vals)
@@ -58,6 +58,8 @@ def _summary(entries):
             bad = sorted((e for e in es if e.get("tol_ratio", 0.0) > 1.0), key=lambda e: -e["tol_ratio"])
             s["violations"] = len(bad)
             s["worst_violations"] = bad[:8]
+            if any("tol_ratio_old" in e for e in es):
+                s["violations_under_old_formula"] = sum(e["tol_ratio_old"] > 1.0 for e in es)
         if kind == "negative_control":
             s["min_tol_ratio"] = min(e["tol_ratio"] for e in es)
             s["names"] = sorted({e["name"] for e in es})

@@ -2,9 +2,11 @@
 (docs/replayssm-public-contract.md, sections 5 and 5.1). Written only from that contract;
 the operators under test are never used as their own reference.
 
-Tolerances, fixed from the contract's precision rules before any comparison was run:
+Tolerances, fixed from the contract's precision rules before any comparison was run, except
+the out atol, which was REVISED AFTER SEEING RESULTS (see below):
 
-  out, record u, record k_hat (bf16) vs fp64:  |x - x*| <= 2^-8 |x*| + 2^-12 rms(x*)
+  out (bf16) vs fp64:                          |y - y*| <= 2^-8 |y*| + 2^-12 sum_k |S*_vk q*_k|
+  record u, record k_hat (bf16) vs fp64:       |x - x*| <= 2^-8 |x*| + 2^-12 rms(x*)
   record g (fp32) vs fp64:                     |g - g*| <= 1e-5 |g*| + 1e-6 exp(A_log)
   written state (fp32: fold, export, fold=True write-back) vs fp64:
                                                |S - S*| <= 2^-20 |S*| + 2^-12 rms_head(S*)
@@ -14,6 +16,12 @@ Tolerances, fixed from the contract's precision rules before any comparison was 
 rms(x*) is taken over the last dim (one head's V or K vector); rms_head over one head's VxK.
 
 Why these numbers:
+- Revision of the out atol (2026-09-29, user-approved, after the run on 0003e20): it was
+  2^-12 rms_V(y*). fp32 rounding of y = S q scales with the size of the summed terms
+  sum_k |S_vk q_k|, not with |y|; in 16 of ~12000 checks a head's y had cancelled to 1e-6..1e-4
+  of those terms and the old atol shrank with it, although the error beyond bf16 rounding was
+  <= 2.4e-7 of the terms. Same 2^-12 margin, now against the terms; for uncancelled heads the
+  two normalisers are of the same size, and the negative controls still assert rejection.
 - 2^-8 is the bf16 unit roundoff: one rounding of an accurate value stays within 2^-8 of it
   relative to the unrounded fp64 reference.
 - The contract computes every multiply-add in fp32 and replays records with 3xTF32 ("close to
@@ -275,6 +283,7 @@ class World:
             cu.append(cu[-1] + T)
         real = [i for i, s in enumerate(specs) if s["m"] >= 0]
         folds = {i for i in real if fold and specs[i]["p"] + Ts[i] - self.b[specs[i]["m"]] > self.R}
+        self.refs = [[] for _ in range(self.L)]  # per layer, per spec: reference (y, terms size)
         args = (self.start, i32(cu), i32([s["slot"] for s in specs]), i32([s["m"] for s in specs]),
                 positions_of(specs, Ts), SCALE)
         result = []
@@ -299,6 +308,7 @@ class World:
                             hist=s["p"] - self.b[s["m"]] if s["m"] >= 0 else 0, fold=fold)
                 if s["m"] < 0:
                     assert torch.equal(o, torch.zeros_like(o)), f"padding row produced output {info}"
+                    self.refs[l].append(None)
                     continue
                 m, T, p, slot = s["m"], Ts[i], s["p"], s["slot"]
                 S0 = self.start_ref(l, m, slot, self.b[m], p)
@@ -307,15 +317,10 @@ class World:
                     self.check_state("replay_fold_state", l, slot, S0, Si, **info)
                     new_states[slot] = (S0, Si)
                 _, y, u, kh, g, mag = recur(S0, *s["x"][l], self.A_log[l], self.dt_bias[l])
-                compare(self.log, "out", o, y, OUT_RTOL, OUT_ATOL * rms(y, -1), **info)
-                # diagnostics only: error beyond bf16 rounding relative to the size of the terms
-                # summed into y, and for a violation how small that head's y is against those terms
-                d = (o.to(F64) - y).abs()
-                e = self.log[-1]
-                e["excess_over_terms"] = ((d - OUT_RTOL * y.abs()).clamp(min=0) / mag).max().item()
-                if e["tol_ratio"] > 1:
-                    t, j = divmod(int((d / (OUT_RTOL * y.abs() + OUT_ATOL * rms(y, -1))).amax(-1).argmax()), HV)
-                    e["worst_head_y_rms_over_terms_rms"] = (rms(y[t, j], 0) / rms(mag[t, j], 0)).item()
+                compare(self.log, "out", o, y, OUT_RTOL, OUT_ATOL * mag, **info)
+                # the pre-revision out tolerance, kept only for the before/after count
+                self.log[-1]["tol_ratio_old"] = tol_ratio(o, y, OUT_RTOL, OUT_ATOL * rms(y, -1))
+                self.refs[l].append((y, mag))
                 yi = recur(self.start_ideal(l, m, slot, self.b[m], p), *s["x"][l], self.A_log[l],
                            self.dt_bias[l])[1]
                 compare_ideal(self.log, "out_vs_ideal", o, yi, **info)
@@ -402,8 +407,8 @@ class World:
 
 def assert_rejects(w, got, alt_start, x, l, name):
     """The tight output tolerance must not accept the output of a plausible wrong start state."""
-    y = recur(alt_start, *x, w.A_log[l], w.dt_bias[l])[1]
-    ratio = tol_ratio(got, y, OUT_RTOL, OUT_ATOL * rms(y, -1))
+    _, y, _, _, _, mag = recur(alt_start, *x, w.A_log[l], w.dt_bias[l])
+    ratio = tol_ratio(got, y, OUT_RTOL, OUT_ATOL * mag)
     w.log.append(dict(kind="negative_control", name=name, tol_ratio=ratio))
     assert ratio > 1.0, f"tolerance cannot tell '{name}' from the correct result (ratio {ratio})"
 

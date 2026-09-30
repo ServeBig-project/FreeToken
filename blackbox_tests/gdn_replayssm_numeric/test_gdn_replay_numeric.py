@@ -1,8 +1,11 @@
 """Black-box numeric acceptance of gdn_replay / gdn_replay_advance / gdn_replay_fold (public contract
 section 5.1), production head geometry: H=16, HV=32, K=V=128, bf16 activations, fp32 state.
 
-Tolerances (fixed before any comparison ran; derivation in gdn_numeric_ref.py):
-  out, u, k_hat : |x-x*| <= 2^-8|x*| + 2^-12 rms(x*)      (bf16 roundoff + fp32/3xTF32 margin)
+Tolerances (fixed before any comparison ran, except the out atol; derivation in gdn_numeric_ref.py):
+  out           : |y-y*| <= 2^-8|y*| + 2^-12 sum_k|S*_vk q*_k|   REVISED AFTER SEEING RESULTS,
+                  user-approved: the atol was 2^-12 rms_V(y*), which shrank in heads whose y cancels
+                  to ~1e-5 of its summed terms although the error stayed at fp32 level
+  u, k_hat      : |x-x*| <= 2^-8|x*| + 2^-12 rms(x*)      (bf16 roundoff + fp32/3xTF32 margin)
   g             : |g-g*| <= 1e-5|g*| + 1e-6 exp(A_log)
   written state : |S-S*| <= 2^-20|S*| + 2^-12 rms_head(S*)
   vs ideal fp64 (records never rounded): rel-RMS <= 2^-6
@@ -17,6 +20,13 @@ import torch
 from gdn_numeric_ref import (BF16, DEV, F64, H, HV, I32, K, OUT_ATOL, OUT_RTOL, STATE_ATOL, STATE_RTOL, V, Seq,
                              World, assert_rejects, assert_within_tolerance, compare, gdn_replay_fold, l2norm,
                              pad_spec, replay_records, rms, tol_ratio)
+
+
+def pair_ratio(got, other, ref):
+    """Two outputs each within the out tolerance of the same reference (y, terms) differ by at
+    most twice that tolerance."""
+    _, mag = ref
+    return tol_ratio(got, other.to(F64), 2 * OUT_RTOL, 2 * OUT_ATOL * mag)
 
 
 def ar_step(w, s, x, T=1, tag=""):
@@ -118,17 +128,16 @@ def test_fold_in_place_then_continue_matches_unfolded(log, extra):
         x = w.inputs(T)
         oa, ob = w.call([A.spec(x)], tag="A"), w.call([B.spec(x)], tag="B")
         A.p, B.p = A.p + T, B.p + T
-        return oa, ob
+        return oa, ob, w.refs
 
     for T in (1, 5, 9, 9):  # 24 records each
         both(T)
     assert w.prefold([(A, 9), (B, 8)], tag="in-place") == [True, False]  # 24+9 > 32, 24+8 = 32
     bitwise = []
     for T in (1, 4, 3):
-        oa, ob = both(T)
+        oa, ob, refs = both(T)
         for l in range(w.L):
-            ya, yb = oa[l][0], ob[l][0].to(F64)
-            ratio = tol_ratio(ya, yb, 2 * OUT_RTOL, 2 * OUT_ATOL * rms(yb, -1))
+            ratio = pair_ratio(oa[l][0], ob[l][0], refs[l][0])
             log.append(dict(kind="folded_vs_unfolded", layer=l, T=T, tol_ratio=ratio))
             bitwise.append(bool((oa[l][0] == ob[l][0]).all()))
     extra["folded_vs_unfolded_bitwise_equal"] = all(bitwise)
@@ -203,14 +212,15 @@ def test_batch_rows_permuted_mixed_T_padding(log, extra):
                  for o in order]
         outs = w.call(specs, qkv_pad=64, tag=name)[0]
         got[name] = {o: outs[j] for j, o in enumerate(order) if not isinstance(o, str)}
+        if name == "order1":
+            refs = {o: w.refs[0][j] for j, o in enumerate(order) if not isinstance(o, str)}
     for i in range(6):  # each request alone
         w.restore(saved)
         got.setdefault("solo", {})[i] = w.call([seqs[i].spec(X[i], phase="solo")], tag="solo")[0][0]
     bitwise = {}
     for i in range(6):
-        ref = got["order1"][i].to(F64)
         for name in ("order2", "solo"):
-            ratio = tol_ratio(got[name][i], ref, 2 * OUT_RTOL, 2 * OUT_ATOL * rms(ref, -1))
+            ratio = pair_ratio(got[name][i], got["order1"][i], refs[i])
             log.append(dict(kind=f"order1_vs_{name}", name=f"r{i}", tol_ratio=ratio))
             bitwise[f"r{i}_{name}"] = bool((got[name][i] == got["order1"][i]).all())
     extra["bitwise_equal_across_orders_and_solo"] = bitwise
@@ -225,6 +235,33 @@ def test_batch_rows_permuted_mixed_T_padding(log, extra):
     specs.insert(3, pad_spec(w.inputs(2)))
     w.call(specs, fold=True, qkv_pad=64, tag="fold-batch")
     assert w.expect_stats[0] == 2, w.expect_stats
+    assert_within_tolerance(log)
+
+
+@pytest.mark.parametrize("T", [1, 2])
+def test_fold_true_full_ring_write_back_repeatable(T, log, extra):
+    """Detects: a nondeterministic fold=True write-back: the same batch, repeated from identical
+    tensors, must give the correct state and outputs every time. The folding request holds a full
+    ring of records (p-b=R), which is what every AR flush (T=1) looks like, next to two requests
+    that do not fold."""
+    R, reps = 32, 200
+    w = World(log, L=1, slots=4, rows=4, R=R, seed=900 + R)
+    for slot in range(3):
+        w.warm_slot(slot)
+    A, B, C = Seq(2, 0, 37, "full-ring"), Seq(0, 1, 141, "b"), Seq(1, 2, 200326, "c")
+    for s, h in ((A, R), (B, 8), (C, 20)):
+        w.assign(s.m, s.p)
+        while s.p - w.b[s.m] < h:
+            n = min(4, h - (s.p - w.b[s.m]))
+            w.call([s.spec(w.inputs(n))], tag="history")
+            s.p += n
+    saved = w.save()
+    X = [w.inputs(T), w.inputs(1), w.inputs(1)]
+    for r in range(reps):
+        w.restore(saved)
+        w.call([C.spec(X[2]), B.spec(X[1]), A.spec(X[0])], fold=True, tag=f"repeat{r}")
+    bad = {e["tag"] for e in log if e.get("tol_ratio", 0) > 1 and e.get("tag", "").startswith("repeat")}
+    extra["repeats_with_violations"] = f"{len(bad)}/{reps}"
     assert_within_tolerance(log)
 
 
@@ -309,11 +346,14 @@ def test_long_trajectory_many_wraps_and_folds(R, log, extra):
     assert_within_tolerance(log)
 
 
+@pytest.mark.parametrize("pattern", ["varying", "spike"])
 @pytest.mark.parametrize("count", [4, 16, 64])
-def test_fold_precision_with_strong_varying_decay(count, log, extra):
+def test_fold_precision_with_strong_varying_decay(count, pattern, log, extra):
     """Detects: fold accuracy far from fp32 when the folded records carry large per-token decays
     that vary between tokens (the checkpoint has heads with g near -92 per token at a=0 in
-    layer 0, and |g| > 8 in six layers). Records are written directly: fold's published input."""
+    layer 0, and |g| > 8 in six layers), or one huge decay (a gate spike) followed by small ones,
+    where the later records must keep fp32 accuracy (contract: a coefficient's rounding follows
+    its own exponent, not the whole sum). Records are written directly: fold's published input."""
     R = 64
     gen = torch.Generator(device=DEV).manual_seed(700 + count)
     randn = lambda *shape: torch.randn(*shape, generator=gen, device=DEV)
@@ -322,7 +362,12 @@ def test_fold_precision_with_strong_varying_decay(count, log, extra):
     u = (0.5 * randn(1, 1, HV, R, V)).to(BF16)
     k = l2norm(randn(1, 1, H, R, K)).to(BF16)
     typical = 2.0 ** (torch.arange(HV, device=DEV) / 2 - 6)  # per-head |g|: 2^-6 .. 2^9.5
-    g = -typical[None, None, :, None] * (0.5 + torch.rand(1, 1, HV, R, generator=gen, device=DEV))
+    jitter = torch.rand(1, 1, HV, R, generator=gen, device=DEV)
+    if pattern == "varying":
+        g = -typical[None, None, :, None] * (0.5 + jitter)
+    else:  # small decays, one spike of 2^(j/2+1) at the middle record: 2 .. 2^16.5
+        g = -(0.05 + 0.45 * jitter)
+        g[0, 0, :, (1000 + count // 2) % R] = -(2.0 ** (torch.arange(HV, device=DEV) / 2 + 1))
     b = 1000
     start = torch.tensor([b], dtype=I32, device=DEV)
     gdn_replay_fold(state, u, k, g, start, torch.tensor([[0, 1, 0, b + count, 0]], dtype=I32, device=DEV))
