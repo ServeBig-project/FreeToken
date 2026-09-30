@@ -177,6 +177,7 @@ class FrontendManager:
     cache_pools: Dict[str, int] | None = None
     # GDN state storage by kind (compute_gdn_state_geometry): from the ack, then each rebuild.
     gdn_geometry: Dict[str, Any] | None = None
+    dflash_geometry: Dict[str, Any] | None = None
     # one {index, name, uuid, total_bytes} per TP rank, from the same ack; /v1/stats gpus
     gpus: List[Dict[str, Any]] = field(default_factory=list)
     # Backend worker Process handles (TP schedulers + tokenizer/detokenizer), captured from the
@@ -284,6 +285,8 @@ class FrontendManager:
         }
         if msg.gdn_replayssm is not None:
             self.gdn_geometry = msg.gdn_replayssm
+        if msg.dflash is not None:
+            self.dflash_geometry = msg.dflash
         fut = self.rebuild_futures.pop(msg.request_id, None)
         if fut is not None and not fut.done():
             fut.set_result(self.last_rebuild)
@@ -663,6 +666,10 @@ def _cache_limits(geo: dict, unit_bytes: dict, pool_budget: int, floors: dict) -
         # ReplaySSM records and conv windows are priced with every GDN state rebuild.
         gdn = geo.get("gdn_replayssm") or {}
         gdn_fixed = int(gdn.get("reserved_bytes", 0)) - int(gdn.get("checkpoint_bytes", 0))
+        draft = geo.get("dflash") or {}
+        draft_context = int(draft.get("context_bytes", 0))
+        budget = max(0, budget - int(draft.get("reserved_bytes", 0)) + draft_context)
+        draft_per_token = draft_context // max(1, (int(geo["num_pages"]) + 1) * page_size)
 
         swa_per_token = int(unit_bytes.get("swa_per_token", 0) or 0)
         kv_min = int(floors.get("kv_tokens", page_size) or 0)
@@ -677,14 +684,14 @@ def _cache_limits(geo: dict, unit_bytes: dict, pool_budget: int, floors: dict) -
         # pools have no such bound -- KV, window and GDN capacity all keep paying off with more
         # concurrent requests and longer prefix reuse.
         total_experts = int(geo["num_experts"]) * int(geo["num_moe_layers"])
-        moe_max = ideal(moe_per_expert)
+        moe_max = ideal(moe_per_expert, draft_context)
         if total_experts > 0:
             moe_max = min(moe_max, total_experts)
         return {
-            "kv_tokens": {"min": kv_min, "max": ideal(kv_per_token)},
+            "kv_tokens": {"min": kv_min, "max": ideal(kv_per_token + draft_per_token)},
             "moe_experts": {"min": moe_min, "max": moe_max},
-            "mamba_slots": {"min": mamba_min, "max": ideal(mamba_per_slot, gdn_fixed)},
-            "swa_tokens": {"min": swa_min, "max": ideal(swa_per_token)},
+            "mamba_slots": {"min": mamba_min, "max": ideal(mamba_per_slot, gdn_fixed + draft_context)},
+            "swa_tokens": {"min": swa_min, "max": ideal(swa_per_token, draft_context)},
         }
     except Exception:  # noqa: BLE001 -- limits are a nicety; a bad read must not 500 the poll
         return {
@@ -802,6 +809,7 @@ def cache_geometry(state: Any) -> dict:
         "cache_budget_bytes": int(getattr(state, "cache_budget_bytes", 0) or 0),
         "reasoning": reasoning,
         "gdn_replayssm": getattr(state, "gdn_geometry", None),
+        "dflash": getattr(state, "dflash_geometry", None),
     }
     # Per-pool slider bounds, sized against the cache budget the rebuild fit-check actually
     # enforces — NOT the raw post-weights free VRAM, which is larger by the (1-memory_ratio)
@@ -1022,6 +1030,7 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
         _GLOBAL_STATE.cache_pools = meta.pop("pools", None)
         _GLOBAL_STATE.stats.cuda_graph = meta.pop("cuda_graph", _GLOBAL_STATE.stats.cuda_graph)
         _GLOBAL_STATE.gdn_geometry = meta.pop("gdn_replayssm", None)
+        _GLOBAL_STATE.dflash_geometry = meta.pop("dflash", None)
         _GLOBAL_STATE.swa_full_tokens_ratio = float(meta.pop("swa_full_tokens_ratio", 0.0) or 0.0)
         _GLOBAL_STATE.cache_budget_bytes = int(meta.pop("cache_budget_bytes", 0) or 0)
         _GLOBAL_STATE.gpus = list(meta.pop("gpus", None) or [])

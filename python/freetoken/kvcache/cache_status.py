@@ -208,10 +208,19 @@ def compute_gdn_state_geometry(engine: "Engine") -> Dict[str, Any]:
                    metadata_bytes=sum(size(t) for t in graph))
     geo["reserved_bytes"] = (geo["checkpoint_bytes"] + geo["record_bytes"]
                              + geo["conv_workspace_bytes"] + geo["metadata_bytes"])
-    startup = pool.num_slots == _linear_pool_num_slots(engine.config)
-    geo["state_budget_bytes"] = (gdn_state_budget(engine.config) if startup
-                                 else geo["reserved_bytes"])
+    budget = getattr(engine, "_gdn_state_budget_bytes", None)
+    if budget is None:
+        startup = pool.num_slots == _linear_pool_num_slots(engine.config)
+        budget = gdn_state_budget(engine.config) if startup else geo["reserved_bytes"]
+    geo["state_budget_bytes"] = budget
     return geo
+
+
+def compute_dflash_geometry(engine: "Engine") -> Dict[str, Any]:
+    draft = getattr(engine, "dflash", None)
+    if draft is not None:
+        return draft.geometry()
+    return dict(active=False, weight_bytes=0, context_bytes=0, metadata_bytes=0, reserved_bytes=0)
 
 
 def compute_cache_status_meta(engine: "Engine") -> Dict[str, Any]:
@@ -226,6 +235,7 @@ def compute_cache_status_meta(engine: "Engine") -> Dict[str, Any]:
     meta["pools"] = compute_cache_pools(engine)
     meta["cuda_graph"] = engine.graph_runner.stats_snapshot()
     meta["gdn_replayssm"] = compute_gdn_state_geometry(engine)
+    meta["dflash"] = compute_dflash_geometry(engine)
     # Current window/full reuse ratio (the tunable knob), for DSV4 and radix-SWA; 0.0 otherwise.
     cfg = engine.config
     has_swa_ratio = cfg is not None and _supports_swa_ratio(cfg)

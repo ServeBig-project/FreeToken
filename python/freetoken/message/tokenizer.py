@@ -105,6 +105,7 @@ class CacheRebuildResultMsg(BaseTokenizerMsg):
     num_swa_pages: int = 0
     error: str | None = None
     gdn_replayssm: dict | None = None  # GDN state geometry after the rebuild
+    dflash: dict | None = None
 
 
 @dataclass

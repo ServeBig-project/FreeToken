@@ -379,24 +379,6 @@ class Engine:
             config, self.num_pages, device=self.device, dtype=self.dtype
         )
 
-        # ======================= Linear (GatedDeltaNet) state initialization ========================
-        linear_group = config.model_config.linear_attention_group()
-        if linear_group is not None:
-            from freetoken.kvcache.linear_state_pool import LinearStatePool
-
-            self.linear_state_pool = LinearStatePool(
-                group=linear_group,
-                num_slots=_linear_pool_num_slots(config),
-                fixed_slots=(config.max_running_req if config.cache_type != "hybrid_radix" else 0),
-                dtype=self.dtype,
-                device=self.device,
-                tp_size=config.tp_info.size,
-                records=replay_records(config),
-            )
-            self.ctx.linear_state_pool = self.linear_state_pool
-        else:
-            self.linear_state_pool = None
-
         # ======================= Page table initialization ========================
         # NOTE: 1. aligned to 128 bytes; 2. store raw locations instead of pages
         self.max_seq_len = min(config.max_seq_len, num_tokens)
@@ -417,6 +399,32 @@ class Engine:
         )
         if config.model_config.is_moe:
             self.ctx.moe_backend = self.moe_backend = create_moe_backend(config.moe_backend)
+
+        self._init_dflash(config)
+
+        # ======================= Linear (GatedDeltaNet) state initialization ========================
+        linear_group = config.model_config.linear_attention_group()
+        if linear_group is not None:
+            from freetoken.kvcache.linear_state_pool import LinearStatePool
+
+            self.linear_state_pool = LinearStatePool(
+                group=linear_group,
+                num_slots=_linear_pool_num_slots(config),
+                fixed_slots=(config.max_running_req if config.cache_type != "hybrid_radix" else 0),
+                dtype=self.dtype,
+                device=self.device,
+                tp_size=config.tp_info.size,
+                records=replay_records(config),
+            )
+            self.ctx.linear_state_pool = self.linear_state_pool
+        else:
+            self.linear_state_pool = None
+
+        if self.linear_state_pool is not None:
+            from freetoken.kvcache.linear_state_pool import gdn_state_budget
+            self._gdn_state_budget_bytes = (
+                gdn_state_budget(config) - getattr(config, "_draft_reserved_bytes", 0)
+            )
 
         # ======================= Sampler initialization ========================
         self.sampler = Sampler(self.device, config.model_config.vocab_size)
@@ -460,9 +468,40 @@ class Engine:
             layered_execution_adapter=self._layered_execution_adapter,
             speculative_config=config if config.speculative_graphs else None,
         )
+        if self.dflash is not None:
+            self.dflash.capture_graphs(self.graph_runner)
         if config.attention_backend.split(",")[0] == "triton":
             # Prefill runs on the first comma part; warm its autotune cache.
             self._warmup_prefill()
+
+    def _init_dflash(self, config: EngineConfig) -> None:
+        self.dflash_model = self.dflash = None
+        if config.speculative_draft_model_path is None:
+            return
+        from freetoken.speculative.dflash import DFlashRuntime
+        from freetoken.speculative.dflash_model import DFlashModel, read_dflash_config
+
+        if not getattr(self.model, "supports_draft_features", False):
+            raise ValueError("Target model does not expose DFlash context features")
+        if config.model_config.linear_attention_group() is None:
+            raise ValueError("DFlash requires a GDN state budget to fund its storage")
+        if config.attention_backend != "fi":
+            raise ValueError("DFlash requires the FlashInfer attention backend")
+        draft = read_dflash_config(config.speculative_draft_model_path)
+        target = config.model_config
+        if (draft.hidden_size != target.hidden_size or draft.vocab_size != target.vocab_size
+                or draft.num_target_layers != target.num_layers):
+            raise ValueError("DFlash checkpoint dimensions do not match the target model")
+        if (not draft.target_layer_ids
+                or any(not 0 <= layer < target.num_layers for layer in draft.target_layer_ids)
+                or not 0 <= draft.mask_token_id < target.vocab_size):
+            raise ValueError("DFlash context layer or mask token is outside the target model")
+        self.dflash_model = DFlashModel(
+            config.speculative_draft_model_path, dtype=self.dtype, device=self.device,
+        )
+        self.ctx.draft_context = self.dflash = DFlashRuntime(self, self.dflash_model)
+        object.__setattr__(config, "_draft_reserved_bytes",
+                           self.dflash_model.weight_bytes + self.dflash.storage_bytes_actual)
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
         if config.tp_info.size == 1 or config.use_pynccl:
@@ -890,13 +929,18 @@ class Engine:
             if num_mamba_slots is not None
             else (self.linear_state_pool.num_slots if self.linear_state_pool is not None else None)
         )
+        draft_bytes = 0
+        if self.dflash is not None:
+            draft_bytes = (self.dflash_model.weight_bytes + self.dflash.storage_bytes_for_pages(
+                self.num_pages if num_pages is None else num_pages))
         self.kv_cache.validate_rebuild(
             config, num_pages=num_pages,
             num_swa_pages=num_swa_pages, target_moe=target_moe,
             per_expert_bytes=per_expert_bytes, baseline_free=self._baseline_free,
             weights_bytes=self._weights_bytes, current_num_pages=self.num_pages,
             extra_fixed_bytes=(
-                state_pool_bytes(config, target_mamba) if target_mamba is not None else 0
+                (state_pool_bytes(config, target_mamba) if target_mamba is not None else 0)
+                + draft_bytes
             ),
             extra_note=(
                 f", mamba={target_mamba - 1} slots" if target_mamba is not None else ""
@@ -915,6 +959,8 @@ class Engine:
         # untouched (no rollback needed); after it, only a rebuild restores service.
         self.rebuild_teardown_started = True
         # 1. Tear down CUDA graphs + backend capture scratch (free-before-alloc).
+        if self.dflash is not None:
+            self.dflash.destroy_graphs()
         self.attn_backend.reset_capture()
         prior_replays = self.graph_runner.replay_counts
         self.graph_runner.destroy_cuda_graphs()
@@ -943,6 +989,12 @@ class Engine:
             self.linear_state_pool.rebuild(num_mamba_slots + 1)
         # 3. Refresh max_seq_len (+ generic page table) for the new token budget.
         self._refresh_seq_state(config)
+        if self.dflash is not None and num_pages is not None:
+            self.dflash.rebuild()
+            object.__setattr__(config, "_draft_reserved_bytes",
+                               self.dflash_model.weight_bytes + self.dflash.storage_bytes_actual)
+        if self.linear_state_pool is not None and (num_mamba_slots is not None or num_pages is not None):
+            self._gdn_state_budget_bytes = state_pool_bytes(config, self.linear_state_pool.num_slots)
         aligned_max_seq_len = _page_table_width(self.max_seq_len, config.page_size)
         # 4. Re-capture CUDA graphs against the new tensors (reset_capture above re-armed
         #    the backend; _sync_get_memory empties the cache so freed memory is reclaimed).
@@ -964,6 +1016,8 @@ class Engine:
             speculative_config=config if config.speculative_graphs else None,
         )
         self.graph_runner.replay_counts = prior_replays
+        if self.dflash is not None:
+            self.dflash.capture_graphs(self.graph_runner)
 
     def compute_logits(self, batch: Batch) -> torch.Tensor:
         assert torch.cuda.current_stream() == self.stream
@@ -1287,6 +1341,8 @@ class Engine:
         )
 
     def shutdown(self) -> None:
+        if self.dflash is not None:
+            self.dflash.destroy_graphs()
         self.graph_runner.destroy_cuda_graphs()
         torch.distributed.destroy_process_group()
         destroy_distributed()
