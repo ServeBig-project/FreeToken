@@ -1,27 +1,15 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
-
-from freetoken.utils import Registry
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch
     from freetoken.models import ModelConfig
 
-from .base import (
-    BaseCacheHandle,
-    BaseKVCachePool,
-    BasePrefixCache,
-    MatchResult,
-    SizeInfo,
-)
+from .base import BaseKVCachePool
 
-
-class CacheManagerCreator(Protocol):
-    def __call__(self, device: torch.device) -> BasePrefixCache: ...
-
-
-SUPPORTED_CACHE_MANAGER = Registry[CacheManagerCreator]("Cache Manager")
+# "radix" shares committed prefixes across requests; "naive" never shares.
+CACHE_TYPES = ("naive", "radix")
 
 
 def resolve_pool_class(model_config: ModelConfig) -> type[BaseKVCachePool]:
@@ -210,41 +198,10 @@ def create_kvcache_pool(
     )
 
 
-@SUPPORTED_CACHE_MANAGER.register("naive")
-def create_naive_cache(device: torch.device, page_size: int | None = None):
-    from .naive_cache import NaivePrefixCache
-
-    return NaivePrefixCache(device=device)  # naive has no page arithmetic
-
-
-@SUPPORTED_CACHE_MANAGER.register("radix")
-def create_radix_cache(device: torch.device, page_size: int | None = None):
-    from .radix_cache import RadixPrefixCache
-
-    return RadixPrefixCache(device=device, page_size=page_size)
-
-
-# NOTE: "hybrid_radix" is NOT registered as a user-facing --cache-type. It is the internal
-# materialization of "radix" for hybrid GDN models (cross-request GDN-state reuse), produced by
-# _resolve_cache_type and built directly in CacheManager._make_prefix_cache (HybridRadixCache
-# needs page_size). Users pick "radix" (the concept) or "naive"; the engine picks hybrid_radix.
-
-
-def create_prefix_cache(
-    device: torch.device, type: str, page_size: int | None = None
-) -> BasePrefixCache:
-    return SUPPORTED_CACHE_MANAGER[type](device, page_size=page_size)
-
-
 __all__ = [
     "create_kv_pool",
     "create_kvcache_pool",
-    "create_prefix_cache",
     "resolve_pool_class",
     "BaseKVCachePool",
-    "BaseCacheHandle",
-    "BasePrefixCache",
-    "SizeInfo",
-    "MatchResult",
-    "SUPPORTED_CACHE_MANAGER",
+    "CACHE_TYPES",
 ]

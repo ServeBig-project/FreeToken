@@ -10,7 +10,8 @@ if TYPE_CHECKING:
     from freetoken.engine.speculative_cost import SpeculativeCost
     from freetoken.attention import BaseAttnBackend, BaseAttnMetadata
     from freetoken.attention.linear import FLAMetadata
-    from freetoken.kvcache import BaseCacheHandle, BaseKVCachePool
+    from freetoken.kvcache import BaseKVCachePool
+    from freetoken.kvcache.radix_cache import CacheHandle
     from freetoken.kvcache.linear_state_pool import LinearStatePool
     from freetoken.moe import BaseMoeBackend
     from freetoken.moe.offload_cache import OffloadMoeCache
@@ -40,7 +41,7 @@ class Req:
     output_len: int
     uid: int
     sampling_params: SamplingParams
-    cache_handle: BaseCacheHandle
+    cache_handle: CacheHandle
     # Optional precomputed multimodal soft-token embeddings (GPU, [num_image_tokens,
     # hidden]) scattered at image-token positions during this request's prefill.
     mm_embeds: torch.Tensor | None = None

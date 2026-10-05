@@ -49,9 +49,8 @@ class HybridSWAKVCache(BaseKVCachePool):
         self._swa_num_tokens = num_swa_tokens if num_swa_tokens is not None else self._full_num_tokens
         self._page_size = page_size
         # Global-paged SWA (== sglang SWAKVPool): a swa pool reached through a dense full->swa
-        # slot mapping + an independent swa free-list. Used by BOTH SWA cache paths -- naive
-        # (NaivePrefixCache, no reuse) and radix (SWARadixCache, cross-request reuse) -- which
-        # differ only in the cache object. Always paged; the mapping/free-list are built below
+        # slot mapping + an independent swa free-list. Used with and without prefix reuse, which
+        # differ only in whether the prefix tree keeps windows. Always paged; the mapping/free-list are built below
         # (translate/store_kv unconditionally index full_to_swa_index_mapping).
         self._swa_paged = True
 

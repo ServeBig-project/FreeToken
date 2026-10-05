@@ -198,7 +198,7 @@ class Scheduler(SchedulerIOMixin):
         self.eos_token_ids = load_eos_token_ids(config.model_path, self.tokenizer)
         self.toolcall_anchor_id = None
         if config.special_token_ckpt and (
-            self.cache_manager.is_hybrid or self.cache_manager.is_swa
+            self.cache_manager.state_cache or self.cache_manager.window_cache
         ):
             from freetoken.server.function_call_parser import toolcall_opener_for
 
@@ -1155,7 +1155,7 @@ class Scheduler(SchedulerIOMixin):
         Mirrors SGLang's mamba-pool semantics: ``total`` excludes the reserved padding
         sink (slot 0); ``used`` excludes free slots and evictable tree snapshots.
         """
-        if not self.cache_manager.is_hybrid:
+        if not self.cache_manager.state_cache:
             return None
         total = self.cache_manager.linear_state_pool.num_slots - 1
         return total - self.cache_manager.mamba_available_size, total
@@ -1604,7 +1604,7 @@ class Scheduler(SchedulerIOMixin):
             self.engine.prepare_execution_metadata(
                 batch,
                 input_mapping,
-                linear_cache_is_hybrid=self.cache_manager.is_hybrid,
+                linear_cache_is_hybrid=self.cache_manager.state_cache,
             )
         return ForwardInput(
             batch=batch,

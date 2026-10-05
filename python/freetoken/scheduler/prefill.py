@@ -10,7 +10,7 @@ from freetoken.utils import align_down, div_ceil, init_logger
 from .utils import PendingReq
 
 if TYPE_CHECKING:
-    from freetoken.kvcache import BaseCacheHandle
+    from freetoken.kvcache.radix_cache import CacheHandle
     from freetoken.message import UserMsg
 
     from .cache import CacheManager
@@ -58,9 +58,7 @@ class PrefillAdder:
         if self.table_manager.available_size == 0:
             return None
 
-        # TODO: consider host cache match case
-        mr = self.cache_manager.match_req(req)
-        handle = mr.cuda_handle
+        handle = self.cache_manager.match_req(req)
         cached_len = handle.cached_len
         # TODO: better estimate policy
         extend_len = req.input_len - cached_len
@@ -73,7 +71,7 @@ class PrefillAdder:
             return self.cache_manager.unlock(handle)
 
         # A request needs one private live state; snapshots are allocated only when produced.
-        if self.cache_manager.is_hybrid:
+        if self.cache_manager.state_cache:
             pool = self.cache_manager.linear_state_pool
             if pool.num_free_slots < 1:
                 self.cache_manager.ensure_mamba_slots(1)
@@ -108,16 +106,16 @@ class PrefillAdder:
             self.table_manager.page_table[table_idx][cached_len - n : cached_len].copy_(matched)
 
         linear_slot_idx = None
-        if self.cache_manager.is_hybrid:
+        if self.cache_manager.state_cache:
             pool = self.cache_manager.linear_state_pool
             linear_slot_idx = pool.alloc(1)[0]
 
-        return handle, table_idx, linear_slot_idx, mr.mamba_value
+        return handle, table_idx, linear_slot_idx, handle.state
 
     def _add_one_req(
         self,
         pending_req: PendingReq,
-        cache_handle: BaseCacheHandle,
+        cache_handle: CacheHandle,
         table_idx: int,
         cached_len: int,
         linear_slot_idx: int | None = None,

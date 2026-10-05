@@ -92,7 +92,7 @@ def parse_args(
         EngineConfig instance with parsed arguments
     """
     from freetoken.attention import validate_attn_backend
-    from freetoken.kvcache import SUPPORTED_CACHE_MANAGER
+    from freetoken.kvcache import CACHE_TYPES
     from freetoken.moe import SUPPORTED_MOE_BACKENDS
 
     def _parse_moe_cache_rate(value: str) -> float:
@@ -493,7 +493,7 @@ def parse_args(
         "--cache-type",
         type=str,
         default=ServerArgs.cache_type,
-        choices=SUPPORTED_CACHE_MANAGER.supported_names(),
+        choices=CACHE_TYPES,
         help="KV cache strategy (naive | radix). For hybrid GDN models 'radix' is materialized "
         "as a GDN-aware radix (cross-request GDN-state prefix reuse); pass 'naive' to opt out.",
     )
