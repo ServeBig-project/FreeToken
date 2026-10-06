@@ -225,6 +225,8 @@ class CacheManager:
         # pool exists, windows when the pool pages its window KV.
         self.state_cache = self.reuse and linear_state_pool is not None
         self.window_cache = self.reuse and self.swa_paged
+        if self.state_cache:
+            linear_state_pool.check_page_size(page_size)
         self.policy_name = policy
         self.policy = POLICIES[policy]()
         self.stats = dict.fromkeys((
@@ -394,18 +396,17 @@ class CacheManager:
         return pool.alloc(1)[0] if pool.num_free_slots else None
 
     def prepare_prefill_snapshots(self, reqs: List[Req]) -> None:
-        """Give every capture this chunk passes a slot. Within one extend a state exists only
-        every CHUNK_SIZE tokens from its start, so a capture lands at or before its target."""
+        """Give every capture this chunk passes a slot; the state pool says where inside the
+        extend a capture lands (at or before its target)."""
         self.stats["recomputed_tokens"] += sum(req.extend_len for req in reqs)
         if not self.state_cache:
             return
-        from freetoken.kernel.fla.chunk import CHUNK_SIZE
-
+        pool = self.linear_state_pool
         for req in reqs:
             for c in req.state_captures:
                 if c.slot is not None or not req.cached_len <= c.target < req.device_len:
                     continue
-                pos = req.cached_len + (c.target - req.cached_len) // CHUNK_SIZE * CHUNK_SIZE
+                pos = pool.capture_position(req.cached_len, c.target)
                 if pos > req.cache_handle.cached_len and pos % self.page_size == 0:
                     c.slot = self._alloc_state()
 
@@ -430,12 +431,15 @@ class CacheManager:
         if pool is not None and pool.replay is not None:
             pool.replay.begin_prefill(batch.prefill_reqs)
 
-    def _release_captures(self, req: Req) -> None:
-        """Free the request's frozen states that were not published."""
+    def _release_captures(self, req: Req, *, keep_future: bool = False) -> None:
+        """Free the request's frozen states that were not published; ``keep_future`` keeps
+        the captures its prefill has not reached yet."""
+        future = [c for c in req.state_captures
+                  if keep_future and c.slot is None and c.target >= req.cached_len]
         for c in req.state_captures:
             if c.slot is not None:
                 self.linear_state_pool.free(c.slot)
-        req.state_captures = []
+        req.state_captures[:] = future
 
     def maybe_free_swa_out_of_window(self, reqs: List[Req], *, forward_iter: int) -> None:
         """Proactively free each decoding request's now-out-of-window SWA slots, bounding its swa
@@ -728,7 +732,7 @@ class CacheManager:
             return
         boundaries = self._commit_boundaries(req, finished=finished)
         if not boundaries and not finished:
-            self._release_captures(req)
+            self._release_captures(req, keep_future=True)
             return  # nothing new is resumable yet; the request keeps its handle
         pages = self.page_table[req.table_idx, : req.cached_len]
         free_upto, published, ends = old.cached_len, [], []
@@ -772,7 +776,7 @@ class CacheManager:
                 handle.kv_indices[old.cached_len :])
         req.cache_handle = handle
         self.lock(handle)
-        self._release_captures(req)
+        self._release_captures(req, keep_future=True)
         self._backup(ends)
 
     def _backup(self, ends) -> None:
@@ -870,6 +874,10 @@ class CacheManager:
         self._free(indices)
 
     def check_integrity(self) -> None:
+        if self.host is not None:
+            # Idle: finish this cache's own copies so restored pages are in the tree.
+            self.host.drain()
+            self._release(self.tree.take_released())
         cache_pages = 0
         if self.tree is not None:
             tree = self.tree

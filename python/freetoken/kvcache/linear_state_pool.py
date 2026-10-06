@@ -93,6 +93,20 @@ class LinearStatePool:
 
             self.replay = GdnReplay(self, _replay_shapes(group, tp_size, dtype, records), device)
 
+    def capture_position(self, start: int, target: int) -> int:
+        """Deepest position at or before ``target`` whose state a prefill extend starting at
+        ``start`` produces: the chunked recurrence has one every CHUNK_SIZE tokens."""
+        from freetoken.kernel.fla.chunk import CHUNK_SIZE
+
+        return start + (target - start) // CHUNK_SIZE * CHUNK_SIZE
+
+    def check_page_size(self, page_size: int) -> None:
+        """Captured states must sit on page boundaries for the prefix tree to hold them."""
+        from freetoken.kernel.fla.chunk import CHUNK_SIZE
+
+        if CHUNK_SIZE % page_size:
+            raise ValueError(f"state caching needs page_size dividing {CHUNK_SIZE}, got {page_size}")
+
     def can_export(self, req, position: int) -> bool:
         """Whether the complete state after ``position`` inputs can still be produced."""
         if self.replay is not None:

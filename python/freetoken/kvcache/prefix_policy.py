@@ -48,19 +48,10 @@ class ContinuationPolicy(BaselinePolicy):
     def eviction_order(self, candidates, *, tier, kind, required):
         if kind != "state":
             return super().eviction_order(candidates, tier=tier, kind=kind, required=required)
-        # Round ends with a newer state below them have lost their purpose; then by last use.
-        return sorted(candidates, key=lambda n: (
-            not (n.purpose in (INPUT, OUTPUT) and _has_state_below(n)), n.state_tic))
-
-
-def _has_state_below(node) -> bool:
-    stack = list(node.children.values())
-    while stack:
-        n = stack.pop()
-        if n.state is not None:
-            return True
-        stack.extend(n.children.values())
-    return False
+        # By the state's own last real reuse: a round's resume point stays fresh while the
+        # session keeps coming back to it, and an abandoned branch's end ages out. (A deeper
+        # state is no sign of replacement: the next round usually forks right above it.)
+        return sorted(candidates, key=lambda n: n.state_tic)
 
 
 POLICIES = {"baseline": BaselinePolicy, "continuation": ContinuationPolicy}

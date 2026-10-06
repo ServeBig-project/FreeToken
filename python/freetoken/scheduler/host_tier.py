@@ -99,7 +99,7 @@ class HostTier:
         for comp in comps:
             copy = HostCopy(self.store, comp, units)
             if copy.where is None:
-                self.m.tree.evict_host(copy.nbytes)
+                self.m.tree.evict_host(copy.nbytes, lambda n=copy.nbytes: self.store.fits(n))
                 self.m._release(self.m.tree.take_released())
                 copy = HostCopy(self.store, comp, units)
             if copy.where is None:

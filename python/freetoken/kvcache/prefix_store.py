@@ -40,6 +40,11 @@ class HostStore:
     def allocated(self) -> int:
         return sum(s.numel() for s in self.slabs)
 
+    def fits(self, nbytes: int) -> bool:
+        nbytes = -(-nbytes // _ALIGN) * _ALIGN
+        return (self.allocated + nbytes <= self.budget
+                or any(ext[1] >= nbytes for extents in self.free_extents for ext in extents))
+
     def alloc(self, nbytes: int) -> tuple[int, int] | None:
         nbytes = -(-nbytes // _ALIGN) * _ALIGN
         for i, extents in enumerate(self.free_extents):
@@ -52,7 +57,8 @@ class HostStore:
                         extents.remove(ext)
                     self.used += nbytes
                     return i, off
-        size = max(self.slab_bytes, nbytes)
+        # A new slab takes what the budget has left, up to the slab size, but at least this.
+        size = max(min(self.slab_bytes, self.budget - self.allocated), nbytes)
         if self.allocated + size > self.budget:
             return None
         self.slabs.append(torch.empty(size, dtype=torch.uint8, pin_memory=True))

@@ -121,13 +121,6 @@ def _key_fn(page_size: int) -> KEY_FN:
 class RadixCache:
     def __init__(self, device: torch.device, page_size: int, policy, stats: dict, *,
                  window: int | None = None, has_state: bool = False) -> None:
-        if has_state:
-            from freetoken.kernel.fla.chunk import CHUNK_SIZE
-
-            # States land on CHUNK_SIZE boundaries; page-aligned so KV and state boundaries meet.
-            assert CHUNK_SIZE % page_size == 0, (
-                f"state caching needs CHUNK_SIZE({CHUNK_SIZE}) % page_size({page_size}) == 0"
-            )
         self.device = device
         self.page_size = page_size
         self.policy = policy
@@ -324,9 +317,7 @@ class RadixCache:
             node.state_ref -= 1
             if node.state_ref == 0 and node.state is not None:
                 self._move("state", 1, to_protected=False)
-                if node.state_doomed:
-                    self._drop_gpu_state(node, self._released, count=False)
-                    self._drop_host_state(node, count=False)
+            self._drop_if_doomed(node)
             handle.state_locked = False
         dec_window, cur = self.window is not None, node
         while not cur.is_root():
@@ -401,30 +392,26 @@ class RadixCache:
         return self._evicted(out)
 
     # ---------------------------------------------------------------- host tier
-    def evict_host(self, nbytes: int) -> int:
-        """Release host copies in the policy's order until ``nbytes`` are freed. Paged host KV
-        goes only where the GPU still has it or no descendant needs it."""
-        freed = 0
+    def evict_host(self, nbytes: int, enough: Callable[[], bool]) -> None:
+        """Release host copies in the policy's order until ``enough()`` (the host store can
+        place the request: shared copies free memory only with their last span). Paged host
+        KV goes only where the GPU still has it or no descendant needs it."""
         cands = [n for n in self._nodes() if not n.busy and n.ref == 0
                  and (n.host or n.host_window or n.host_state)]
         for node in self.policy.eviction_order(cands, tier="host", kind="host", required=nbytes):
-            if freed >= nbytes:
+            if enough():
                 break
             if not self._attached(node) or node.busy or node.ref:
                 continue
-            freed += _span_bytes(node.host_window) + _span_bytes(node.host_state)
             node.host_window = _release(node.host_window)
             self._drop_host_state(node)
             if node.host is not None and node.value is not None:
-                freed += _span_bytes(node.host)
                 node.host = _release(node.host)
             elif node.host is not None and node.is_leaf():
-                freed += _span_bytes(node.host)
                 self._remove(node, self._released)
                 self._reclaim_dead(node.parent, self._released)
             else:
                 self._reclaim_dead(node, self._released)
-        return freed
 
     def plan_restore(self, node: TreeNode) -> CopyPlan | None:
         """Lock ``node``'s path and list what comes back from the host to make it ready; None
@@ -440,12 +427,16 @@ class RadixCache:
         return self._plan(node, kv, window, state, nodes)
 
     def finish_restore(self, plan: CopyPlan, kv: List[torch.Tensor], state: int | None) -> None:
-        for (n, _), value in zip(plan.kv, kv, strict=True):
-            n.value, n.window_freed = value, True
-            self._account("kv", n.length, locked=True)
-        for n, _ in plan.window:
-            n.window_freed = False
-            self._account("window", n.length, locked=False)
+        """Publish restored locations onto whatever nodes now cover each planned range."""
+        ps = self.page_size
+        for (n, units), value in zip(plan.kv, kv, strict=True):
+            for piece, start, count in self._pieces(n, units):
+                piece.value, piece.window_freed = value[start * ps : (start + count) * ps], True
+                self._account("kv", piece.length, locked=True)
+        for n, units in plan.window:
+            for piece, _, _ in self._pieces(n, units):
+                piece.window_freed = False
+                self._account("window", piece.length, locked=False)
         if plan.state:
             plan.node.state = state
             self._account("state", 1, locked=False)
@@ -514,19 +505,29 @@ class RadixCache:
         for n in plan.nodes:
             n.busy = False
         self.unlock(plan.handle)
+        for n in plan.nodes:
+            self._drop_if_doomed(n)
 
     def _attach(self, node: TreeNode, units: int, copies: list, attr: str) -> None:
         from .prefix_store import HostSpan
 
-        spans = [HostSpan(c, 0, units) for c in copies]
-        while True:
+        pieces = self._pieces(node, units)
+        for c in copies:
+            c.refs += len(pieces) - 1  # one reference per span
+        for piece, start, count in pieces:
+            setattr(piece, attr, [HostSpan(c, start, count) for c in copies])
+
+    def _pieces(self, node: TreeNode, units: int) -> List[Tuple[TreeNode, int, int]]:
+        """The nodes that now cover what was ``node``'s ``units`` units when a copy was planned:
+        a split keeps ``node`` as the tail and puts the head on new parents. Yields
+        (node, first unit, units), tail first."""
+        out = []
+        while units > 0:
             own = node.length // self.page_size
-            if own == spans[0].count:
-                setattr(node, attr, spans)
-                return
-            halves = [s.split(s.count - own) for s in spans]
-            setattr(node, attr, [t for _, t in halves])
-            spans, node = [h for h, _ in halves], node.parent
+            units -= own
+            out.append((node, units, own))
+            node = node.parent
+        return out
 
     # ---------------------------------------------------------------- pruning
     def state_chain(self, node: TreeNode) -> List[TreeNode]:
@@ -541,15 +542,19 @@ class RadixCache:
     def drop_states(self, nodes: List[TreeNode]) -> None:
         """Drop these states from both tiers now, or when their last lock goes."""
         for node in nodes:
-            if node.state_doomed or node.busy:
+            if node.state_doomed:
                 continue
             self.stats["checkpoint_pruned"] += 1
-            if node.state_ref:
-                node.state_doomed = True
-                continue
+            node.state_doomed = True
+            self._drop_if_doomed(node)
+
+    def _drop_if_doomed(self, node: TreeNode) -> None:
+        """Carry out a pruning decision once no lock or copy uses the state."""
+        if node.state_doomed and node.state_ref == 0 and not node.busy:
             if node.state is not None:
                 self._drop_gpu_state(node, self._released, count=False)
             self._drop_host_state(node, count=False)
+            node.state_doomed = False
 
     def take_released(self) -> Evicted:
         out, self._released = self._released, Evicted([], [], [])
@@ -777,9 +782,6 @@ def _release(spans: list | None) -> None:
         s.copy.release()
     return None
 
-
-def _span_bytes(spans: list | None) -> int:
-    return sum(s.nbytes for s in spans or ())
 
 
 __all__ = ["RadixCache", "CacheHandle", "CopyPlan", "Evicted", "TreeNode"]
