@@ -194,6 +194,7 @@ def tokenize_worker(
                             error=m.error,
                             gdn_replayssm=m.gdn_replayssm,
                             dflash=m.dflash,
+                            prefix_cache=m.prefix_cache,
                         )
                     )
             n_control = sum(

@@ -74,3 +74,4 @@ class CacheRebuildReply(BaseFrontendMsg):
     error: str | None = None
     gdn_replayssm: dict | None = None
     dflash: dict | None = None
+    prefix_cache: dict | None = None

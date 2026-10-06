@@ -287,6 +287,8 @@ class FrontendManager:
             self.gdn_geometry = msg.gdn_replayssm
         if msg.dflash is not None:
             self.dflash_geometry = msg.dflash
+        if msg.prefix_cache is not None:
+            self.stats.prefix_cache = msg.prefix_cache
         fut = self.rebuild_futures.pop(msg.request_id, None)
         if fut is not None and not fut.done():
             fut.set_result(self.last_rebuild)

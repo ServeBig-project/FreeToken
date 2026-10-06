@@ -1360,6 +1360,7 @@ class Scheduler(SchedulerIOMixin):
                     error=error,
                     gdn_replayssm=compute_gdn_state_geometry(self.engine),
                     dflash=compute_dflash_geometry(self.engine),
+                    prefix_cache=self.cache_manager.status(),
                 )
             ]
         )

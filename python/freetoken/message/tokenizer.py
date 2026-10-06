@@ -107,6 +107,7 @@ class CacheRebuildResultMsg(BaseTokenizerMsg):
     error: str | None = None
     gdn_replayssm: dict | None = None  # GDN state geometry after the rebuild
     dflash: dict | None = None
+    prefix_cache: dict | None = None
 
 
 @dataclass
