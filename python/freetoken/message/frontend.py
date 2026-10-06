@@ -63,6 +63,11 @@ class UserReply(BaseFrontendMsg):
 
 
 @dataclass
+class CacheStatusReply(BaseFrontendMsg):
+    prefix_cache: dict
+
+
+@dataclass
 class CacheRebuildReply(BaseFrontendMsg):
     # detokenizer worker -> api server: result of a /v1/cache/rebuild request.
     request_id: str

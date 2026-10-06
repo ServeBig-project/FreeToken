@@ -13,6 +13,7 @@ from freetoken.message import (
     BatchBackendMsg,
     CacheRebuildBackendMsg,
     CacheRebuildResultMsg,
+    CacheStatusMsg,
     DetokenizeMsg,
     ErrorReplyMsg,
     ExitMsg,
@@ -229,6 +230,8 @@ class Scheduler(SchedulerIOMixin):
         """Called when the scheduler is idle to perform background tasks."""
         logger.info_rank0("Scheduler is idle, waiting for new reqs...")
         self.cache_manager.check_integrity()
+        # Copies just finished: publish the status no reply will carry until the next request.
+        self.send_result([CacheStatusMsg(self.cache_manager.status())])
         moe_cache = self.engine.moe_offload_cache
         if moe_cache is not None and moe_cache.collect_stats:
             stats = moe_cache.cumulative_stats_snapshot()

@@ -111,6 +111,13 @@ class CacheRebuildResultMsg(BaseTokenizerMsg):
 
 
 @dataclass
+class CacheStatusMsg(BaseTokenizerMsg):
+    # scheduler -> detokenizer worker -> api server: the prefix_cache status at an idle point,
+    # where no reply would otherwise carry it (passthrough to CacheStatusReply).
+    prefix_cache: dict
+
+
+@dataclass
 class ErrorReplyMsg(BaseTokenizerMsg):
     # scheduler -> tokenizer/detokenizer worker -> frontend: a request the scheduler cannot
     # serve (e.g. its prompt exceeds the KV budget). The worker translates it into a terminal

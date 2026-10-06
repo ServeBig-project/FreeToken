@@ -24,6 +24,7 @@ from freetoken.message import (
     BatchFrontendMsg,
     CacheRebuildMsg,
     CacheRebuildReply,
+    CacheStatusReply,
     TokenizeMsg,
     UserReply,
 )
@@ -249,6 +250,9 @@ class FrontendManager:
             msg = await self.recv_tokenizer.get()
             if isinstance(msg, CacheRebuildReply):
                 self._resolve_rebuild(msg)
+                continue
+            if isinstance(msg, CacheStatusReply):
+                self.stats.prefix_cache = msg.prefix_cache
                 continue
             for msg in _unwrap_msg(msg):
                 # Global accounting follows actual admitted/sampled work even after the HTTP

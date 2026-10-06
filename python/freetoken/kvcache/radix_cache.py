@@ -193,8 +193,11 @@ class RadixCache:
         which case the node adopts the request's locations. Positions below
         ``window_freed_before`` had their window freed by the request, so a new suffix there is
         inserted window-freed. ``state`` is donated to the end node when that node has none.
-        Returns (matched length before insertion, locations the caller frees from every pool,
-        whether ``state`` was taken, the end node)."""
+        Publishing stops early at a node a copy is still filling with the GPU data the caller
+        would give up: the caller keeps its own pages from there. Returns (matched length
+        before insertion -- where it stopped, if it stopped early --, locations the caller
+        frees from every pool, whether ``state`` was taken, the end node or None if it
+        stopped early)."""
         n = align_down(len(ids), self.page_size)
         ids, kv = ids[:n], kv[:n]
         freed: List[torch.Tensor] = []
@@ -206,6 +209,9 @@ class RadixCache:
             m = align_down(child.match_len(ids[total:]), self.page_size)
             if m == 0:
                 break
+            if (update_after < total + m and child.busy
+                    and (child.value is None or child.window_freed)):
+                return total, (torch.cat(freed) if freed else self.empty), False, None
             partial = m < child.length
             if partial:
                 child = self._split(child, m)
@@ -253,8 +259,8 @@ class RadixCache:
         live = self.window is None or freed_before <= total  # request's window covers it all
         if child.ref > 0 or child.busy or (
                 child.value is not None and freed_before >= end):
-            # A reader still uses the node's current data, a copy is filling it, or the
-            # request freed this window too: keep the node, drop the request's copy.
+            # A reader still uses the node's current data, a copy uses it, or the request
+            # freed this window too: keep the node, drop the request's copy.
             freed.append(seg.clone())
             return child
         if not live and freed_before < end:
@@ -354,15 +360,17 @@ class RadixCache:
             freed += node.length
             if node.host is not None:
                 self._offload(node, out)
-                parent, cascaded = self._reclaim_dead(node, out)
+                survivor, cascaded = self._reclaim_dead(node, out)
             else:
                 self._remove(node, out)
-                parent, cascaded = self._reclaim_dead(node.parent, out)
+                survivor, cascaded = self._reclaim_dead(node.parent, out)
             freed += cascaded
-            if eligible(parent) and not parent.is_root():
-                # An exposed ancestor competes right away, as an LRU heap would have it.
+            # The nearest node this exposed (an offloaded node stays, so look past it) competes
+            # right away, as an LRU heap would have it.
+            exposed = survivor.parent if survivor is node else survivor
+            if not exposed.is_root() and eligible(exposed):
                 order = self.policy.eviction_order(
-                    order + [parent], tier="gpu", kind="kv", required=num_tokens - freed)
+                    order + [exposed], tier="gpu", kind="kv", required=num_tokens - freed)
         return self._evicted(out)
 
     def evict_window(self, num_tokens: int) -> Evicted:
@@ -397,22 +405,28 @@ class RadixCache:
         """Release host copies in the policy's order until ``enough()`` (the host store can
         place the request: shared copies free memory only with their last span). Paged host
         KV goes only where the GPU still has it or no descendant needs it."""
-        cands = [n for n in self._nodes() if not n.busy and n.ref == 0
-                 and (n.host or n.host_window or n.host_state)]
-        for node in self.policy.eviction_order(cands, tier="host", kind="host", required=nbytes):
-            if enough():
-                break
-            if not self._attached(node) or node.busy or node.ref:
-                continue
-            node.host_window = _release(node.host_window)
-            self._drop_host_state(node)
-            if node.host is not None and node.value is not None:
-                node.host = _release(node.host)
-            elif node.host is not None and node.is_leaf():
-                self._remove(node, self._released)
-                self._reclaim_dead(node.parent, self._released)
-            else:
-                self._reclaim_dead(node, self._released)
+        while not enough():
+            # A removed host-only leaf can expose its parent: collect again each round.
+            cands = [n for n in self._nodes() if not n.busy and n.ref == 0
+                     and (n.host or n.host_window or n.host_state)
+                     and (n.value is not None or n.is_leaf() or n.host_window or n.host_state)]
+            if not cands:
+                return
+            for node in self.policy.eviction_order(cands, tier="host", kind="host",
+                                                   required=nbytes):
+                if enough():
+                    return
+                if not self._attached(node) or node.busy or node.ref:
+                    continue
+                node.host_window = _release(node.host_window)
+                self._drop_host_state(node)
+                if node.host is not None and node.value is not None:
+                    node.host = _release(node.host)
+                elif node.host is not None and node.is_leaf():
+                    self._remove(node, self._released)
+                    self._reclaim_dead(node.parent, self._released)
+                else:
+                    self._reclaim_dead(node, self._released)
 
     def plan_restore(self, node: TreeNode) -> CopyPlan | None:
         """Lock ``node``'s path and list what comes back from the host to make it ready; None

@@ -739,7 +739,7 @@ class CacheManager:
         for pos, capture, purpose in boundaries:
             slot = capture.slot if capture is not None else (
                 req.linear_slot_idx if purpose == OUTPUT else None)
-            _, freed, taken, node = self.tree.insert(
+            matched, freed, taken, node = self.tree.insert(
                 req.input_ids[:pos], pages[:pos], group=req.cache_group, state=slot,
                 purpose=purpose, update_after=free_upto,
                 window_freed_before=req.swa_evicted_seqlen)
@@ -748,6 +748,11 @@ class CacheManager:
                 capture.slot = None
             elif taken:
                 req.linear_slot_idx = None
+            if node is None:
+                # A copy is still filling the tree there: what was published before it is
+                # re-pointed below, the request keeps its own pages from there on.
+                free_upto = max(free_upto, matched)
+                break
             if slot is not None:
                 published.append(node)
             ends.append(node)
