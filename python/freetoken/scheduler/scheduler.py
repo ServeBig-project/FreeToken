@@ -100,6 +100,9 @@ class Scheduler(SchedulerIOMixin):
                 None,
             ) or getattr(self.engine.kv_cache, "sliding_window_size", None),
             policy=config.prefix_cache_policy,
+            host_bytes=int(config.prefix_cache_host_gib * (1 << 30)),
+            draft_kv=self.engine.dflash.context if self.engine.dflash is not None else None,
+            tp_group=self.engine.tp_cpu_group if config.tp_info.size > 1 else None,
         )
         self.decode_manager = DecodeManager(config.page_size)
         self.prefill_manager = PrefillManager(
@@ -1645,8 +1648,8 @@ class Scheduler(SchedulerIOMixin):
         """
         if not batch.prompt_admissions:
             return
-        self.cache_manager.stats["gpu_reused_tokens"] += sum(
-            cached for _, _, cached in batch.prompt_admissions)
+        for uid, _, cached in batch.prompt_admissions:
+            self.cache_manager.count_reuse(uid, cached)
         self.send_result(
             [
                 PromptAdmittedMsg(uid=uid, prompt_tokens=prompt_tokens, cached_tokens=cached_tokens)

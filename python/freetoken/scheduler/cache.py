@@ -9,6 +9,8 @@ import torch
 from freetoken.core import Batch, Req
 from freetoken.kvcache.prefix_policy import ANCHOR, INPUT, OUTPUT, POLICIES
 from freetoken.kvcache.radix_cache import CacheHandle, RadixCache
+
+from .host_tier import HostTier, build_components, wait_ms
 from freetoken.utils import align_down, div_ceil
 
 if TYPE_CHECKING:
@@ -197,7 +199,8 @@ class _PrefillExecutionSession:
 class CacheManager:
     def __init__(self, num_pages: int, page_size: int, page_table: torch.Tensor, type: str,
                  linear_state_pool=None, swa_pool=None, sliding_window_size=None,
-                 policy: str = "baseline"):
+                 policy: str = "baseline", host_bytes: int = 0, draft_kv=None,
+                 tp_group=None):
         # The `_free_slots` follows a page-aligned manner. For example, if page_size = 2,
         # the `_free_slots` may look like [0, 2, 4, 6, ...], and each slot represents a page.
         device = page_table.device
@@ -226,9 +229,17 @@ class CacheManager:
         self.policy = POLICIES[policy]()
         self.stats = dict.fromkeys((
             "checkpoint_created", "checkpoint_deduplicated", "checkpoint_pruned",
-            "checkpoint_evicted", "gpu_checkpoint_peak", "gpu_reused_tokens",
-            "recomputed_tokens"), 0)
+            "checkpoint_evicted", "gpu_checkpoint_peak", "host_checkpoint_peak",
+            "gpu_reused_tokens", "host_reused_tokens", "recomputed_tokens"), 0)
         self.tree = self._make_tree()
+        if host_bytes and not self.reuse:
+            raise ValueError("--prefix-cache-host-gib needs prefix reuse (--cache-type radix)")
+        self.components = build_components(
+            swa_pool, linear_state_pool, draft_kv, window=self.window_cache,
+            state=self.state_cache, required=bool(host_bytes))
+        self.tp_group = tp_group  # CPU group when TP > 1: ranks agree on finished copies
+        self.host = HostTier(self, host_bytes, self.components) if host_bytes else None
+        self._host_reuse: dict[int, int] = {}  # uid -> tokens its admission got from the host
         self.empty = torch.empty(0, dtype=torch.int32, device=device)
         self._decode_page_reservations: dict[Req, _DecodePageReservation] = {}
         self._prefill_execution: _PrefillExecutionSession | None = None
@@ -340,8 +351,42 @@ class CacheManager:
         states = self.tree.state_count if self.tree is not None else 0
         pool = self.linear_state_pool
         active = pool.num_slots - 1 - pool.num_free_slots - states if self.state_cache else 0
-        return {"enabled": False, "policy": self.policy_name, "gpu_checkpoint_count": states,
-                "active_state_count": active, **self.stats}
+        out = {"enabled": False, "policy": self.policy_name, "gpu_checkpoint_count": states,
+               "active_state_count": active, "host_budget_bytes": 0,
+               "host_allocated_bytes": 0, "host_used_bytes": 0, "host_inflight_bytes": 0,
+               "transfer_device_bytes": 0, "host_checkpoint_count": 0, "restore_wait_ms": 0.0,
+               "h2d_bytes": 0, "d2h_bytes": 0, "h2d_batches": 0, "d2h_batches": 0,
+               "h2d_time_ms": 0.0, "d2h_time_ms": 0.0, **self.stats}
+        if self.host is not None:
+            out.update(self.host.status())
+        comps = self.components
+        out["components"] = [
+            {"name": c.name, "storage_kind": c.storage_kind,
+             "device_allocated_bytes": sum(_storage_bytes(v) for v in c.views()),
+             **(self.host.component_status(c) if self.host is not None else
+                {"host_used_bytes": 0, "h2d_bytes": 0, "d2h_bytes": 0})}
+            for c in (*comps["paged"], comps["window"], comps["state"]) if c is not None]
+        return out
+
+    def start_restore(self, handle: CacheHandle) -> bool:
+        """Bring a deeper host-resident prefix back for an admitting request; True means the
+        request waits for it (other requests keep being admitted)."""
+        return (self.host is not None and handle.restore is not None
+                and self.host.restore(handle))
+
+    def admitted(self, req: PendingReq, handle: CacheHandle) -> None:
+        """Account an admitted request that waited for a restore: its wait, and the part of its
+        reused prefix that came back from the host."""
+        if req.restore_wait is None:
+            return
+        since, ready, restored = req.restore_wait
+        self.host.restore_wait_ms += wait_ms(since)
+        self._host_reuse[req.uid] = max(0, min(handle.cached_len, restored) - ready)
+
+    def count_reuse(self, uid: int, cached: int) -> None:
+        host = self._host_reuse.pop(uid, 0)
+        self.stats["host_reused_tokens"] += host
+        self.stats["gpu_reused_tokens"] += cached - host
 
     def _alloc_state(self) -> int | None:
         self.ensure_mamba_slots(1)
@@ -686,7 +731,7 @@ class CacheManager:
             self._release_captures(req)
             return  # nothing new is resumable yet; the request keeps its handle
         pages = self.page_table[req.table_idx, : req.cached_len]
-        free_upto, published = old.cached_len, []
+        free_upto, published, ends = old.cached_len, [], []
         for pos, capture, purpose in boundaries:
             slot = capture.slot if capture is not None else (
                 req.linear_slot_idx if purpose == OUTPUT else None)
@@ -701,6 +746,7 @@ class CacheManager:
                 req.linear_slot_idx = None
             if slot is not None:
                 published.append(node)
+            ends.append(node)
             free_upto = max(free_upto, pos)
         req.round_states.extend(published)
         self.unlock(old)
@@ -711,6 +757,7 @@ class CacheManager:
             self._free_req_slots(req)
             if self.window_cache:
                 self._retain_prompt_window(req)
+            self._backup(ends)
             return
         if self.window_cache:
             # Locks are node-granular: cut a node boundary a window back so the request's lock
@@ -726,6 +773,17 @@ class CacheManager:
         req.cache_handle = handle
         self.lock(handle)
         self._release_captures(req)
+        self._backup(ends)
+
+    def _backup(self, ends) -> None:
+        if self.host is not None:
+            self.host.backup([n for n in ends if not n.is_root()])
+
+    def poll(self) -> None:
+        """Publish finished host copies; called every scheduling pass, never waits."""
+        if self.host is not None:
+            self.host.poll()
+            self._release(self.tree.take_released())
 
     def _prune_round(self, req: Req, deepest) -> None:
         """Let the policy drop the states this finished round replaced above ``deepest``. The
@@ -855,7 +913,13 @@ class CacheManager:
         self.page_table = page_table
         self.free_slots = torch.arange(num_pages, dtype=torch.int32, device=device) * self.page_size
         self._decode_page_reservations.clear()
-        self.tree = self._make_tree()
+        if self.host is not None:
+            # Same layout and components: host data stays reusable; GPU copies come back by
+            # restore into the new pools.
+            self.host.drain()
+            self.tree.drop_gpu()
+        else:
+            self.tree = self._make_tree()
         # The discarded tree owned donated states; rebuild is idle-only, so reclaim the whole
         # state free-list (else those slots leak -> admission hangs).
         if self.state_cache:
@@ -942,3 +1006,7 @@ def _write_page_table(
         f"allocated dtype {allocated.dtype} != page_table dtype {page_table.dtype}"
     )
     page_table[table_idxs, offsets] = allocated
+
+
+def _storage_bytes(view: torch.Tensor) -> int:
+    return view.numel() * view.element_size()

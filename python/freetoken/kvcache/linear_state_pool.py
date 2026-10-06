@@ -205,6 +205,10 @@ class LinearStatePool:
         self.conv_states[:, dst].copy_(self.conv_states[:, src])
         self.recurrent_states[:, dst].copy_(self.recurrent_states[:, src])
 
+    def state_views(self) -> list[torch.Tensor]:
+        """Per-layer ``[slots, ...]`` views of the conv and recurrent state."""
+        return [*self.conv_states.unbind(0), *self.recurrent_states.unbind(0)]
+
     def is_linear_layer(self, layer_id: int) -> bool:
         return layer_id in self._local_index
 

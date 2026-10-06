@@ -99,8 +99,13 @@ class EngineConfig:
     # KV capacity in tokens; resolved into num_page_override by _adjust_config once page_size
     # is final. Mutually exclusive with num_page_override.
     num_token_override: int | None = None
+    # Host memory (GiB) for cold prefix-cache data per engine worker; 0 keeps it off.
+    prefix_cache_host_gib: float = 0.0
 
     def __post_init__(self) -> None:
+        if self.prefix_cache_host_gib < 0:
+            raise ValueError(
+                f"--prefix-cache-host-gib must be >= 0, got {self.prefix_cache_host_gib}")
         external_draft = self.speculative_draft_model_path is not None
         if external_draft:
             if not 1 <= self.speculative_num_steps <= 8:

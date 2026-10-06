@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Tuple
 
@@ -18,6 +19,10 @@ if TYPE_CHECKING:
     from .table import TableManager
 
 logger = init_logger(__name__)
+
+# A request whose reusable prefix is being restored from host memory: it stays queued while the
+# requests behind it are still considered.
+WAIT_RESTORE = object()
 
 
 def _maybe_pinned(t: torch.Tensor) -> torch.Tensor:
@@ -59,6 +64,10 @@ class PrefillAdder:
             return None
 
         handle = self.cache_manager.match_req(req)
+        if self.cache_manager.start_restore(handle):
+            if req.restore_wait is None:
+                req.restore_wait = (time.monotonic(), handle.cached_len, handle.restore_len)
+            return WAIT_RESTORE
         cached_len = handle.cached_len
         # TODO: better estimate policy
         extend_len = req.input_len - cached_len
@@ -240,7 +249,10 @@ class PrefillAdder:
                 round_states=chunked_req.round_states,
             )
 
-        if resource := self._try_allocate_one(pending_req):
+        resource = self._try_allocate_one(pending_req)
+        if resource is WAIT_RESTORE:
+            return resource
+        if resource:
             cache_handle, table_idx, linear_slot_idx, restore_src = resource
             req = self._add_one_req(
                 pending_req=pending_req,
@@ -258,6 +270,8 @@ class PrefillAdder:
                 self.table_manager.free(table_idx)
                 if linear_slot_idx is not None:
                     self.cache_manager.linear_state_pool.free(linear_slot_idx)
+            else:
+                self.cache_manager.admitted(pending_req, cache_handle)
             return req
 
         return None
@@ -285,6 +299,7 @@ class PrefillManager:
         max_reqs: int | None = None,
         incremental_window_prefill: bool = False,
     ) -> Batch | None:
+        self.cache_manager.poll()
         if len(self.pending_list) == 0:
             return None
 
@@ -307,6 +322,7 @@ class PrefillManager:
             incremental_window_prefill=incremental_window_prefill,
         )
         reqs: List[Req] = []
+        admitted: set[int] = set()
         chunked_list: List[PendingReq] = []
         prompt_admissions: List[Tuple[int, int, int]] = []
         # Snapshot here, before the forward's complete_one() advances cached_len: the tokens
@@ -320,7 +336,11 @@ class PrefillManager:
             if max_reqs is not None and len(reqs) >= max_reqs:
                 break
             is_continuation = pending_req.chunked_req is not None
-            if req := adder.try_add_one(pending_req):
+            req = adder.try_add_one(pending_req)
+            if req is WAIT_RESTORE:
+                continue
+            if req:
+                admitted.add(id(pending_req))
                 pending_req.chunked_req = None
                 pending_req.layered_cached_len = None
                 if isinstance(req, ChunkedReq):
@@ -341,7 +361,8 @@ class PrefillManager:
                 break  # We cannot add more requests
         if len(reqs) == 0:
             return None
-        self.pending_list = chunked_list + self.pending_list[len(reqs) :]
+        self.pending_list = chunked_list + [
+            p for p in self.pending_list if id(p) not in admitted]
         batch = Batch(reqs=reqs, decode_size=0)
         batch.log_new_tokens = log_new_tokens
         batch.log_cached_tokens = log_cached_tokens

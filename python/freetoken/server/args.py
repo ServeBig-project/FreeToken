@@ -499,6 +499,14 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--prefix-cache-host-gib",
+        type=float,
+        default=ServerArgs.prefix_cache_host_gib,
+        help="Host memory in GiB per engine worker for cold prefix-cache data (KV pages, "
+        "windows, recurrent states) moved out of the GPU and restored on reuse; 0 disables.",
+    )
+
+    parser.add_argument(
         "--prefix-cache-policy",
         type=str,
         default=ServerArgs.prefix_cache_policy,

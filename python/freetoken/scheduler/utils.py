@@ -23,6 +23,8 @@ class PendingReq:
     layered_cached_len: int | None = None
     mm_embeds: torch.Tensor | None = None
     cache_group: str = ""
+    # (since, ready length, restorable length) while waiting for a host restore
+    restore_wait: tuple[float, int, int] | None = None
 
     @property
     def input_len(self) -> int:
