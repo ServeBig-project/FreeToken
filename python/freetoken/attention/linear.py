@@ -184,12 +184,13 @@ def verify_layout(reqs, states, dummy_slot, dummy_row, positions, pin):
 
 
 def _build_track_metadata(reqs, cu_host, device, pin):
-    """Freeze the deepest internal chunk boundary, or the final short chunk's initial state.
+    """Freeze each slotted capture whose target this extend passes.
 
-    A repeated prompt must reprocess its last token, so its final state cannot be reused as
-    a prefix. The caller allocates only snapshots newer than the existing public prefix.
+    Inside one extend the chunked recurrence has a state every CHUNK_SIZE tokens from its
+    start (``h``) and the initial state at the start, so a capture takes the deepest of those
+    at or before its target and records where it landed (``pos``).
     """
-    if not any(r.mamba_snapshot_slot is not None for r in reqs):
+    if not any(c.slot is not None for r in reqs for c in r.state_captures):
         return None, None, None, None, None
     from freetoken.core import get_global_ctx
     from freetoken.kernel.fla.chunk import CHUNK_SIZE
@@ -200,22 +201,21 @@ def _build_track_metadata(reqs, cu_host, device, pin):
     dst, h_row, conv_src = [], [], []
     start_dst, start_src = [], []
     for i, r in enumerate(reqs):
-        if r.mamba_snapshot_slot is None:
-            continue
-        # deepest mid-chunk boundary strictly inside the extend (h has the per-chunk state;
-        # the exact extend-end / aligned-final state lives in the live slot -> finish-donate).
-        c = (r.extend_len - 1) // CHUNK_SIZE
-        if c < 1:
-            start_dst.append(r.mamba_snapshot_slot)
-            start_src.append(r.linear_slot_idx if r.linear_slot_idx is not None else r.table_idx)
-            r.mamba_last_track_seqlen = r.cached_len
-            continue
-        off = int(cu_host[i])
-        boundary = r.cached_len + c * CHUNK_SIZE
-        dst.append(r.mamba_snapshot_slot)
-        h_row.append(boh[i] + c)
-        conv_src.append([off + c * CHUNK_SIZE - km1 + j for j in range(km1)])
-        r.mamba_last_track_seqlen = boundary
+        for capture in r.state_captures:
+            if capture.slot is None or not r.cached_len <= capture.target < r.device_len:
+                continue
+            c = (capture.target - r.cached_len) // CHUNK_SIZE
+            capture.pos = r.cached_len + c * CHUNK_SIZE
+            if capture.pos <= r.cache_handle.cached_len:
+                capture.pos = None  # the reused prefix already ends here
+            elif c == 0:
+                start_dst.append(capture.slot)
+                start_src.append(r.linear_slot_idx if r.linear_slot_idx is not None else r.table_idx)
+            else:
+                off = int(cu_host[i])
+                dst.append(capture.slot)
+                h_row.append(boh[i] + c)
+                conv_src.append([off + c * CHUNK_SIZE - km1 + j for j in range(km1)])
     to = lambda xs: torch.tensor(xs, dtype=torch.int64, **pin).to(device, non_blocking=True) if xs else None
     return tuple(to(xs) for xs in (dst, h_row, conv_src, start_dst, start_src))
 

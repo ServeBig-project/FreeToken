@@ -499,6 +499,17 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--prefix-cache-policy",
+        type=str,
+        default=ServerArgs.prefix_cache_policy,
+        choices=["baseline", "continuation"],
+        help="Which prefix positions keep a recurrent state. baseline: one state near each "
+        "prompt end, LRU eviction. continuation: each round's prompt end and committed end "
+        "plus observed fork boundaries, dropping states a newer round replaces on an "
+        "unbranched chain.",
+    )
+
+    parser.add_argument(
         "--enable-cache-report",
         action="store_true",
         default=ServerArgs.enable_cache_report,

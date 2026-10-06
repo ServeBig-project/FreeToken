@@ -26,6 +26,7 @@ class SchedulerConfig(EngineConfig):
     prefill_wave_max_chunks: int = 1
     prefill_execution: Literal["serial", "concurrent"] = "serial"
     cache_type: str = "radix"
+    prefix_cache_policy: str = "baseline"
     offline_mode: bool = False
     decode_log_interval: int = 40
     special_token_ckpt: bool = False

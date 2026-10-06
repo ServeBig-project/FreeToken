@@ -459,9 +459,8 @@ class LayeredExecutionAdapter:
         if total_rows <= max_rows:
             return ()
         tiles: list[_LayeredPrefillTile] = []
-        # Whole-wave metadata will not execute; only actual tile writes may be donated.
-        for req in source.reqs:
-            req.mamba_last_track_seqlen = None
+        # Each tile view shares its request's capture list and re-records where the captures
+        # inside its own rows land; the whole-wave metadata never executes.
         tile_reqs: list[Req] = []
         tile_request_indices: list[int] = []
         tile_terminal_rows: list[tuple[int, int]] = []
@@ -492,13 +491,6 @@ class LayeredExecutionAdapter:
                 ),
                 layered_prefill=True,
             )
-            for req_view, request_index in zip(
-                tile_reqs,
-                tile_request_indices,
-                strict=True,
-            ):
-                owner = source.reqs[request_index]
-                owner.mamba_last_track_seqlen = req_view.mamba_last_track_seqlen
             request_start = tile_request_indices[0]
             request_stop = tile_request_indices[-1] + 1
             request_slice = slice(request_start, request_stop)

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Iterable, List, Tuple
 
 import torch
 from freetoken.core import Batch, Req
+from freetoken.kvcache.prefix_policy import ANCHOR, INPUT, OUTPUT, POLICIES
 from freetoken.kvcache.radix_cache import CacheHandle, RadixCache
 from freetoken.utils import align_down, div_ceil
 
@@ -42,6 +43,17 @@ class _DecodePageReservation:
     first_page: int
     last_page: int
     allocated: torch.Tensor
+
+
+@dataclass(eq=False)
+class StateCapture:
+    """A recurrent state the request should freeze on its way through ``target``: the forward
+    takes the deepest position it can produce at or before it (``pos``) into ``slot``."""
+
+    target: int
+    purpose: str
+    slot: int | None = None
+    pos: int | None = None
 
 
 @dataclass(frozen=True)
@@ -184,7 +196,8 @@ class _PrefillExecutionSession:
 
 class CacheManager:
     def __init__(self, num_pages: int, page_size: int, page_table: torch.Tensor, type: str,
-                 linear_state_pool=None, swa_pool=None, sliding_window_size=None):
+                 linear_state_pool=None, swa_pool=None, sliding_window_size=None,
+                 policy: str = "baseline"):
         # The `_free_slots` follows a page-aligned manner. For example, if page_size = 2,
         # the `_free_slots` may look like [0, 2, 4, 6, ...], and each slot represents a page.
         device = page_table.device
@@ -209,6 +222,12 @@ class CacheManager:
         # pool exists, windows when the pool pages its window KV.
         self.state_cache = self.reuse and linear_state_pool is not None
         self.window_cache = self.reuse and self.swa_paged
+        self.policy_name = policy
+        self.policy = POLICIES[policy]()
+        self.stats = dict.fromkeys((
+            "checkpoint_created", "checkpoint_deduplicated", "checkpoint_pruned",
+            "checkpoint_evicted", "gpu_checkpoint_peak", "gpu_reused_tokens",
+            "recomputed_tokens"), 0)
         self.tree = self._make_tree()
         self.empty = torch.empty(0, dtype=torch.int32, device=device)
         self._decode_page_reservations: dict[Req, _DecodePageReservation] = {}
@@ -222,7 +241,7 @@ class CacheManager:
         if not self.reuse:
             return None
         return RadixCache(
-            self.device, self.page_size,
+            self.device, self.page_size, self.policy, self.stats,
             window=self.sliding_window_size if self.window_cache else None,
             has_state=self.state_cache,
         )
@@ -243,7 +262,7 @@ class CacheManager:
         # have identical ids across images but carry different content (and KV).
         if self.tree is None or req.mm_embeds is not None:
             return CacheHandle(0, None, self.empty)
-        return self.tree.match(req.input_ids[: input_len - 1], req.cache_group)
+        return self.tree.match(req.input_ids[: input_len - 1], req.cache_group, reuse=True)
 
     @property
     def available_size(self) -> int:
@@ -308,28 +327,42 @@ class CacheManager:
         if ev.states:
             self.linear_state_pool.free(ev.states)
 
-    def _allocate_mamba_snapshot(self, req: Req) -> bool:
+    def plan_captures(self, req: PendingReq, handle: CacheHandle) -> List[StateCapture]:
+        """The states a freshly admitted request should freeze during its prefill."""
+        if not self.state_cache or req.mm_embeds is not None:
+            return []
+        targets = self.policy.checkpoint_positions(req.input_len, handle.cached_len,
+                                                   handle.matched_len)
+        return [StateCapture(target, purpose) for target, purpose in targets]
+
+    def status(self) -> dict:
+        """The public ``prefix_cache`` status object (host-side counters only, no sync)."""
+        states = self.tree.state_count if self.tree is not None else 0
         pool = self.linear_state_pool
+        active = pool.num_slots - 1 - pool.num_free_slots - states if self.state_cache else 0
+        return {"enabled": False, "policy": self.policy_name, "gpu_checkpoint_count": states,
+                "active_state_count": active, **self.stats}
+
+    def _alloc_state(self) -> int | None:
         self.ensure_mamba_slots(1)
-        if not pool.num_free_slots:
-            return False
-        req.mamba_snapshot_slot = pool.alloc(1)[0]
-        return True
+        pool = self.linear_state_pool
+        return pool.alloc(1)[0] if pool.num_free_slots else None
 
     def prepare_prefill_snapshots(self, reqs: List[Req]) -> None:
+        """Give every capture this chunk passes a slot. Within one extend a state exists only
+        every CHUNK_SIZE tokens from its start, so a capture lands at or before its target."""
+        self.stats["recomputed_tokens"] += sum(req.extend_len for req in reqs)
         if not self.state_cache:
             return
         from freetoken.kernel.fla.chunk import CHUNK_SIZE
-        from .prefill import ChunkedReq
 
         for req in reqs:
-            # Intermediate chunks are never inserted into the prefix cache.
-            if isinstance(req, ChunkedReq) or req.mm_embeds is not None:
-                continue
-            boundary = req.cached_len + (req.extend_len - 1) // CHUNK_SIZE * CHUNK_SIZE
-            if (boundary > req.cache_handle.cached_len and boundary % self.page_size == 0
-                    and req.mamba_snapshot_slot is None):
-                self._allocate_mamba_snapshot(req)
+            for c in req.state_captures:
+                if c.slot is not None or not req.cached_len <= c.target < req.device_len:
+                    continue
+                pos = req.cached_len + (c.target - req.cached_len) // CHUNK_SIZE * CHUNK_SIZE
+                if pos > req.cache_handle.cached_len and pos % self.page_size == 0:
+                    c.slot = self._alloc_state()
 
     def snapshot_toolcall_anchor(self, reqs: List[Req]) -> None:
         """Freeze a reusable tool-call prefix before the next decode advances live state."""
@@ -338,12 +371,13 @@ class CacheManager:
         pool = self.linear_state_pool
         for req in reqs:
             anchor = req.toolcall_anchor_len
-            if (anchor is None or req.mamba_snapshot_slot is not None
+            if (anchor is None or any(c.purpose == ANCHOR for c in req.state_captures)
                     or anchor % self.page_size != 0 or not pool.can_export(req, anchor)):
                 continue
-            if self._allocate_mamba_snapshot(req):
-                pool.export(req, anchor, req.mamba_snapshot_slot)
-                req.mamba_last_track_seqlen = anchor
+            slot = self._alloc_state()
+            if slot is not None:
+                pool.export(req, anchor, slot)
+                req.state_captures.append(StateCapture(anchor, ANCHOR, slot, anchor))
 
     def begin_linear_records(self, batch: Batch) -> None:
         """ReplaySSM: a prefill leaves a complete state, so its request restarts its records."""
@@ -351,11 +385,12 @@ class CacheManager:
         if pool is not None and pool.replay is not None:
             pool.replay.begin_prefill(batch.prefill_reqs)
 
-    def _release_mamba_snapshot(self, req: Req, *, donated: bool = False) -> None:
-        if req.mamba_snapshot_slot is not None and not donated:
-            self.linear_state_pool.free(req.mamba_snapshot_slot)
-        req.mamba_snapshot_slot = None
-        req.mamba_last_track_seqlen = None
+    def _release_captures(self, req: Req) -> None:
+        """Free the request's frozen states that were not published."""
+        for c in req.state_captures:
+            if c.slot is not None:
+                self.linear_state_pool.free(c.slot)
+        req.state_captures = []
 
     def maybe_free_swa_out_of_window(self, reqs: List[Req], *, forward_iter: int) -> None:
         """Proactively free each decoding request's now-out-of-window SWA slots, bounding its swa
@@ -460,6 +495,7 @@ class CacheManager:
     def unlock(self, handle: CacheHandle) -> None:
         if handle.node is not None:
             self.tree.unlock(handle)
+            self._release(self.tree.take_released())
 
     def _free_swa(self, indices: torch.Tensor) -> None:
         """Free the swa-pool slots backing ``indices`` (full-pool slots). Idempotent over the
@@ -647,22 +683,30 @@ class CacheManager:
             return
         boundaries = self._commit_boundaries(req, finished=finished)
         if not boundaries and not finished:
-            self._release_mamba_snapshot(req)
+            self._release_captures(req)
             return  # nothing new is resumable yet; the request keeps its handle
         pages = self.page_table[req.table_idx, : req.cached_len]
-        free_upto = old.cached_len
-        for pos, slot in boundaries:
-            _, freed, taken = self.tree.insert(
+        free_upto, published = old.cached_len, []
+        for pos, capture, purpose in boundaries:
+            slot = capture.slot if capture is not None else (
+                req.linear_slot_idx if purpose == OUTPUT else None)
+            _, freed, taken, node = self.tree.insert(
                 req.input_ids[:pos], pages[:pos], group=req.cache_group, state=slot,
-                update_after=free_upto, window_freed_before=req.swa_evicted_seqlen)
+                purpose=purpose, update_after=free_upto,
+                window_freed_before=req.swa_evicted_seqlen)
             self._free_pages(freed)
-            if taken and slot == req.linear_slot_idx:
-                req.linear_slot_idx = None
+            if taken and capture is not None:
+                capture.slot = None
             elif taken:
-                req.mamba_snapshot_slot = None
+                req.linear_slot_idx = None
+            if slot is not None:
+                published.append(node)
             free_upto = max(free_upto, pos)
+        req.round_states.extend(published)
         self.unlock(old)
         if finished:
+            if published:
+                self._prune_round(req, published[-1])
             self._free_pages(self._padded_tail(req, free_upto))
             self._free_req_slots(req)
             if self.window_cache:
@@ -681,22 +725,33 @@ class CacheManager:
                 handle.kv_indices[old.cached_len :])
         req.cache_handle = handle
         self.lock(handle)
-        self._release_mamba_snapshot(req)
+        self._release_captures(req)
 
-    def _commit_boundaries(self, req: Req, *, finished: bool) -> List[Tuple[int, int | None]]:
-        """Resumable positions this commit publishes, with the state slot each one donates."""
+    def _prune_round(self, req: Req, deepest) -> None:
+        """Let the policy drop the states this finished round replaced above ``deepest``. The
+        state the round restored from is its prompt-end point unless it froze a deeper one."""
+        restored, *published = req.round_states
+        kept = {n for n in published if n.state is not None}
+        if restored is not None and not any(n.purpose == INPUT for n in kept):
+            kept.add(restored)
+        self.tree.drop_states(self.policy.prune_after_commit(
+            kept, self.tree.state_chain(deepest)))
+        self._release(self.tree.take_released())
+
+    def _commit_boundaries(self, req: Req, *, finished: bool):
+        """(position, capture, purpose) of each resumable boundary this commit publishes, in
+        order; a finished request's own live state comes last as the round's committed end."""
         if not self.state_cache:
             pos = align_down(req.cached_len, self.page_size)
-            return [(pos, None)] if pos > 0 else []
-        out: List[Tuple[int, int | None]] = []
-        frozen, pos = req.mamba_snapshot_slot, req.mamba_last_track_seqlen
-        # A frozen state whose position is not a page boundary would attach to a shorter node.
-        if (frozen is not None and pos is not None and 0 < pos <= req.cached_len
-                and pos % self.page_size == 0):
-            out.append((pos, frozen))
+            return [(pos, None, None)] if pos > 0 else []
+        out = sorted(
+            ((c.pos, c, c.purpose) for c in req.state_captures
+             if c.slot is not None and c.pos is not None and 0 < c.pos <= req.cached_len
+             and c.pos % self.page_size == 0),
+            key=lambda b: b[0])
         if finished and req.cached_len > 0 and req.cached_len % self.page_size == 0:
             self.linear_state_pool.materialize(req)
-            out.append((req.cached_len, req.linear_slot_idx))
+            out.append((req.cached_len, None, OUTPUT))
         return out
 
     def _retain_prompt_window(self, req: Req) -> None:
@@ -747,7 +802,7 @@ class CacheManager:
 
     def _free_req_slots(self, req: Req) -> None:
         """Return remaining private state; donated public states belong to the cache."""
-        self._release_mamba_snapshot(req)
+        self._release_captures(req)
         if req.linear_slot_idx is not None:
             self.linear_state_pool.free(req.linear_slot_idx)
         req.linear_slot_idx = None

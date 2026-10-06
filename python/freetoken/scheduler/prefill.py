@@ -121,6 +121,8 @@ class PrefillAdder:
         linear_slot_idx: int | None = None,
         restore_src: int | None = None,
         swa_evicted_seqlen: int = 0,
+        state_captures: list | None = None,
+        round_states: list | None = None,
     ) -> Req | None:
         remain_len = pending_req.input_len - cached_len
         chunk_size = min(self.token_budget, remain_len)
@@ -210,6 +212,11 @@ class PrefillAdder:
         req.linear_slot_idx = linear_slot_idx
         req.mamba_restore_src = restore_src
         req.swa_evicted_seqlen = swa_evicted_seqlen  # carry the extend-free watermark across chunks
+        req.state_captures = state_captures if state_captures is not None else []
+        if round_states is not None:
+            req.round_states = round_states
+        elif cache_handle.state is not None:
+            req.round_states = [cache_handle.node]
         return req
 
     def try_add_one(self, pending_req: PendingReq) -> Req | None:
@@ -229,6 +236,8 @@ class PrefillAdder:
                 linear_slot_idx=chunked_req.linear_slot_idx,
                 restore_src=None,  # continuation chunk already has live state
                 swa_evicted_seqlen=chunked_req.swa_evicted_seqlen,  # extend-free watermark so far
+                state_captures=chunked_req.state_captures,
+                round_states=chunked_req.round_states,
             )
 
         if resource := self._try_allocate_one(pending_req):
@@ -240,6 +249,7 @@ class PrefillAdder:
                 cached_len=cache_handle.cached_len,
                 linear_slot_idx=linear_slot_idx,
                 restore_src=restore_src,
+                state_captures=self.cache_manager.plan_captures(pending_req, cache_handle),
             )
             if req is None:
                 # no aligned chunk this pass: undo the admission (a continuation keeps its

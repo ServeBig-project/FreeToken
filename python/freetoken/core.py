@@ -49,15 +49,19 @@ class Req:
     # --- hybrid-radix (GDN linear-state) per-request slots; None for non-hybrid models or
     # until allocated from LinearStatePool. Set by the scheduler (P2). ---
     linear_slot_idx: int | None = None              # live GDN state slot (sglang mamba_pool_idx)
-    mamba_snapshot_slot: int | None = None         # private snapshot awaiting donation, allocated on demand
-    mamba_last_track_seqlen: int | None = None      # chunk-aligned committed len of the last snapshot
+    # States to freeze for the prefix cache (scheduler.cache.StateCapture), shared by every
+    # prefill chunk of the request and published when its prefix is committed.
+    state_captures: list = field(default_factory=list)
+    # This round's public states: the state it restored from (or None), then each one it
+    # published. The continuation policy keeps them when pruning the chain above.
+    round_states: list = field(default_factory=lambda: [None])
     mamba_restore_src: int | None = None            # on a prefix hit: tree snapshot slot to COW into the live slot (first chunk only)
     swa_evicted_seqlen: int = 0                      # SWA radix: positions < this had their swa KV freed (slid out of window) during decode
     decode_batch_idx: int = 0                        # SWA radix: # of decode forwards done; the proactive free_swa skips the first (overlap guard)
     # Set once, at the first sampled tool-call opener token (scheduler detection): the state
     # length just after that token (its index + 1). A client-side rewrite of the echoed tool
     # call diverges strictly after this point, so it is the deepest reuse boundary that
-    # survives such a rewrite. GDN: the state is frozen into an on-demand private slot when cached_len
+    # survives such a rewrite. GDN: the state is frozen into a capture when cached_len
     # reaches it (snapshot_toolcall_anchor) and donated at finish. SWA: caps the proactive
     # out-of-window eviction so the window ending here stays resumable.
     toolcall_anchor_len: int | None = None

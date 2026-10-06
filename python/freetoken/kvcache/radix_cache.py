@@ -16,7 +16,6 @@ not resumable hold nothing reusable and are reclaimed whenever eviction exposes 
 """
 from __future__ import annotations
 
-import heapq
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, NamedTuple, Tuple
 
@@ -44,6 +43,9 @@ class TreeNode:
         self.window_uuid: int | None = None
         self.state: int | None = None
         self.state_ref = 0
+        self.purpose: str | None = None  # why the state is kept (prefix_policy)
+        self.state_tic = 0               # the state's last real reuse
+        self.state_doomed = False        # dropped once its last lock goes
 
     @property
     def length(self) -> int:
@@ -72,6 +74,7 @@ class CacheHandle:
     node: TreeNode | None
     kv_indices: torch.Tensor
     state: int | None = None        # state slot to restore the request's live state from
+    matched_len: int = 0            # tokens shared with the tree, past what is resumable
     window_uuid: int | None = None  # set by lock: where the window lock stops
     state_locked: bool = False
 
@@ -92,8 +95,8 @@ def _key_fn(page_size: int) -> KEY_FN:
 
 
 class RadixCache:
-    def __init__(self, device: torch.device, page_size: int, *, window: int | None = None,
-                 has_state: bool = False) -> None:
+    def __init__(self, device: torch.device, page_size: int, policy, stats: dict, *,
+                 window: int | None = None, has_state: bool = False) -> None:
         if has_state:
             from freetoken.kernel.fla.chunk import CHUNK_SIZE
 
@@ -103,6 +106,8 @@ class RadixCache:
             )
         self.device = device
         self.page_size = page_size
+        self.policy = policy
+        self.stats = stats  # cumulative counters, owned by the manager across rebuilds
         self.window = window
         self.has_state = has_state
         self.key_fn = _key_fn(page_size)
@@ -113,10 +118,12 @@ class RadixCache:
         self.protected = dict.fromkeys(("kv", "window", "state"), 0)
         self._clk = 0
         self._uuid = 0
+        self._released = Evicted([], [], [])  # states dropped at unlock, for the manager
 
     # ---------------------------------------------------------------- match / insert
-    def match(self, ids: torch.Tensor, group: str = "") -> CacheHandle:
-        """Deepest resumable position on the matched path, stamping the walked path."""
+    def match(self, ids: torch.Tensor, group: str = "", *, reuse: bool = False) -> CacheHandle:
+        """Deepest resumable position on the matched path, stamping the walked path. ``reuse``
+        marks the returned state as really reused (not its ancestors)."""
         path = self._walk(ids, group)
         best, pos, best_pos, live, freed_seen = -1, 0, 0, 0, False
         for i, node in enumerate(path):
@@ -133,14 +140,16 @@ class RadixCache:
             best, best_pos = i, pos
         self._stamp(path[-1] if path else self._root(group))
         if best < 0:
-            return CacheHandle(0, self._root(group), self.empty)
+            return CacheHandle(0, self._root(group), self.empty, matched_len=pos)
         node = path[best]
+        if reuse and node.state is not None:
+            node.state_tic = self._tick()
         kv = torch.cat([n.value for n in path[: best + 1]])
-        return CacheHandle(best_pos, node, kv, state=node.state)
+        return CacheHandle(best_pos, node, kv, state=node.state, matched_len=pos)
 
     def insert(self, ids: torch.Tensor, kv: torch.Tensor, *, group: str = "",
-               state: int | None = None, update_after: int = 0,
-               window_freed_before: int = 0) -> Tuple[int, torch.Tensor, bool]:
+               state: int | None = None, purpose: str | None = None, update_after: int = 0,
+               window_freed_before: int = 0) -> Tuple[int, torch.Tensor, bool, TreeNode]:
         """Insert the committed page-aligned prefix of ``ids`` with locations ``kv``.
 
         ``update_after`` is the request's reused-prefix length: matched nodes past it carry the
@@ -149,7 +158,7 @@ class RadixCache:
         locations (revive). Positions below ``window_freed_before`` had their window freed by the
         request, so a new suffix there is inserted window-freed. ``state`` is donated to the end
         node when that node has none. Returns (matched length before insertion, locations the
-        caller frees from every pool, whether ``state`` was taken)."""
+        caller frees from every pool, whether ``state`` was taken, the end node)."""
         n = align_down(len(ids), self.page_size)
         ids, kv = ids[:n], kv[:n]
         freed: List[torch.Tensor] = []
@@ -187,10 +196,16 @@ class RadixCache:
                 node = self._add_child(node, suffix_ids, suffix_kv, freed=False)
         taken = False
         if state is not None and not node.is_root() and node.state is None:
-            node.state = state
+            node.state, node.purpose, node.state_tic = state, purpose, self._tick()
+            node.state_doomed = False
             self._account("state", 1, locked=node.state_ref > 0)
             taken = True
-        return total, (torch.cat(freed) if freed else self.empty), taken
+            self.stats["checkpoint_created"] += 1
+            self.stats["gpu_checkpoint_peak"] = max(
+                self.stats["gpu_checkpoint_peak"], self.state_count)
+        elif state is not None and node.state is not None:
+            self.stats["checkpoint_deduplicated"] += 1
+        return total, (torch.cat(freed) if freed else self.empty), taken, node
 
     def _revive(self, child: TreeNode, seg: torch.Tensor, total: int, freed_before: int,
                 freed: List[torch.Tensor]) -> TreeNode:
@@ -257,6 +272,8 @@ class RadixCache:
             node.state_ref -= 1
             if node.state_ref == 0 and node.state is not None:
                 self._move("state", 1, to_protected=False)
+                if node.state_doomed:
+                    self._drop_state(node, self._released, evicted=False)
             handle.state_locked = False
         dec_window, cur = self.window is not None, node
         while not cur.is_root():
@@ -274,44 +291,44 @@ class RadixCache:
 
     # ---------------------------------------------------------------- eviction
     def evict_kv(self, num_tokens: int) -> Evicted:
-        """Free paged KV by LRU over unlocked leaves (an inner node is every descendant's
-        prefix), with everything else the leaf holds."""
+        """Free paged KV from unlocked leaves (an inner node is every descendant's prefix),
+        with everything else the leaf holds, in the policy's order."""
         out = Evicted([], [], [])
-        heap = [n for n in self._nodes() if n.is_leaf() and n.ref == 0]
-        heapq.heapify(heap)
         freed = 0
-        while freed < num_tokens and heap:
-            node = heapq.heappop(heap)
-            if node.ref != 0 or not node.is_leaf():
-                continue
-            freed += self._remove(node, out)
-            parent, cascaded = self._reclaim_dead(node.parent, out)
-            freed += cascaded
-            if parent.is_leaf() and parent.ref == 0 and not parent.is_root():
-                heapq.heappush(heap, parent)
+        while freed < num_tokens:
+            cands = [n for n in self._nodes() if n.is_leaf() and n.ref == 0]
+            if not cands:
+                break
+            for node in self.policy.eviction_order(cands, tier="gpu", kind="kv",
+                                                   required=num_tokens - freed):
+                if freed >= num_tokens:
+                    break
+                if self._attached(node) and node.is_leaf() and node.ref == 0:
+                    freed += self._remove(node, out)
+                    freed += self._reclaim_dead(node.parent, out)[1]
         return self._evicted(out)
 
     def evict_window(self, num_tokens: int) -> Evicted:
-        """Free window KV by LRU over unlocked live windows, inner nodes included: an inner or
+        """Free window KV from unlocked live windows, inner nodes included: an inner or
         KV-locked node only loses its window; a free leaf is removed whole."""
         return self._evict_component(
-            num_tokens, lambda n: not n.window_freed and n.window_ref == 0,
+            num_tokens, "window", lambda n: not n.window_freed and n.window_ref == 0,
             lambda n: n.length, self._drop_window)
 
     def evict_states(self, num: int) -> Evicted:
-        """Free state slots by LRU over unlocked states, inner nodes included."""
+        """Free state slots from unlocked states, inner nodes included."""
         return self._evict_component(
-            num, lambda n: n.state is not None and n.state_ref == 0,
+            num, "state", lambda n: n.state is not None and n.state_ref == 0,
             lambda n: 1, self._drop_state)
 
-    def _evict_component(self, amount: int, eligible, size, drop) -> Evicted:
+    def _evict_component(self, amount: int, kind: str, eligible, size, drop) -> Evicted:
         out = Evicted([], [], [])
-        heap = [n for n in self._nodes() if eligible(n)]
-        heapq.heapify(heap)
+        cands = [n for n in self._nodes() if eligible(n)]
         freed = 0
-        while freed < amount and heap:
-            node = heapq.heappop(heap)
-            if not eligible(node):
+        for node in self.policy.eviction_order(cands, tier="gpu", kind=kind, required=amount):
+            if freed >= amount:
+                break
+            if not (self._attached(node) and eligible(node)):
                 continue
             freed += size(node)
             if node.is_leaf() and node.ref == 0:
@@ -319,6 +336,30 @@ class RadixCache:
                 self._reclaim_dead(node.parent, out)
             else:
                 drop(node, out)
+        return self._evicted(out)
+
+    def state_chain(self, node: TreeNode) -> List[TreeNode]:
+        """State nodes above ``node`` on its unbranched path (stopping at the first branch)."""
+        out, cur = [], node.parent
+        while cur is not None and not cur.is_root() and len(cur.children) == 1:
+            if cur.state is not None:
+                out.append(cur)
+            cur = cur.parent
+        return out
+
+    def drop_states(self, nodes: List[TreeNode]) -> None:
+        """Drop these states now, or when their last lock goes."""
+        for node in nodes:
+            if node.state is None or node.state_doomed:
+                continue
+            self.stats["checkpoint_pruned"] += 1
+            if node.state_ref:
+                node.state_doomed = True
+            else:
+                self._drop_state(node, self._released, evicted=False)
+
+    def take_released(self) -> Evicted:
+        out, self._released = self._released, Evicted([], [], [])
         return self._evicted(out)
 
     def trim_head_window(self, ids: torch.Tensor, keep_from: int, group: str = "") -> torch.Tensor:
@@ -349,6 +390,10 @@ class RadixCache:
     @property
     def kv_tokens(self) -> int:
         return self.evictable["kv"] + self.protected["kv"]
+
+    @property
+    def state_count(self) -> int:
+        return self.evictable["state"] + self.protected["state"]
 
     # ---------------------------------------------------------------- helpers
     def _root(self, group: str) -> TreeNode:
@@ -396,6 +441,10 @@ class RadixCache:
     def _unlink(self, node: TreeNode) -> None:
         del node.parent.children[self.key_fn(node.key)]
 
+    def _attached(self, node: TreeNode) -> bool:
+        return node.parent is not None and (
+            node.parent.children.get(self.key_fn(node.key)) is node)
+
     def _resumable_end(self, node: TreeNode) -> bool:
         if self.has_state and node.state is None:
             return False
@@ -428,9 +477,10 @@ class RadixCache:
         node.window_freed = True
         self._account("window", -node.length, locked=False)
 
-    def _drop_state(self, node: TreeNode, out: Evicted) -> None:
+    def _drop_state(self, node: TreeNode, out: Evicted, evicted: bool = True) -> None:
+        self.stats["checkpoint_evicted"] += evicted
         out.states.append(node.state)
-        node.state = None
+        node.state, node.purpose, node.state_doomed = None, None, False
         self._account("state", -1, locked=False)
 
     def _evicted(self, out: Evicted) -> Evicted:

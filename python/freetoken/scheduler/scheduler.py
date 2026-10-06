@@ -99,6 +99,7 @@ class Scheduler(SchedulerIOMixin):
                 (g.sliding_window for g in config.model_config.kv_cache_group_specs() if g.is_swa),
                 None,
             ) or getattr(self.engine.kv_cache, "sliding_window_size", None),
+            policy=config.prefix_cache_policy,
         )
         self.decode_manager = DecodeManager(config.page_size)
         self.prefill_manager = PrefillManager(
@@ -1092,6 +1093,7 @@ class Scheduler(SchedulerIOMixin):
         swa_tokens = self._swa_token_usage()
         if reply:
             reply[-1].cuda_graph = self.engine.graph_runner.stats_snapshot()
+            reply[-1].prefix_cache = self.cache_manager.status()
             pool = self.engine.linear_state_pool
             if pool is not None and pool.replay is not None:
                 reply[-1].gdn_replayssm = pool.replay.snapshot()
@@ -1643,6 +1645,8 @@ class Scheduler(SchedulerIOMixin):
         """
         if not batch.prompt_admissions:
             return
+        self.cache_manager.stats["gpu_reused_tokens"] += sum(
+            cached for _, _, cached in batch.prompt_admissions)
         self.send_result(
             [
                 PromptAdmittedMsg(uid=uid, prompt_tokens=prompt_tokens, cached_tokens=cached_tokens)

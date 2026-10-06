@@ -228,6 +228,7 @@ def tokenize_worker(
                         speculative=msg.speculative,
                         cuda_graph=msg.cuda_graph,
                         gdn_replayssm=msg.gdn_replayssm,
+                        prefix_cache=msg.prefix_cache,
                     )
                     for msg, reply in zip(detokenize_msg, replies, strict=True)
                 ]

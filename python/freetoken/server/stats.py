@@ -41,6 +41,7 @@ class StatsTracker:
         self.gdn_replayssm = dict.fromkeys(("ar_tokens", "draft_tokens", "verify_tokens",
                                             "flushes", "flushed_records", "snapshot_exports"), 0)
         self.gdn_replayssm.update(flush_gpu_ms=0.0, export_gpu_ms=0.0)
+        self.prefix_cache = None  # scheduler CacheManager.status() as of the latest reply
         self.cuda_graph = {"enabled": False, "target_decode": 0, "draft": 0, "verify": 0,
                            "replay_shapes": [], "capture_seconds": 0.0, "extra_reserved_bytes": 0}
         self.speculative = {"draft_tokens": 0, "accepted_draft_tokens": 0, "verify_steps": 0,
@@ -83,6 +84,8 @@ class StatsTracker:
             self.speculative.update(reply.speculative)
         if getattr(reply, "gdn_replayssm", None) is not None:
             self.gdn_replayssm = reply.gdn_replayssm
+        if getattr(reply, "prefix_cache", None) is not None:
+            self.prefix_cache = reply.prefix_cache
         if getattr(reply, "completion_tokens_delta", 0) > 0:
             self._decode.append((t, reply.completion_tokens_delta))
             self.completion_tokens_total += reply.completion_tokens_delta
