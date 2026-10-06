@@ -11,7 +11,7 @@ import torch
 from freetoken.core import Req, SamplingParams
 from freetoken.kvcache.linear_state_pool import LinearStatePool
 from freetoken.models.config import LinearGatedDeltaGroupConfig
-from freetoken.scheduler.cache import CacheManager
+from freetoken.scheduler.cache import CacheManager, StateCapture
 
 
 def _pool(num_slots=16):
@@ -21,6 +21,15 @@ def _pool(num_slots=16):
     )
     return LinearStatePool(group=g, num_slots=num_slots, dtype=torch.bfloat16,
                            device=torch.device("cpu"), tp_size=1)
+
+
+def _capture(pos, slot):
+    return StateCapture(pos, "input", slot=slot, pos=pos)
+
+
+def _capture_slots(req):
+    """Private state slots the request still holds for its captures."""
+    return [c.slot for c in req.state_captures if c.slot is not None]
 
 
 def _pend(ids):
@@ -33,37 +42,37 @@ def test_hybrid_cache_manager_donate_then_hit():
     pool = _pool()
     page_table = torch.zeros(4, 64, dtype=torch.int32)
     cm = CacheManager(64, 1, page_table, "hybrid_radix", linear_state_pool=pool)
-    assert cm.is_hybrid
+    assert cm.state_cache
 
     # cold match on an empty tree
     mr = cm.match_req(_pend([1, 2, 3, 4, 5]))
-    assert mr.cuda_handle.cached_len == 0 and mr.mamba_value is None
+    assert mr.cached_len == 0 and mr.state is None
 
     # The running request owns its working state and one pending prefix snapshot.
     live, snapshot = pool.alloc(2)
     page_table[0, :4] = torch.tensor([100, 101, 102, 103], dtype=torch.int32)
     reqA = Req(input_ids=torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32), table_idx=0,
                cached_len=4, output_len=1, uid=0, sampling_params=SamplingParams(),
-               cache_handle=mr.cuda_handle)
-    reqA.linear_slot_idx, reqA.mamba_snapshot_slot = live, snapshot
-    reqA.mamba_last_track_seqlen = 4
-    cm.lock(mr.cuda_handle)
+               cache_handle=mr)
+    reqA.linear_slot_idx = live
+    reqA.state_captures = [_capture(4, snapshot)]
+    cm.lock(mr)
 
     free_before = pool.num_free_slots
     cm.cache_req(reqA, finished=False)
     assert pool.num_free_slots == free_before  # ownership moves; no replacement allocation
-    assert reqA.mamba_snapshot_slot is None
+    assert _capture_slots(reqA) == []
     assert reqA.linear_slot_idx == live
 
     # req B shares the [1,2,3,4] prefix -> HIT: returns the donated snapshot + reused KV
     mrB = cm.match_req(_pend([1, 2, 3, 4, 9]))
-    assert mrB.cuda_handle.cached_len == 4
-    assert mrB.mamba_value == snapshot
-    assert mrB.cuda_handle.get_matched_indices().tolist() == [100, 101, 102, 103]
+    assert mrB.cached_len == 4
+    assert mrB.state == snapshot
+    assert mrB.get_matched_indices().tolist() == [100, 101, 102, 103]
 
     cm._free_req_slots(reqA)
     assert pool.num_free_slots == free_before + 1  # only the private working slot is released
-    assert cm.match_req(_pend([1, 2, 3, 4, 8])).mamba_value == snapshot
+    assert cm.match_req(_pend([1, 2, 3, 4, 8])).state == snapshot
 
 
 def test_hybrid_finish_donates_live_slot():
@@ -76,17 +85,17 @@ def test_hybrid_finish_donates_live_slot():
     page_table[1, :3] = torch.tensor([200, 201, 202], dtype=torch.int32)
     req = Req(input_ids=torch.tensor([7, 8, 9, 10], dtype=torch.int32), table_idx=1,
               cached_len=3, output_len=1, uid=1, sampling_params=SamplingParams(),
-              cache_handle=mr.cuda_handle)
+              cache_handle=mr)
     req.linear_slot_idx = live
-    cm.lock(mr.cuda_handle)
+    cm.lock(mr)
 
     free_before = pool.num_free_slots
     cm.cache_req(req, finished=True)
     assert req.linear_slot_idx is None
-    assert req.mamba_snapshot_slot is None
+    assert _capture_slots(req) == []
     assert pool.num_free_slots == free_before  # the tree keeps the donated working state
     mr2 = cm.match_req(_pend([7, 8, 9, 10]))
-    assert mr2.cuda_handle.cached_len == 3 and mr2.mamba_value == live
+    assert mr2.cached_len == 3 and mr2.state == live
 
 
 @pytest.mark.parametrize("with_snapshot", [False, True])
@@ -99,11 +108,12 @@ def test_free_req_slots_idempotent(with_snapshot):
     snapshot = pool.alloc(1)[0] if with_snapshot else None
     req = Req(input_ids=torch.tensor([1, 2, 3], dtype=torch.int32), table_idx=0, cached_len=2,
               output_len=1, uid=0, sampling_params=SamplingParams(), cache_handle=None)
-    req.linear_slot_idx, req.mamba_snapshot_slot = live, snapshot
+    req.linear_slot_idx = live
+    req.state_captures = [_capture(2, snapshot)] if with_snapshot else []
     base = pool.num_free_slots
     cm._free_req_slots(req)
     assert pool.num_free_slots == base + 1 + with_snapshot
-    assert req.linear_slot_idx is None and req.mamba_snapshot_slot is None
+    assert req.linear_slot_idx is None and _capture_slots(req) == []
     cm._free_req_slots(req)                        # second free (abort/finish race)
     assert pool.num_free_slots == base + 1 + with_snapshot
 
@@ -117,9 +127,9 @@ def test_rebuild_reclaims_donated_gdn_slots():
     live = pool.alloc(1)[0]
     pt[1, :3] = torch.tensor([200, 201, 202], dtype=torch.int32)
     req = Req(input_ids=torch.tensor([7, 8, 9, 10], dtype=torch.int32), table_idx=1, cached_len=3,
-              output_len=1, uid=1, sampling_params=SamplingParams(), cache_handle=mr.cuda_handle)
+              output_len=1, uid=1, sampling_params=SamplingParams(), cache_handle=mr)
     req.linear_slot_idx = live
-    cm.lock(mr.cuda_handle)
+    cm.lock(mr)
     cm.cache_req(req, finished=True)
     assert pool.num_free_slots < pool.num_slots - 1   # a slot is now tree-owned
     cm.rebuild(64, pt)                            # idle rebuild discards the tree
@@ -144,14 +154,13 @@ def test_prefill_allocates_only_the_requested_snapshot(prompt_len, chunked, snap
     batch = pm.schedule_next_batch(64 if chunked else prompt_len)
     (req,) = batch.reqs
     assert isinstance(req, ChunkedReq) == chunked
-    assert req.linear_slot_idx is not None and req.mamba_snapshot_slot is None
+    assert req.linear_slot_idx is not None and _capture_slots(req) == []
     assert pool.num_free_slots == free_before - 1
 
     cm.prepare_prefill_snapshots(batch.reqs)
-    assert (req.mamba_snapshot_slot is not None) == snapshot_needed
+    assert len(_capture_slots(req)) == snapshot_needed
     assert pool.num_free_slots == free_before - 1 - snapshot_needed
-    if snapshot_needed:
-        assert req.mamba_snapshot_slot != req.linear_slot_idx
+    assert req.linear_slot_idx not in _capture_slots(req)
 
     cm._free_req_slots(req)
     assert pool.num_free_slots == free_before
@@ -163,12 +172,13 @@ def test_optional_prefill_snapshot_does_not_require_a_second_free_slot():
     cm = CacheManager(128, 1, pt, "hybrid_radix", linear_state_pool=pool)
     match = cm.match_req(_pend(list(range(70))))
     req = Req(input_ids=torch.arange(70, dtype=torch.int32), table_idx=0, cached_len=0,
-              output_len=4, uid=0, sampling_params=SamplingParams(), cache_handle=match.cuda_handle)
+              output_len=4, uid=0, sampling_params=SamplingParams(), cache_handle=match)
     req.linear_slot_idx = pool.alloc(1)[0]
+    req.state_captures = cm.plan_captures(_pend(list(range(70))), match)
 
     cm.prepare_prefill_snapshots([req])
 
-    assert req.mamba_snapshot_slot is None
+    assert _capture_slots(req) == []
     assert req.linear_slot_idx is not None
     assert pool.num_free_slots == 0
 

@@ -84,9 +84,8 @@ def test_multichunk_overlap_no_double_free():
     _drive_chunked_prefill(cm, tm, pm, n_chunks=4)
 
     cm.check_integrity()  # free_slots + cache == num_pages; no chunk freed twice
-    si = cm.prefix_cache.size_info
-    assert si.protected_size == 0  # request released -> no leaked locks / ref_count drift
-    assert si.evictable_size == 4 * CHUNK  # whole prompt retained in the prefix cache
+    assert cm.tree.protected["kv"] == 0  # request released -> no leaked locks / ref drift
+    assert cm.tree.evictable["kv"] == 4 * CHUNK  # whole prompt retained in the prefix cache
     assert len(cm.free_slots) == cm.num_pages - 4 * CHUNK
 
 

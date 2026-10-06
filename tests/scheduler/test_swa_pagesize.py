@@ -19,7 +19,7 @@ import torch
 from freetoken.core import Req, SamplingParams
 from freetoken.distributed import set_tp_info, try_get_tp_info
 from freetoken.models.config import KVCacheGroupSpec
-from freetoken.scheduler.cache import CacheManager
+from freetoken.scheduler.cache import CacheManager, StateCapture
 
 DEVICE = torch.device("cpu")
 
@@ -80,7 +80,7 @@ def _run_lifecycle(cm: CacheManager, total_len: int, n_decode: int = 3,
     """Faithful scheduler order: match -> lock -> [extend-free, allocate, complete_one]* ->
     cache_req(finished=True). ``abort_after`` finishes after that many decode steps instead."""
     req = _req(total_len - n_decode, n_decode)
-    h = cm.match_req(req).cuda_handle
+    h = cm.match_req(req)
     req.cache_handle = h
     req.cached_len = h.cached_len
     cm.lock(h)
@@ -121,7 +121,7 @@ def test_chunked_prefill_conserves_swa_slots(ps):
     cm = _mgr(ps, num_pages=32)
     total = 6 * ps + 3
     req = _req(total, 1)
-    h = cm.match_req(req).cuda_handle
+    h = cm.match_req(req)
     req.cache_handle = h
     req.cached_len = h.cached_len
     cm.lock(h)
@@ -151,31 +151,34 @@ def test_hybrid_chunk_donate_skips_unaligned_boundary(ps):
 
     req = _req(3 * ps + 3, 1)
     h = cm.match_req(SimpleNamespace(input_ids=req.input_ids, input_len=req.input_len,
-                                     mm_embeds=None, cache_group="")).cuda_handle
+                                     mm_embeds=None, cache_group=""))
     req.cache_handle = h
     req.cached_len = h.cached_len
     cm.lock(h)
     cm.allocate_paged([req])
     req.complete_one()
     req.linear_slot_idx = pool.alloc(1)[0]
-    req.mamba_snapshot_slot = pool.alloc(1)[0]
+
+    def capture(pos):
+        return [StateCapture(pos, "input", slot=pool.alloc(1)[0], pos=pos)]
+
+    def capture_slots():
+        return [c.slot for c in req.state_captures if c.slot is not None]
 
     # Unaligned x64 boundary: the donate must be SKIPPED (state would attach to a shorter node).
-    req.mamba_last_track_seqlen = 2 * ps + 3
+    req.state_captures = capture(2 * ps + 3)
     free_before = pool.num_free_slots
     cm.cache_req(req, finished=False)
-    assert req.mamba_last_track_seqlen is None
-    assert req.mamba_snapshot_slot is None
+    assert capture_slots() == []
     assert pool.num_free_slots == free_before + 1  # the unusable private snapshot is released
     assert req.cache_handle is h                     # handle NOT re-pointed -> donate skipped
 
     # Aligned boundary on the same request: the donate goes through.
-    req.mamba_snapshot_slot = pool.alloc(1)[0]
-    req.mamba_last_track_seqlen = 2 * ps
+    req.state_captures = capture(2 * ps)
     cm.cache_req(req, finished=False)
     assert req.cache_handle is not h                 # re-matched + locked on the committed node
     assert req.cache_handle.cached_len == 2 * ps
-    assert req.mamba_snapshot_slot is None
+    assert capture_slots() == []
     assert pool.num_free_slots == free_before       # no replacement allocation
 
 
@@ -187,7 +190,7 @@ def test_finish_retains_prompt_window_under_pressure():
     prompt_len, n_decode = 6, 12
     cm = _mgr(ps, "swa_radix", num_pages=64)
     req = _req(prompt_len, n_decode)
-    h = cm.match_req(req).cuda_handle
+    h = cm.match_req(req)
     req.cache_handle = h
     req.cached_len = h.cached_len
     cm.lock(h)
@@ -204,10 +207,10 @@ def test_finish_retains_prompt_window_under_pressure():
     cm.cache_req(req, finished=True)
     cm.check_integrity()
 
-    ev = cm.prefix_cache.evict_swa(1)              # ambient pressure right after finish
-    cm.swa_pool.free_swa(ev.swa_indices)
-    if ev.kv_indices.numel():
-        cm._free(ev.kv_indices)
+    ev = cm.tree.evict_window(1)                   # ambient pressure right after finish
+    cm.swa_pool.free_swa(ev.window)
+    if ev.kv.numel():
+        cm._free(ev.kv)
     cm.check_integrity()
     probe = _req(prompt_len + 1, 1)  # prompt + the next turn's first divergent token
-    assert cm.match_req(probe).cuda_handle.cached_len == prompt_len
+    assert cm.match_req(probe).cached_len == prompt_len

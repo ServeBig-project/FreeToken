@@ -158,7 +158,7 @@ def test_adjust_config_resolves_swa_cache_type():
 
     _init_tp()
     # `--cache-type radix` on a SWA model materializes to the global-paged SWA radix cache
-    # (SWARadixCache, cross-request reuse).
+    # (windowed RadixCache, cross-request reuse).
     radix = SchedulerConfig(
         model_path="/unused",
         tp_info=DistributedInfo(rank=0, size=1),
@@ -170,7 +170,7 @@ def test_adjust_config_resolves_swa_cache_type():
     assert radix.attention_backend == "triton"
     assert radix.cache_type == "swa_radix"
 
-    # `--cache-type naive` stays 'naive' (NaivePrefixCache, no reuse) on the same paged pool.
+    # `--cache-type naive` stays 'naive' (no prefix tree, no reuse) on the same paged pool.
     naive = SchedulerConfig(
         model_path="/unused",
         tp_info=DistributedInfo(rank=0, size=1),

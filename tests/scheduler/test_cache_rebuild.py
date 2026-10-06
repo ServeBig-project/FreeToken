@@ -41,7 +41,7 @@ def test_cache_manager_rebuild_resets_pages_and_prefix():
     assert cm.num_pages == 20
     assert cm.page_table is new_pt
     assert cm.free_slots.tolist() == [i * 2 for i in range(20)]
-    assert cm.prefix_cache.size_info.total_size == 0
+    assert cm.tree.kv_tokens == 0
     cm.check_integrity()  # must pass: free_pages(20) + cache_pages(0) == num_pages(20)
 
 
