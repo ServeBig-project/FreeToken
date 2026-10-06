@@ -775,7 +775,9 @@ class CacheManager:
                 max(free_upto - self.sliding_window_size - _SWA_RETAIN_GAP, 0), self.page_size)
             if keep_from > 0:
                 self.tree.match(req.input_ids[:keep_from], req.cache_group)
-        handle = self.tree.match(req.input_ids[:free_upto], req.cache_group)
+        # Re-point and lock all the tree now holds of the committed prefix, not just its
+        # resumable part: the duplicates freed above were the request's pages for all of it.
+        handle = self.tree.published(req.input_ids[:free_upto], req.cache_group)
         if handle.cached_len > old.cached_len:
             self.page_table[req.table_idx, old.cached_len : handle.cached_len].copy_(
                 handle.kv_indices[old.cached_len :])

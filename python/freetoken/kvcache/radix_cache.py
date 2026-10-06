@@ -182,6 +182,20 @@ class RadixCache:
         return CacheHandle(ready_pos, node, kv, state=node.state, matched_len=pos,
                            restore=restore, restore_len=restorable_pos)
 
+    def published(self, ids: torch.Tensor, group: str = "") -> CacheHandle:
+        """The tree's GPU copy of ``ids`` as far as it goes, resumable there or not: what a
+        request that just committed ``ids`` reads from now on and must keep locked."""
+        path, pos = [], 0
+        for node in self._walk(ids, group):
+            if node.value is None:
+                break
+            path.append(node)
+            pos += node.length
+        if not path:
+            return CacheHandle(0, self._root(group), self.empty)
+        return CacheHandle(pos, path[-1], torch.cat([n.value for n in path]),
+                           state=path[-1].state)
+
     def insert(self, ids: torch.Tensor, kv: torch.Tensor, *, group: str = "",
                state: int | None = None, purpose: str | None = None, update_after: int = 0,
                window_freed_before: int = 0) -> Tuple[int, torch.Tensor, bool, TreeNode]:

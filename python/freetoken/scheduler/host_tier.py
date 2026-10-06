@@ -65,6 +65,13 @@ class HostTier:
             plan = tree.plan_backup(node)
             if plan is None:
                 continue
+            need = (sum(units for _, units in plan.kv) * sum(c.unit_bytes() for c in self.comps["paged"])
+                    + (sum(units for _, units in plan.window) * self.comps["window"].unit_bytes()
+                       if plan.window else 0)
+                    + (self.comps["state"].unit_bytes() if plan.state else 0))
+            if need > self.store.budget:
+                tree.abandon(plan)  # could never fit: do not evict older host data for it
+                continue
             kv = [self._copies(self.comps["paged"], units) for _, units in plan.kv]
             win = [self._copies([self.comps["window"]], units) for _, units in plan.window]
             st = self._copies([self.comps["state"]], 1) if plan.state else []
