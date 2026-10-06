@@ -345,23 +345,24 @@ class RadixCache:
                     and (n.host is not None or n.is_leaf())
                     and all(c.value is None for c in n.children.values()))
 
-        while freed < num_tokens:
-            cands = [n for n in self._nodes() if eligible(n)]
-            if not cands:
-                break
-            for node in self.policy.eviction_order(cands, tier="gpu", kind="kv",
-                                                   required=num_tokens - freed):
-                if freed >= num_tokens:
-                    break
-                if not (self._attached(node) and eligible(node)):
-                    continue
-                freed += node.length
-                if node.host is not None:
-                    self._offload(node, out)
-                    freed += self._reclaim_dead(node, out)[1]
-                else:
-                    self._remove(node, out)
-                    freed += self._reclaim_dead(node.parent, out)[1]
+        order = self.policy.eviction_order(
+            [n for n in self._nodes() if eligible(n)], tier="gpu", kind="kv", required=num_tokens)
+        while freed < num_tokens and order:
+            node = order.pop(0)
+            if not (self._attached(node) and eligible(node)):
+                continue
+            freed += node.length
+            if node.host is not None:
+                self._offload(node, out)
+                parent, cascaded = self._reclaim_dead(node, out)
+            else:
+                self._remove(node, out)
+                parent, cascaded = self._reclaim_dead(node.parent, out)
+            freed += cascaded
+            if eligible(parent) and not parent.is_root():
+                # An exposed ancestor competes right away, as an LRU heap would have it.
+                order = self.policy.eviction_order(
+                    order + [parent], tier="gpu", kind="kv", required=num_tokens - freed)
         return self._evicted(out)
 
     def evict_window(self, num_tokens: int) -> Evicted:
