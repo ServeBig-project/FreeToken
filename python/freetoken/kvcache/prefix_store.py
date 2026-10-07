@@ -42,7 +42,9 @@ class HostStore:
 
     def fits(self, nbytes: int) -> bool:
         nbytes = -(-nbytes // _ALIGN) * _ALIGN
-        return (self.allocated + nbytes <= self.budget
+        empty = sum(s.numel() for i, s in enumerate(self.slabs)
+                    if s.numel() and self.free_extents[i] == [[0, s.numel()]])
+        return (self.allocated - empty + nbytes <= self.budget
                 or any(ext[1] >= nbytes for extents in self.free_extents for ext in extents))
 
     def alloc(self, nbytes: int) -> tuple[int, int] | None:
@@ -57,6 +59,8 @@ class HostStore:
                         extents.remove(ext)
                     self.used += nbytes
                     return i, off
+        if self.allocated + nbytes > self.budget:
+            self._release_empty_slabs()  # their budget can back a differently sized slab
         # A new slab takes what the budget has left, up to the slab size, but at least this.
         size = max(min(self.slab_bytes, self.budget - self.allocated), nbytes)
         if self.allocated + size > self.budget:
@@ -65,6 +69,12 @@ class HostStore:
         self.free_extents.append([[nbytes, size - nbytes]] if size > nbytes else [])
         self.used += nbytes
         return len(self.slabs) - 1, 0
+
+    def _release_empty_slabs(self) -> None:
+        for i, slab in enumerate(self.slabs):
+            if slab.numel() and self.free_extents[i] == [[0, slab.numel()]]:
+                self.slabs[i] = slab.new_empty(0)  # keeps slab indices of live copies stable
+                self.free_extents[i] = []
 
     def free(self, slab: int, off: int, nbytes: int) -> None:
         nbytes = -(-nbytes // _ALIGN) * _ALIGN

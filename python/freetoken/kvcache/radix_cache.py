@@ -17,7 +17,7 @@ leaves for the host leafward and comes back rootward. A position is *ready* when
 component is on the GPU there, *restorable* when each is on the GPU or the host.
 
 Leaves that are not restorable hold nothing reusable and are reclaimed whenever eviction exposes
-them. Locks protect GPU data; ``busy`` marks nodes a copy is reading or filling.
+them. Locks protect GPU data; ``busy`` counts the copies reading or filling a node.
 """
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ class TreeNode:
         self.host: list | None = None         # host spans of the paged components
         self.host_window: list | None = None  # host spans of the window component
         self.host_state: list | None = None   # host spans of the state component
-        self.busy = False                     # a copy reads or fills this node
+        self.busy = 0                         # copies reading or filling this node
 
     @property
     def length(self) -> int:
@@ -109,7 +109,9 @@ class CopyPlan:
     window: List[Tuple[TreeNode, int]]
     state: bool
     handle: CacheHandle
-    nodes: List[TreeNode] = field(default_factory=list)  # every node marked busy
+    # every node this plan marked busy, with its units then (a split later moves part of a
+    # node's range to new parents, which inherit the mark)
+    marked: List[Tuple[TreeNode, int]] = field(default_factory=list)
 
 
 def _key_fn(page_size: int) -> KEY_FN:
@@ -223,8 +225,13 @@ class RadixCache:
             m = align_down(child.match_len(ids[total:]), self.page_size)
             if m == 0:
                 break
-            if (update_after < total + m and child.busy
-                    and (child.value is None or child.window_freed)):
+            # The node cannot take the caller's GPU data now (a reader or a copy uses it) yet
+            # lacks some of it (no GPU copy, or a freed window the caller still holds live):
+            # stop, so the caller keeps its own pages instead of freeing what it still reads.
+            lacks = child.value is None or (
+                self.window is not None and child.window_freed
+                and window_freed_before < total + m)
+            if update_after < total + m and (child.ref > 0 or child.busy) and lacks:
                 return total, (torch.cat(freed) if freed else self.empty), False, None
             partial = m < child.length
             if partial:
@@ -523,19 +530,28 @@ class RadixCache:
         handle = CacheHandle(0, node, self.empty)
         self.lock(handle)
         for n in nodes:
-            n.busy = True
-        return CopyPlan(node, kv, window, state, handle, nodes)
+            n.busy += 1
+        return CopyPlan(node, kv, window, state, handle,
+                        [(n, n.length // self.page_size) for n in nodes])
 
     def _end_plan(self, plan: CopyPlan) -> None:
-        cur = plan.node
-        while not cur.is_root():  # split heads created meanwhile inherited busy
-            cur.busy = False
-            cur = cur.parent
-        for n in plan.nodes:
-            n.busy = False
+        """Take back only this plan's marks; other plans may still use the same nodes."""
+        pieces = [p for n, units in plan.marked for p, _, _ in self._pieces(n, units)]
+        for p in pieces:
+            p.busy -= 1
         self.unlock(plan.handle)
-        for n in plan.nodes:
-            self._drop_if_doomed(n)
+        for p in pieces:
+            self._drop_if_doomed(p)
+
+    def host_freeable_bytes(self) -> int:
+        """Host bytes eviction could release: copies all of whose spans sit on nodes no lock
+        or copy uses."""
+        spans: Dict[Any, int] = {}
+        for n in self._nodes():
+            if n.ref == 0 and not n.busy:
+                for s in (*(n.host or ()), *(n.host_window or ()), *(n.host_state or ())):
+                    spans[s.copy] = spans.get(s.copy, 0) + 1
+        return sum(c.nbytes for c, k in spans.items() if k == c.refs)
 
     def _attach(self, node: TreeNode, units: int, copies: list, attr: str) -> None:
         from .prefix_store import HostSpan
