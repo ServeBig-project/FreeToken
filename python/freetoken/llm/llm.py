@@ -9,6 +9,7 @@ from freetoken.distributed import DistributedInfo
 from freetoken.message import (
     BaseBackendMsg,
     BaseTokenizerMsg,
+    CacheStatusMsg,
     DetokenizeMsg,
     PromptAdmittedMsg,
     UserMsg,
@@ -100,9 +101,9 @@ class LLM(Scheduler):
 
     def offline_send_result(self, reply: List[BaseTokenizerMsg]) -> None:
         for msg in reply:
-            if isinstance(msg, PromptAdmittedMsg):
-                # PromptAdmittedMsg feeds the online server's global accounting. Offline
-                # generation already owns its inputs and has no FrontendManager stats sink.
+            if isinstance(msg, (PromptAdmittedMsg, CacheStatusMsg)):
+                # These feed the online server's accounting and status. Offline generation
+                # already owns its inputs and has no FrontendManager stats sink.
                 continue
             assert isinstance(msg, DetokenizeMsg)
             status = self.status_map[msg.uid]

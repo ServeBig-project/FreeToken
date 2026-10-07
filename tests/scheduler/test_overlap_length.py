@@ -21,6 +21,7 @@ def _scheduler(*, eos_token_ids=()):
     cache_manager = SimpleNamespace(
         lazy_free_region=lambda: nullcontext(),
         cache_req=lambda _req, *, finished: None,
+        status=lambda: {},
     )
     scheduler = SimpleNamespace(
         cache_manager=cache_manager,

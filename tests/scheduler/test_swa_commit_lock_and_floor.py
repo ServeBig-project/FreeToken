@@ -77,7 +77,7 @@ def _managers(window: int, num_swa_tokens: int, ps: int = 1, num_pages: int = 40
     pt = torch.zeros((MAX_RUNNING + 1, width), dtype=torch.int32, device=DEVICE)
     cm = CacheManager(num_pages=num_pages, page_size=ps, page_table=pt, type="swa_radix",
                       swa_pool=pool, sliding_window_size=window)
-    assert cm.swa_paged and cm.is_swa
+    assert cm.swa_paged and cm.window_cache
     tm = TableManager(max_running_reqs=MAX_RUNNING, page_table=pt)
     return cm, tm, PrefillManager(cm, tm, DecodeManager(page_size=ps))
 
@@ -134,9 +134,9 @@ def test_commit_locks_one_window_not_the_whole_extend(ps, monkeypatch):
     _prefill(cm, pm, prompt, n_decode=1)
 
     retained = -(-(window + GAP) // ps) * ps
-    assert cm.prefix_cache.swa_protected == retained
-    assert cm.prefix_cache.swa_evictable == prompt - retained
-    cm.prefix_cache.check_integrity()
+    assert cm.tree.protected["window"] == retained
+    assert cm.tree.evictable["window"] == prompt - retained
+    cm.tree.check_integrity()
 
 
 def test_short_final_chunk_locks_no_more_than_a_window(monkeypatch):
@@ -153,7 +153,7 @@ def test_short_final_chunk_locks_no_more_than_a_window(monkeypatch):
                   cached_len=0, output_len=n_decode, uid=UID,
                   sampling_params=SamplingParams(), cache_handle=None)
         req.input_len = total
-        h = cm.match_req(req).cuda_handle
+        h = cm.match_req(req)
         req.cache_handle = h
         cm.lock(h)
         for end in (first_chunk, total):        # two explicit chunks -> c_last is exact
@@ -165,7 +165,7 @@ def test_short_final_chunk_locks_no_more_than_a_window(monkeypatch):
         live_node = total - req.swa_evicted_seqlen
         cm.cache_req(req, finished=False)
 
-        assert cm.prefix_cache.swa_protected == min(live_node, window + GAP), f"c_last={c_last}"
+        assert cm.tree.protected["window"] == min(live_node, window + GAP), f"c_last={c_last}"
         _decode(cm, [req], n_decode)
         cm.cache_req(req, finished=True)
         tm.free(req.table_idx)

@@ -24,6 +24,7 @@ from freetoken.message import (
     BatchFrontendMsg,
     CacheRebuildMsg,
     CacheRebuildReply,
+    CacheStatusReply,
     TokenizeMsg,
     UserReply,
 )
@@ -250,6 +251,9 @@ class FrontendManager:
             if isinstance(msg, CacheRebuildReply):
                 self._resolve_rebuild(msg)
                 continue
+            if isinstance(msg, CacheStatusReply):
+                self.stats.prefix_cache = msg.prefix_cache
+                continue
             for msg in _unwrap_msg(msg):
                 # Global accounting follows actual admitted/sampled work even after the HTTP
                 # client disconnects and abort_user removes its ack queue. Delivery to a live
@@ -287,6 +291,8 @@ class FrontendManager:
             self.gdn_geometry = msg.gdn_replayssm
         if msg.dflash is not None:
             self.dflash_geometry = msg.dflash
+        if msg.prefix_cache is not None:
+            self.stats.prefix_cache = msg.prefix_cache
         fut = self.rebuild_futures.pop(msg.request_id, None)
         if fut is not None and not fut.done():
             fut.set_result(self.last_rebuild)
@@ -832,6 +838,7 @@ async def cache_status():
         "state": state.maintenance_state,
         "last_rebuild": state.last_rebuild,
         "geometry": cache_geometry(state),
+        "prefix_cache": state.stats.prefix_cache,
     }
 
 
@@ -1030,6 +1037,7 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
         _GLOBAL_STATE.cache_pools = meta.pop("pools", None)
         _GLOBAL_STATE.stats.cuda_graph = meta.pop("cuda_graph", _GLOBAL_STATE.stats.cuda_graph)
         _GLOBAL_STATE.gdn_geometry = meta.pop("gdn_replayssm", None)
+        _GLOBAL_STATE.stats.prefix_cache = meta.pop("prefix_cache", None)
         _GLOBAL_STATE.dflash_geometry = meta.pop("dflash", None)
         _GLOBAL_STATE.swa_full_tokens_ratio = float(meta.pop("swa_full_tokens_ratio", 0.0) or 0.0)
         _GLOBAL_STATE.cache_budget_bytes = int(meta.pop("cache_budget_bytes", 0) or 0)

@@ -4,25 +4,38 @@ from types import SimpleNamespace
 
 
 def test_kv_usage_pages_excludes_evictable_prefix_cache():
-    # page_usage now lives on the CacheManagerLike interface (polymorphic vs DSV4); test the
-    # generic formula there. The unbound method works on a duck-typed namespace.
+    # A real radix manager: one running request holds 8 locked pages, one finished request left
+    # 4 evictable pages in the tree. Only the locked ones count as used.
+    import torch
+
+    from freetoken.core import Req, SamplingParams
     from freetoken.scheduler.cache import CacheManager
 
-    cache_manager = SimpleNamespace(
-        num_pages=100,
-        page_size=4,
-        free_slots=[0] * 20,
-        is_hybrid=False,
-        is_swa=False,
-        prefix_cache=SimpleNamespace(
-            size_info=SimpleNamespace(evictable_size=120, protected_size=40)
-        ),
-    )
+    page_table = torch.zeros(4, 32, dtype=torch.int32)
+    cm = CacheManager(32, 1, page_table, "radix")
 
-    used_pages, total_pages = CacheManager.page_usage(cache_manager)
+    def admit(table_idx, ids):
+        pend = SimpleNamespace(input_ids=torch.tensor(ids, dtype=torch.int32),
+                               input_len=len(ids), mm_embeds=None, cache_group="")
+        handle = cm.match_req(pend)
+        req = Req(input_ids=pend.input_ids, table_idx=table_idx, cached_len=0, output_len=0,
+                  uid=table_idx, sampling_params=SamplingParams(), cache_handle=handle)
+        req.device_len = len(ids)
+        cm.lock(handle)
+        cm.allocate_paged([req])
+        req.cached_len = len(ids)
+        return req
 
-    assert used_pages == 50
-    assert total_pages == 100
+    running = admit(0, list(range(1, 9)))
+    finished = admit(1, list(range(100, 104)))
+    with cm.lazy_free_region():
+        cm.cache_req(running, finished=False)
+        cm.cache_req(finished, finished=True)
+
+    used_pages, total_pages = cm.page_usage()
+
+    assert used_pages == 8
+    assert total_pages == 32
 
 
 def test_swa_token_usage_counts_window_pool():

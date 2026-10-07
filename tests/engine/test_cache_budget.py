@@ -352,6 +352,7 @@ def test_engine_resolve_auto_moe_cache_size_maps_kwargs():
         kv_reserve_tokens = 0
         swa_full_tokens_ratio = 0.2
         swa_num_pages_override = None
+        prefix_cache_host_gib = 0
         model_config = StubModelConfig()
 
         class tp_info:

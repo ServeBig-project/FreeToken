@@ -17,6 +17,8 @@ from freetoken.message import (
     CacheRebuildMsg,
     CacheRebuildReply,
     CacheRebuildResultMsg,
+    CacheStatusMsg,
+    CacheStatusReply,
     DetokenizeMsg,
     ErrorReplyMsg,
     PromptAdmittedMsg,
@@ -182,6 +184,8 @@ def tokenize_worker(
                             mode=m.mode,
                         )
                     )
+                elif isinstance(m, CacheStatusMsg):
+                    send_frontend.put(CacheStatusReply(prefix_cache=m.prefix_cache))
                 elif isinstance(m, CacheRebuildResultMsg):
                     send_frontend.put(
                         CacheRebuildReply(
@@ -194,12 +198,14 @@ def tokenize_worker(
                             error=m.error,
                             gdn_replayssm=m.gdn_replayssm,
                             dflash=m.dflash,
+                            prefix_cache=m.prefix_cache,
                         )
                     )
             n_control = sum(
                 isinstance(
                     m,
-                    (CacheRebuildMsg, CacheRebuildResultMsg, ErrorReplyMsg, PromptAdmittedMsg),
+                    (CacheRebuildMsg, CacheRebuildResultMsg, CacheStatusMsg, ErrorReplyMsg,
+                     PromptAdmittedMsg),
                 )
                 for m in pending_msg
             )
@@ -228,6 +234,7 @@ def tokenize_worker(
                         speculative=msg.speculative,
                         cuda_graph=msg.cuda_graph,
                         gdn_replayssm=msg.gdn_replayssm,
+                        prefix_cache=msg.prefix_cache,
                     )
                     for msg, reply in zip(detokenize_msg, replies, strict=True)
                 ]

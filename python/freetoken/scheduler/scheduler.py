@@ -13,6 +13,7 @@ from freetoken.message import (
     BatchBackendMsg,
     CacheRebuildBackendMsg,
     CacheRebuildResultMsg,
+    CacheStatusMsg,
     DetokenizeMsg,
     ErrorReplyMsg,
     ExitMsg,
@@ -99,6 +100,10 @@ class Scheduler(SchedulerIOMixin):
                 (g.sliding_window for g in config.model_config.kv_cache_group_specs() if g.is_swa),
                 None,
             ) or getattr(self.engine.kv_cache, "sliding_window_size", None),
+            policy=config.prefix_cache_policy,
+            host_bytes=int(config.prefix_cache_host_gib * (1 << 30)),
+            draft_kv=self.engine.dflash.context if self.engine.dflash is not None else None,
+            tp_group=self.engine.tp_cpu_group if config.tp_info.size > 1 else None,
         )
         self.decode_manager = DecodeManager(config.page_size)
         self.prefill_manager = PrefillManager(
@@ -198,7 +203,7 @@ class Scheduler(SchedulerIOMixin):
         self.eos_token_ids = load_eos_token_ids(config.model_path, self.tokenizer)
         self.toolcall_anchor_id = None
         if config.special_token_ckpt and (
-            self.cache_manager.is_hybrid or self.cache_manager.is_swa
+            self.cache_manager.state_cache or self.cache_manager.window_cache
         ):
             from freetoken.server.function_call_parser import toolcall_opener_for
 
@@ -225,6 +230,8 @@ class Scheduler(SchedulerIOMixin):
         """Called when the scheduler is idle to perform background tasks."""
         logger.info_rank0("Scheduler is idle, waiting for new reqs...")
         self.cache_manager.check_integrity()
+        # Copies just finished: publish the status no reply will carry until the next request.
+        self.send_result([CacheStatusMsg(self.cache_manager.status())])
         moe_cache = self.engine.moe_offload_cache
         if moe_cache is not None and moe_cache.collect_stats:
             stats = moe_cache.cumulative_stats_snapshot()
@@ -259,6 +266,9 @@ class Scheduler(SchedulerIOMixin):
         torch.cuda.synchronize(self.device)
         if self.config.tp_info.size > 1:
             self.sync_all_ranks()
+        # Every prefix-cache copy finished with the sync above; publish them and return what they
+        # freed while the old pools still own those slots.
+        self.cache_manager.poll()
         # The cached decode metadata can retain graph-capture tensor views. Drop it before
         # the idle rebuild destroys and recreates those buffers.
         self._resident_decode_input = None
@@ -1092,6 +1102,7 @@ class Scheduler(SchedulerIOMixin):
         swa_tokens = self._swa_token_usage()
         if reply:
             reply[-1].cuda_graph = self.engine.graph_runner.stats_snapshot()
+            reply[-1].prefix_cache = self.cache_manager.status()
             pool = self.engine.linear_state_pool
             if pool is not None and pool.replay is not None:
                 reply[-1].gdn_replayssm = pool.replay.snapshot()
@@ -1155,7 +1166,7 @@ class Scheduler(SchedulerIOMixin):
         Mirrors SGLang's mamba-pool semantics: ``total`` excludes the reserved padding
         sink (slot 0); ``used`` excludes free slots and evictable tree snapshots.
         """
-        if not self.cache_manager.is_hybrid:
+        if not self.cache_manager.state_cache:
             return None
         total = self.cache_manager.linear_state_pool.num_slots - 1
         return total - self.cache_manager.mamba_available_size, total
@@ -1355,6 +1366,7 @@ class Scheduler(SchedulerIOMixin):
                     error=error,
                     gdn_replayssm=compute_gdn_state_geometry(self.engine),
                     dflash=compute_dflash_geometry(self.engine),
+                    prefix_cache=self.cache_manager.status(),
                 )
             ]
         )
@@ -1604,7 +1616,7 @@ class Scheduler(SchedulerIOMixin):
             self.engine.prepare_execution_metadata(
                 batch,
                 input_mapping,
-                linear_cache_is_hybrid=self.cache_manager.is_hybrid,
+                linear_cache_is_hybrid=self.cache_manager.state_cache,
             )
         return ForwardInput(
             batch=batch,
@@ -1643,6 +1655,8 @@ class Scheduler(SchedulerIOMixin):
         """
         if not batch.prompt_admissions:
             return
+        for uid, _, cached in batch.prompt_admissions:
+            self.cache_manager.count_reuse(uid, cached)
         self.send_result(
             [
                 PromptAdmittedMsg(uid=uid, prompt_tokens=prompt_tokens, cached_tokens=cached_tokens)

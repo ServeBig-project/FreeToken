@@ -49,9 +49,8 @@ class HybridSWAKVCache(BaseKVCachePool):
         self._swa_num_tokens = num_swa_tokens if num_swa_tokens is not None else self._full_num_tokens
         self._page_size = page_size
         # Global-paged SWA (== sglang SWAKVPool): a swa pool reached through a dense full->swa
-        # slot mapping + an independent swa free-list. Used by BOTH SWA cache paths -- naive
-        # (NaivePrefixCache, no reuse) and radix (SWARadixCache, cross-request reuse) -- which
-        # differ only in the cache object. Always paged; the mapping/free-list are built below
+        # slot mapping + an independent swa free-list. Used with and without prefix reuse, which
+        # differ only in whether the prefix tree keeps windows. Always paged; the mapping/free-list are built below
         # (translate/store_kv unconditionally index full_to_swa_index_mapping).
         self._swa_paged = True
 
@@ -187,6 +186,21 @@ class HybridSWAKVCache(BaseKVCachePool):
 
     def swa_available_size(self) -> int:
         return int(self._swa_free.numel())
+
+    def paged_views(self) -> list[torch.Tensor]:
+        """Per-layer views ``[pages, 2, page_size, heads, head_dim]`` of the paged KV, for
+        copying whole pages between tiers."""
+        buf = self.full_kv_pool.buffer
+        return [buf[:, layer].movedim(1, 0) for layer in range(buf.shape[1])]
+
+    def window_views(self) -> list[torch.Tensor]:
+        """Per-layer views ``[window slots, 2, 1, heads, head_dim]`` of the window KV."""
+        buf = self.swa_kv_pool.buffer
+        return [buf[:, layer].movedim(1, 0) for layer in range(buf.shape[1])]
+
+    def window_units(self, full_locs: torch.Tensor) -> torch.Tensor:
+        """Window slot of each full location (one unit per token)."""
+        return self.full_to_swa_index_mapping[full_locs.to(torch.int64)]
 
     @property
     def swa_paged(self) -> bool:

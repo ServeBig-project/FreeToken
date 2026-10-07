@@ -7,6 +7,7 @@ import torch
 
 from freetoken.engine.prefill_memory import PrefillMemoryBudget
 from freetoken.core import SamplingParams
+from freetoken.kvcache.radix_cache import CacheHandle
 from freetoken.scheduler.decode import DecodeManager
 from freetoken.scheduler.prefill import ChunkedReq, PrefillManager
 from freetoken.scheduler.table import TableManager
@@ -152,7 +153,7 @@ def test_memory_measurement_does_not_modify_cuda_tensor_contents():
 
 class WindowCache:
     available_size = 4096
-    is_hybrid = False
+    state_cache = False
     swa_paged = True
     page_size = 8
     sliding_window_size = 16
@@ -162,7 +163,19 @@ class WindowCache:
         self.active_locks = 0
 
     def match_req(self, pending):
-        return SimpleNamespace(cuda_handle=SimpleNamespace(cached_len=0), mamba_value=None)
+        return CacheHandle(0, None, torch.empty(0, dtype=torch.int32))
+
+    def poll(self):
+        pass
+
+    def start_restore(self, handle):
+        return False
+
+    def plan_captures(self, pending, handle):
+        return []
+
+    def admitted(self, pending, handle):
+        pass
 
     def lock(self, handle):
         self.active_locks += 1
@@ -250,7 +263,7 @@ def test_subpage_budget_defers_without_leaks_and_preserves_existing_request_stat
     assert cache.active_locks == locks
     assert req.cached_len == 8
     assert req.linear_slot_idx == 5
-    assert req.mamba_snapshot_slot is None
+    assert all(c.slot is None for c in req.state_captures)
 
     for budget, end in ((8, 16), (1, 17)):
         req = manager.schedule_next_batch(budget, incremental_window_prefill=True).reqs[0]
@@ -258,7 +271,7 @@ def test_subpage_budget_defers_without_leaks_and_preserves_existing_request_stat
         assert req.table_idx == table_idx
         assert req.cache_handle is cache_handle
         assert req.linear_slot_idx == 5
-        assert req.mamba_snapshot_slot is None
+        assert all(c.slot is None for c in req.state_captures)
         torch.testing.assert_close(req.input_ids[:end], prompt[:end])
         if isinstance(req, ChunkedReq):
             req.commit_prefill_kv()

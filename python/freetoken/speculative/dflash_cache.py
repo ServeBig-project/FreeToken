@@ -35,6 +35,11 @@ class DFlashContext:
             (2, c.num_hidden_layers, self.engine.num_pages + 1, 1, c.num_key_value_heads, c.head_dim),
             dtype=self.engine.dtype, device=self.engine.device)
 
+    def paged_views(self):
+        """Per-layer ``[pages, 2, 1, heads, head_dim]`` views of the draft context KV, which
+        follows the target's token pages."""
+        return [self.kv[:, layer].movedim(1, 0) for layer in range(self.kv.shape[1])]
+
     def _wrapper(self, batch, mode):
         key = batch, mode
         if key not in self.wrappers:

@@ -531,6 +531,32 @@ class DSV4PagedKVCache(BaseKVCachePool):
         if live.numel():
             self._win_alloc.free(torch.div(live, P, rounding_mode="floor") * P)
 
+    def paged_views(self) -> list[torch.Tensor]:
+        """Per-layer ``[pages, rows per page, dim]`` views of the compressed and indexer rows,
+        which follow the full page: a P-token page owns ``P // ratio`` rows."""
+        P, pages = self.P, self.sizes.full_token // self.P
+        views = []
+        for layer, ratio in enumerate(self.compress_ratios):
+            if ratio:
+                views.append(self.cmp_pool[layer][: pages * P // ratio].view(pages, P // ratio, -1))
+            if ratio == 4:
+                views.append(self.idx_pool[layer][: pages * P // 4].view(pages, P // 4, -1))
+        return views
+
+    def window_views(self) -> list[torch.Tensor]:
+        """Per-layer ``[window pages, ...]`` views of the window KV and of both compressor
+        state rings (a window page owns one ring block), excluding the rings' scratch row."""
+        n = self.sizes.n_win_pages
+        views = [pool.view(n, self.P, -1) for pool in self.window_pool]
+        for rings in (self.state_ring, self.indexer_state_ring):
+            views += [r.buffer[:-1].view(n, r.ring_size, -1) for r in rings if r is not None]
+        return views
+
+    def window_units(self, full_locs: torch.Tensor) -> torch.Tensor:
+        """Window page of each P-token page of ``full_locs``."""
+        win = self.full_to_window[full_locs[:: self.P].to(torch.int64)]
+        return torch.div(win, self.P, rounding_mode="floor")
+
     def translate_loc_from_full_to_swa(self, kv_indices: torch.Tensor) -> torch.Tensor:
         return self.full_to_window[kv_indices.to(dtype=torch.int64)]
 

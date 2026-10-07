@@ -1,0 +1,60 @@
+{
+  "date": "2026-10-05",
+  "kind": "offline_input_prefix_census_not_serving_benchmark",
+  "source": "trace-benchmark/outputs/agent-5x1/full/requests.jsonl",
+  "code_baseline": "e0b8383b0eb401660714d73697555e65fcff1f57",
+  "renderer_source": "trace-benchmark/prepare_replay.py:hf_template_renderer",
+  "model": "Qwen3.6-35B-A3B",
+  "method": [
+    "Read all source requests without sampling or prompt/output length scaling.",
+    "Render using the local Qwen3.6 HF chat template, add_generation_prompt=True, enable_thinking=True, preserve_thinking=True.",
+    "Tokenize with local_files_only=True and add_special_tokens=True.",
+    "Sort by original source.startMs; only source requests with source.endMs <= current startMs are available for prefix comparison.",
+    "Compare the current prompt token IDs with the latest completed prompt in the same session.",
+    "For the all-history upper bound, find the longest token prefix among all completed prompts in a shared tenant. No byte-budget eviction or generated outputs are simulated.",
+    "Count distinct complete input token sequences as input-endpoint candidates; these are not required concurrent resident snapshots."
+  ],
+  "requests": 1095,
+  "session_count": 5,
+  "requests_per_session": [
+    3,
+    98,
+    124,
+    323,
+    547
+  ],
+  "hours": 10.293019444444445,
+  "prompt_tokens": {
+    "min": 1828.0,
+    "p50": 157288.0,
+    "p90": 223685.4,
+    "p95": 229126.5,
+    "max": 243969.0
+  },
+  "total_prompt_tokens": 164896844,
+  "over_262144_tokens": 0,
+  "render_errors": 0,
+  "same_session_comparisons": 1090,
+  "exact_previous_input_prefix": 600,
+  "previous_input_differs_only_in_last_token": 472,
+  "previous_input_differs_earlier": 18,
+  "previous_input_preserved_except_at_most_one_token_fraction": 0.9834862385321101,
+  "last_token_spotcheck": {
+    "samples": 2,
+    "generation_prompt_last_token": "\n",
+    "token_at_same_position_in_later_prompt": "\n\n",
+    "scope": "Illustrates tokenization boundary effects; does not classify every one-token difference."
+  },
+  "new_tokens_after_lcp_median": 1318.5,
+  "distinct_input_endpoints": 1095,
+  "gdn_snapshot_bytes": 64389120,
+  "gdn_gib_if_all_input_endpoints_retained": 65.66390991210938,
+  "gdn_gib_example_five_unbranched_paths_two_points_each": 0.59967041015625,
+  "limitations": [
+    "Five historical coding-optimizer sessions, not a measurement of all lab users or five simultaneous GPU requests.",
+    "Only input prefixes are compared. Output-end reuse, snapshot placement, eviction, GPU admission, transfer latency, and expert-bandwidth competition are unmeasured.",
+    "The two-endpoints-per-path count assumes genuinely unbranched extension and excludes explicit anchors, active references, in-flight copies and other cache types.",
+    "A token-trie split is not evidence of persistent multi-branch demand; tokenization-tail differences can create splits.",
+    "The raw full-length trace need not fit the GPU KV configuration used by scaled serving benchmarks."
+  ]
+}

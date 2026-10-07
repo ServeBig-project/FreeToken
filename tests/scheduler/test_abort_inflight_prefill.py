@@ -25,7 +25,7 @@ from freetoken.engine.engine import ForwardOutput
 from freetoken.kvcache.linear_state_pool import LinearStatePool
 from freetoken.message import AbortBackendMsg
 from freetoken.models.config import LinearGatedDeltaGroupConfig
-from freetoken.scheduler.cache import CacheManager
+from freetoken.scheduler.cache import CacheManager, StateCapture
 from freetoken.scheduler.decode import DecodeManager
 from freetoken.scheduler.prefill import ChunkedReq, PrefillManager
 from freetoken.scheduler.scheduler import Scheduler
@@ -91,14 +91,20 @@ def _launch_req(pool, cm, tm, prompt, *, cls=Req, track_seqlen=None):
                                       mm_embeds=None, cache_group=""))
     req = cls(input_ids=prompt, table_idx=tm.allocate(), cached_len=0, output_len=4,
               uid=UID, sampling_params=SamplingParams(max_tokens=4),
-              cache_handle=mr.cuda_handle)
+              cache_handle=mr)
     req.linear_slot_idx = pool.alloc(1)[0]
-    req.mamba_snapshot_slot = pool.alloc(1)[0] if track_seqlen is not None else None
-    cm.lock(mr.cuda_handle)
+    if track_seqlen is not None:
+        req.state_captures = [StateCapture(track_seqlen, "input", slot=pool.alloc(1)[0],
+                                           pos=track_seqlen)]
+    cm.lock(mr)
     cm.allocate_paged([req])
     req.complete_one()
-    req.mamba_last_track_seqlen = track_seqlen
     return req
+
+
+def _capture_slots(req):
+    """Private state slots the request still holds for its captures."""
+    return [c.slot for c in req.state_captures if c.slot is not None]
 
 
 def _as_last_data(batch):
@@ -121,7 +127,7 @@ def test_abort_inflight_final_chunk_marks_then_drains():
 
     Scheduler._process_one_msg(stub, AbortBackendMsg(uid=UID))
     assert req.aborted and req.table_idx != -1  # marked, NOT freed under the forward
-    assert req.mamba_snapshot_slot is not None
+    assert _capture_slots(req)
     assert req not in dm.running_reqs
     assert UID in stub._pending_abort_acks
     free_after_mark = pool.num_free_slots
@@ -129,13 +135,13 @@ def test_abort_inflight_final_chunk_marks_then_drains():
 
     Scheduler._process_last_data(stub, stub._last_data)
     assert req.table_idx == -1                  # freed at the drain point
-    assert req.linear_slot_idx is None and req.mamba_snapshot_slot is None
+    assert req.linear_slot_idx is None and _capture_slots(req) == []
     assert pool.num_free_slots == free_after_mark  # both states were donated to the tree
     matched = cm.match_req(SimpleNamespace(
         input_ids=torch.arange(1, 14, dtype=torch.int32), input_len=13,
         mm_embeds=None, cache_group="",
     ))
-    assert matched.cuda_handle.cached_len == 12 and matched.mamba_value == live
+    assert matched.cached_len == 12 and matched.state == live
     assert req in stub.finished_reqs
     assert sent == []                           # no DetokenizeMsg: abort ack stays terminal
     cm.check_integrity()
@@ -180,13 +186,13 @@ def test_abort_starved_decode_req_frees_immediately():
     Scheduler._process_one_msg(stub, AbortBackendMsg(uid=UID))
     assert not req.aborted
     assert req.table_idx == -1                  # freed immediately, no drain needed
-    assert req.linear_slot_idx is None and req.mamba_snapshot_slot is None
+    assert req.linear_slot_idx is None and _capture_slots(req) == []
     assert pool.num_free_slots == base_free  # the completed working state is now public
     matched = cm.match_req(SimpleNamespace(
         input_ids=torch.arange(1, 14, dtype=torch.int32), input_len=13,
         mm_embeds=None, cache_group="",
     ))
-    assert matched.cuda_handle.cached_len == 12 and matched.mamba_value == live
+    assert matched.cached_len == 12 and matched.state == live
     assert req not in dm.running_reqs
     cm.check_integrity()
 
@@ -204,7 +210,7 @@ def test_prefix_commit_sentinel_guard():
     aborted = dm.abort_req(UID)
     assert aborted is req
     Scheduler._free_req_resources(stub, aborted)   # freed WITHOUT the aborted mark
-    assert req.table_idx == -1 and req.mamba_snapshot_slot is None
+    assert req.table_idx == -1 and _capture_slots(req) == []
     free_after_abort = pool.num_free_slots
 
     Scheduler._process_last_data(stub, _as_last_data(batch))  # pre-guard: TypeError

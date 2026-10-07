@@ -11,7 +11,7 @@ import torch
 from freetoken.core import Req, SamplingParams
 from freetoken.kvcache.linear_state_pool import LinearStatePool
 from freetoken.models.config import LinearGatedDeltaGroupConfig
-from freetoken.scheduler.cache import CacheManager
+from freetoken.scheduler.cache import CacheManager, StateCapture
 
 PROMPT = [1, 2, 3, 4, 5, 6, 7, 8]
 
@@ -40,8 +40,8 @@ def test_radix_unfinished_commit_repoints_the_row_off_the_freed_pages():
     page_table = torch.zeros(4, 32, dtype=torch.int32)
     cm = CacheManager(32, 1, page_table, "radix")
 
-    a = _admit(cm, page_table, 0, PROMPT, cm.match_req(_pend(PROMPT)).cuda_handle)
-    b = _admit(cm, page_table, 1, PROMPT, cm.match_req(_pend(PROMPT)).cuda_handle)
+    a = _admit(cm, page_table, 0, PROMPT, cm.match_req(_pend(PROMPT)))
+    b = _admit(cm, page_table, 1, PROMPT, cm.match_req(_pend(PROMPT)))
     assert _live_row(page_table, a).isdisjoint(_live_row(page_table, b))
 
     with cm.lazy_free_region():          # the scheduler drains commits inside this region
@@ -68,10 +68,10 @@ def test_hybrid_unfinished_commit_repoints_the_row_off_the_freed_pages():
 
     reqs = []
     for idx in (0, 1):
-        r = _admit(cm, page_table, idx, PROMPT, cm.match_req(_pend(PROMPT)).cuda_handle)
+        r = _admit(cm, page_table, idx, PROMPT, cm.match_req(_pend(PROMPT)))
         r.linear_slot_idx = pool.alloc(1)[0]
-        r.mamba_snapshot_slot = pool.alloc(1)[0]
-        r.mamba_last_track_seqlen = len(PROMPT)
+        r.state_captures = [StateCapture(len(PROMPT), "input", slot=pool.alloc(1)[0],
+                                         pos=len(PROMPT))]
         reqs.append(r)
 
     with cm.lazy_free_region():
@@ -107,20 +107,20 @@ def test_radix_subspan_commit_repoints_only_the_deduped_slice():
     page_table = torch.zeros(4, 32, dtype=torch.int32)
     cm = CacheManager(32, 1, page_table, "radix")
 
-    seed = _admit(cm, page_table, 0, SHORT, cm.match_req(_pend(SHORT)).cuda_handle)
+    seed = _admit(cm, page_table, 0, SHORT, cm.match_req(_pend(SHORT)))
     with cm.lazy_free_region():
         cm.cache_req(seed, finished=False)
 
     def _admit_on_prefix(table_idx):
         m = cm.match_req(_pend(LONG))
-        matched = m.cuda_handle.cached_len
+        matched = m.cached_len
         assert matched > 0, "the seeded prefix should match"
         req = Req(input_ids=torch.tensor(LONG, dtype=torch.int32), table_idx=table_idx,
                   cached_len=matched, output_len=0, uid=table_idx,
-                  sampling_params=SamplingParams(), cache_handle=m.cuda_handle)
+                  sampling_params=SamplingParams(), cache_handle=m)
         req.device_len = len(LONG)
-        cm.lock(m.cuda_handle)
-        page_table[table_idx, :matched] = m.cuda_handle.get_matched_indices()[:matched]
+        cm.lock(m)
+        page_table[table_idx, :matched] = m.get_matched_indices()[:matched]
         cm.allocate_paged([req])          # only [matched, 16) -- the row prefix is canonical
         req.cached_len = len(LONG)
         return req, matched

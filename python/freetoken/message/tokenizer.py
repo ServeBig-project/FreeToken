@@ -51,6 +51,7 @@ class DetokenizeMsg(BaseTokenizerMsg):
     speculative: dict | None = None
     cuda_graph: dict | None = None
     gdn_replayssm: dict | None = None
+    prefix_cache: dict | None = None
 
 
 @dataclass
@@ -106,6 +107,14 @@ class CacheRebuildResultMsg(BaseTokenizerMsg):
     error: str | None = None
     gdn_replayssm: dict | None = None  # GDN state geometry after the rebuild
     dflash: dict | None = None
+    prefix_cache: dict | None = None
+
+
+@dataclass
+class CacheStatusMsg(BaseTokenizerMsg):
+    # scheduler -> detokenizer worker -> api server: the prefix_cache status at an idle point,
+    # where no reply would otherwise carry it (passthrough to CacheStatusReply).
+    prefix_cache: dict
 
 
 @dataclass

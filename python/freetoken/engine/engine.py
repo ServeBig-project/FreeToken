@@ -29,6 +29,7 @@ from freetoken.kvcache.cache_status import _supports_swa_ratio
 from freetoken.kvcache.linear_state_pool import (
     _linear_pool_min_slots, _linear_pool_num_slots, replay_records, state_pool_bytes,
 )
+from freetoken.kvcache.prefix_store import transfer_device_bytes
 
 logger = init_logger(__name__)
 
@@ -372,7 +373,7 @@ class Engine:
         # The engine measures the budget and settles the sibling GDN state pool's bytes
         # off it; the KV pool family owns every geometry-specific formula behind the rest.
         available_memory = _startup_kv_budget(config.memory_ratio, init_free_memory, new_free)
-        available_memory -= state_pool_bytes(config)
+        available_memory -= state_pool_bytes(config) + transfer_device_bytes(config)
         self.num_pages = self._pool_cls.solve_num_pages(config, available_memory)
         num_tokens = self.num_pages * config.page_size
         self.ctx.kv_cache = self.kv_cache = create_kv_pool(
@@ -555,7 +556,8 @@ class Engine:
         from freetoken.engine.cache_budget import expert_bytes_per_slot, resolve_moe_cache_auto
 
         cache_per_page, fixed_cache_size, page_tokens, min_reserve = self._pool_cls.kv_cost(config)
-        fixed_cache_size += state_pool_bytes(config)  # sibling GDN state pool, engine-summed
+        # sibling GDN state pool and prefix-cache copy buffers, engine-summed
+        fixed_cache_size += state_pool_bytes(config) + transfer_device_bytes(config)
         num_experts = config.model_config.num_experts
         total_experts = config.model_config.num_moe_layers * num_experts
         return resolve_moe_cache_auto(
@@ -943,7 +945,7 @@ class Engine:
             weights_bytes=self._weights_bytes, current_num_pages=self.num_pages,
             extra_fixed_bytes=(
                 (state_pool_bytes(config, target_mamba) if target_mamba is not None else 0)
-                + draft_bytes
+                + draft_bytes + transfer_device_bytes(config)
             ),
             extra_note=(
                 f", mamba={target_mamba - 1} slots" if target_mamba is not None else ""
@@ -1384,7 +1386,7 @@ def _ensure_expandable_segments() -> None:
 
 
 def _resolve_cache_type(has_linear_attention: bool, requested: str) -> str:
-    # Hybrid GDN models default to the HybridRadixCache (snapshots GDN state at chunk
+    # Hybrid GDN models default to a prefix tree that also keeps GDN states (snapshots at chunk
     # boundaries -> cross-request prefix reuse). An explicit ``--cache-type naive`` opts out
     # to the old no-reuse path (debugging / parity baseline / lower GDN-state memory).
     if has_linear_attention:
@@ -1408,11 +1410,11 @@ def _adjust_dsv4_config(config: EngineConfig, override) -> None:
     P = model_config.dsv4_args.window_size
     override("page_size", P)
     logger.info_rank0(f"DSV4 KV pages are {P}-token window pages; page_size set to {P}")
-    # The generic CacheManager materializes DSV4 'radix' as the shared SWARadixCache (is_swa);
-    # 'naive' stays naive with the pool's swa currency riding swa_paged.
+    # DSV4 'radix' is the window-keeping prefix tree over the pool's window tier; 'naive' stays
+    # naive with the pool's window slots riding swa_paged.
     if getattr(config, "cache_type", "radix") != "naive":
         override("cache_type", "swa_radix")
-    # 'radix' (SWARadixCache on the full-loc currency, carry-aware re-prefill) is
+    # 'radix' (windowed prefix tree on the full-loc currency, carry-aware re-prefill) is
     # the default and is honored, as is an explicit 'naive'. Layered-pipeline
     # uses max_extend_tokens as its physical row-tile limit; legacy scheduling
     # continues to chunk through PrefillAdder.
@@ -1566,9 +1568,9 @@ def _adjust_config(config: EngineConfig):
             raise ValueError(
                 f"SWA models currently support only page_size=1, got {config.page_size}."
             )
-        # naive keeps cache_type='naive' (NaivePrefixCache, no reuse) on the paged pool (==
-        # sglang SWAChunkCache); radix materializes as swa_radix (SWARadixCache, cross-request
-        # reuse == sglang SWARadixCache). Both allocate from the same swa pool + free out-of-window.
+        # naive keeps cache_type='naive' (no reuse) on the paged pool (== sglang SWAChunkCache);
+        # radix materializes as swa_radix (the prefix tree keeps windows too, == sglang
+        # SWARadixCache). Both allocate from the same swa pool + free out-of-window.
         if getattr(config, "cache_type", "radix") != "naive":
             if not 0.0 < config.swa_full_tokens_ratio <= 1.0:
                 raise ValueError(

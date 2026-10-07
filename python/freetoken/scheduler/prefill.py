@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Tuple
 
@@ -10,7 +11,7 @@ from freetoken.utils import align_down, div_ceil, init_logger
 from .utils import PendingReq
 
 if TYPE_CHECKING:
-    from freetoken.kvcache import BaseCacheHandle
+    from freetoken.kvcache.radix_cache import CacheHandle
     from freetoken.message import UserMsg
 
     from .cache import CacheManager
@@ -18,6 +19,10 @@ if TYPE_CHECKING:
     from .table import TableManager
 
 logger = init_logger(__name__)
+
+# A request whose reusable prefix is being restored from host memory: it stays queued while the
+# requests behind it are still considered.
+WAIT_RESTORE = object()
 
 
 def _maybe_pinned(t: torch.Tensor) -> torch.Tensor:
@@ -58,9 +63,11 @@ class PrefillAdder:
         if self.table_manager.available_size == 0:
             return None
 
-        # TODO: consider host cache match case
-        mr = self.cache_manager.match_req(req)
-        handle = mr.cuda_handle
+        handle = self.cache_manager.match_req(req)
+        if self.cache_manager.start_restore(handle):
+            if req.restore_wait is None:
+                req.restore_wait = (time.monotonic(), handle.cached_len, handle.restore_len)
+            return WAIT_RESTORE
         cached_len = handle.cached_len
         # TODO: better estimate policy
         extend_len = req.input_len - cached_len
@@ -73,7 +80,7 @@ class PrefillAdder:
             return self.cache_manager.unlock(handle)
 
         # A request needs one private live state; snapshots are allocated only when produced.
-        if self.cache_manager.is_hybrid:
+        if self.cache_manager.state_cache:
             pool = self.cache_manager.linear_state_pool
             if pool.num_free_slots < 1:
                 self.cache_manager.ensure_mamba_slots(1)
@@ -108,21 +115,23 @@ class PrefillAdder:
             self.table_manager.page_table[table_idx][cached_len - n : cached_len].copy_(matched)
 
         linear_slot_idx = None
-        if self.cache_manager.is_hybrid:
+        if self.cache_manager.state_cache:
             pool = self.cache_manager.linear_state_pool
             linear_slot_idx = pool.alloc(1)[0]
 
-        return handle, table_idx, linear_slot_idx, mr.mamba_value
+        return handle, table_idx, linear_slot_idx, handle.state
 
     def _add_one_req(
         self,
         pending_req: PendingReq,
-        cache_handle: BaseCacheHandle,
+        cache_handle: CacheHandle,
         table_idx: int,
         cached_len: int,
         linear_slot_idx: int | None = None,
         restore_src: int | None = None,
         swa_evicted_seqlen: int = 0,
+        state_captures: list | None = None,
+        round_states: list | None = None,
     ) -> Req | None:
         remain_len = pending_req.input_len - cached_len
         chunk_size = min(self.token_budget, remain_len)
@@ -212,6 +221,11 @@ class PrefillAdder:
         req.linear_slot_idx = linear_slot_idx
         req.mamba_restore_src = restore_src
         req.swa_evicted_seqlen = swa_evicted_seqlen  # carry the extend-free watermark across chunks
+        req.state_captures = state_captures if state_captures is not None else []
+        if round_states is not None:
+            req.round_states = round_states
+        elif cache_handle.state is not None:
+            req.round_states = [cache_handle.node]
         return req
 
     def try_add_one(self, pending_req: PendingReq) -> Req | None:
@@ -231,9 +245,14 @@ class PrefillAdder:
                 linear_slot_idx=chunked_req.linear_slot_idx,
                 restore_src=None,  # continuation chunk already has live state
                 swa_evicted_seqlen=chunked_req.swa_evicted_seqlen,  # extend-free watermark so far
+                state_captures=chunked_req.state_captures,
+                round_states=chunked_req.round_states,
             )
 
-        if resource := self._try_allocate_one(pending_req):
+        resource = self._try_allocate_one(pending_req)
+        if resource is WAIT_RESTORE:
+            return resource
+        if resource:
             cache_handle, table_idx, linear_slot_idx, restore_src = resource
             req = self._add_one_req(
                 pending_req=pending_req,
@@ -242,6 +261,7 @@ class PrefillAdder:
                 cached_len=cache_handle.cached_len,
                 linear_slot_idx=linear_slot_idx,
                 restore_src=restore_src,
+                state_captures=self.cache_manager.plan_captures(pending_req, cache_handle),
             )
             if req is None:
                 # no aligned chunk this pass: undo the admission (a continuation keeps its
@@ -250,6 +270,8 @@ class PrefillAdder:
                 self.table_manager.free(table_idx)
                 if linear_slot_idx is not None:
                     self.cache_manager.linear_state_pool.free(linear_slot_idx)
+            else:
+                self.cache_manager.admitted(pending_req, cache_handle)
             return req
 
         return None
@@ -277,6 +299,7 @@ class PrefillManager:
         max_reqs: int | None = None,
         incremental_window_prefill: bool = False,
     ) -> Batch | None:
+        self.cache_manager.poll()
         if len(self.pending_list) == 0:
             return None
 
@@ -299,6 +322,7 @@ class PrefillManager:
             incremental_window_prefill=incremental_window_prefill,
         )
         reqs: List[Req] = []
+        admitted: set[int] = set()
         chunked_list: List[PendingReq] = []
         prompt_admissions: List[Tuple[int, int, int]] = []
         # Snapshot here, before the forward's complete_one() advances cached_len: the tokens
@@ -312,7 +336,11 @@ class PrefillManager:
             if max_reqs is not None and len(reqs) >= max_reqs:
                 break
             is_continuation = pending_req.chunked_req is not None
-            if req := adder.try_add_one(pending_req):
+            req = adder.try_add_one(pending_req)
+            if req is WAIT_RESTORE:
+                continue
+            if req:
+                admitted.add(id(pending_req))
                 pending_req.chunked_req = None
                 pending_req.layered_cached_len = None
                 if isinstance(req, ChunkedReq):
@@ -333,7 +361,8 @@ class PrefillManager:
                 break  # We cannot add more requests
         if len(reqs) == 0:
             return None
-        self.pending_list = chunked_list + self.pending_list[len(reqs) :]
+        self.pending_list = chunked_list + [
+            p for p in self.pending_list if id(p) not in admitted]
         batch = Batch(reqs=reqs, decode_size=0)
         batch.log_new_tokens = log_new_tokens
         batch.log_cached_tokens = log_cached_tokens

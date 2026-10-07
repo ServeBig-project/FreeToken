@@ -2,7 +2,7 @@
 
 The shared page_table is the virtual full-token coordinate (ShadowRadix); DSV4PagedKVCache plugs
 in as the swa_pool: window pages bind page-atomically behind token-face alloc_swa/free_swa, the
-radix tree is the same SWARadixCache every SWA model uses, and conservation is the generic
+radix tree is the same windowed RadixCache every SWA model uses, and conservation is the generic
 check_integrity (free + tree == capacity, exact at idle). Covers: cold + radix-hit + decode
 lifecycles with the out-of-window driver, the crash-A residue class, naive mode, chunked prefill,
 and the decode-snapshot staging contract.
@@ -56,7 +56,7 @@ def _req(ti, ids, n_decode=4):
 
 
 def _lifecycle(cm, req, total_len, finished=True):
-    h = cm.match_req(req).cuda_handle
+    h = cm.match_req(req)
     req.cache_handle = h
     req.cached_len = h.cached_len
     cm.lock(h)
@@ -88,12 +88,12 @@ def test_cold_then_hit_reference_shares_and_conserves():
 
     # Same prompt HITS; the matched prefix is tree-owned; window slots resolve via translate.
     r2 = _req(1, prompt.clone(), n_decode=320)
-    h2 = cm.match_req(r2).cuda_handle
+    h2 = cm.match_req(r2)
     assert h2.cached_len == 256
     _lifecycle(cm, r2, total_len=320)
     cm.check_integrity()
     # the shared chain is tree-owned exactly once; both requests' pages fully reconciled
-    assert cm.prefix_cache.full_evictable + cm.prefix_cache.full_protected > 0
+    assert cm.tree.kv_tokens > 0
 
 
 @pytest.mark.parametrize("cache_type", ["swa_radix", "naive"])
@@ -125,7 +125,7 @@ def test_chunked_prefill_conserves():
     cm, _, _ = _stack(num_pages=48)
     total = 6 * P + 5
     req = _req(0, torch.arange(1, total + 1, dtype=torch.int32), n_decode=1)
-    h = cm.match_req(req).cuda_handle
+    h = cm.match_req(req)
     req.cache_handle = h
     req.cached_len = h.cached_len
     cm.lock(h)
@@ -220,7 +220,7 @@ def test_abort_anywhere_fuzz_conserves_and_isolates():
                 continue                          # scheduler defers when the full tier is short
             ti = rng.choice(free_tis)
             req = _req(ti, prompt, n_decode=64)
-            h = cm.match_req(req).cuda_handle
+            h = cm.match_req(req)
             req.cache_handle = h
             req.cached_len = h.cached_len
             need_swa = min(max(req.input_len - h.cached_len, 1), P) + 1

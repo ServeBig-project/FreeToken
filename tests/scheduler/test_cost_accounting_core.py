@@ -106,6 +106,7 @@ def test_schedule_reports_admission_only_after_prepare_succeeds():
 
     scheduler._prepare_batch = prepare
     scheduler.send_result = send
+    scheduler.cache_manager = SimpleNamespace(count_reuse=lambda uid, cached: None)
 
     assert Scheduler._schedule_next_batch(scheduler) == "forward-input"
     assert events[0] == ("prepared", batch)

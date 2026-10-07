@@ -59,6 +59,12 @@ class UserReply(BaseFrontendMsg):
     speculative: dict | None = None
     cuda_graph: dict | None = None
     gdn_replayssm: dict | None = None
+    prefix_cache: dict | None = None
+
+
+@dataclass
+class CacheStatusReply(BaseFrontendMsg):
+    prefix_cache: dict
 
 
 @dataclass
@@ -73,3 +79,4 @@ class CacheRebuildReply(BaseFrontendMsg):
     error: str | None = None
     gdn_replayssm: dict | None = None
     dflash: dict | None = None
+    prefix_cache: dict | None = None

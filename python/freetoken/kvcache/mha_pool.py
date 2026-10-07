@@ -57,6 +57,12 @@ class MHAKVCache(BaseKVCachePool):
         self._device = device
         self._storage_shape = (num_pages * page_size, local_kv_heads, head_dim)
 
+    def paged_views(self) -> list[torch.Tensor]:
+        """Per-layer views ``[pages, 2, page_size, heads, head_dim]`` of the paged KV, for
+        copying whole pages between tiers."""
+        return [self._kv_buffer[:, layer].movedim(1, 0)
+                for layer in range(self._kv_buffer.shape[1])]
+
     def rebuild(self, num_pages: int) -> None:
         """Reallocate the KV buffer for ``num_pages`` pages IN PLACE.
 

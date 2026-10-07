@@ -41,7 +41,7 @@ def test_cache_manager_rebuild_resets_pages_and_prefix():
     assert cm.num_pages == 20
     assert cm.page_table is new_pt
     assert cm.free_slots.tolist() == [i * 2 for i in range(20)]
-    assert cm.prefix_cache.size_info.total_size == 0
+    assert cm.tree.kv_tokens == 0
     cm.check_integrity()  # must pass: free_pages(20) + cache_pages(0) == num_pages(20)
 
 
@@ -156,15 +156,18 @@ def test_rebuild_cache_refreshes_prefill_budget(monkeypatch):
     sched.layered_pipeline_executor = None
     sched.device = torch.device("cpu")
     sched.config = SimpleNamespace(tp_info=SimpleNamespace(size=1), max_extend_tokens=100_000)
+    calls = []
     sched.engine = SimpleNamespace(
-        rebuild_runtime_cache=lambda **kw: None, num_pages=32, page_table=None
+        rebuild_runtime_cache=lambda **kw: calls.append("engine_rebuild"), num_pages=32,
+        page_table=None,
     )
     # engine.page_table unchanged across the (stubbed) rebuild -> no token_pool re-point.
     sched.table_manager = SimpleNamespace(page_table=None)
     # DSV4-like manager: prefill_chunk_budget tracks the (about-to-shrink) window pool; no shared
     # page table, so rebuild_cache's prefix-cache rebuild branch is skipped.
     cache_manager = SimpleNamespace(
-        prefill_chunk_budget=5000, rebuild=lambda *a: None, check_integrity=lambda: None)
+        prefill_chunk_budget=5000, rebuild=lambda *a: None, check_integrity=lambda: None,
+        poll=lambda: calls.append("poll"))
     sched.cache_manager = cache_manager
     sched.table_manager.rebuild = lambda pt: None
     sched.table_manager.token_pool = None
@@ -174,3 +177,4 @@ def test_rebuild_cache_refreshes_prefill_budget(monkeypatch):
     cache_manager.prefill_chunk_budget = 1000  # the (stubbed) engine rebuild shrank the pool
     Scheduler.rebuild_cache(sched, num_pages=16)
     assert sched.prefill_budget == 1000  # tracks the shrunk cap, not the stale 5000
+    assert calls == ["poll", "engine_rebuild"]  # finished copies published before pools rebuild

@@ -9,9 +9,8 @@ import pytest
 import torch
 
 from freetoken.core import Req, SamplingParams
-from freetoken.kvcache.hybrid_radix_cache import HybridRadixCache
-from freetoken.kvcache.radix_cache import RadixPrefixCache
-from freetoken.kvcache.swa_radix_cache import SWARadixCache
+from freetoken.kvcache.prefix_policy import POLICIES
+from freetoken.kvcache.radix_cache import RadixCache
 from freetoken.message import BaseBackendMsg, BaseTokenizerMsg, TokenizeMsg, UserMsg
 from freetoken.scheduler.cache import CacheManager
 from freetoken.scheduler.decode import DecodeManager
@@ -23,12 +22,28 @@ from freetoken.scheduler.utils import PendingReq
 DEVICE = torch.device("cpu")
 
 
+def tree(page_size, **kw):
+    stats = dict.fromkeys(("checkpoint_created", "checkpoint_deduplicated", "checkpoint_pruned",
+                           "checkpoint_evicted", "gpu_checkpoint_peak", "host_checkpoint_peak"), 0)
+    return RadixCache(DEVICE, page_size, POLICIES["baseline"](), stats, **kw)
+
+
+def hybrid_insert(cache, ids, kv, state, **kw):
+    """(matched length, whether the end already held a state)."""
+    prefix_len, _, taken, _ = cache.insert(ids, kv, state=state, **kw)
+    return prefix_len, not taken
+
+
 def tensor_range(start, count):
     return torch.arange(start, start + count, dtype=torch.int32)
 
 
 def group_arg(group):
     return {} if group is None else {"cache_group": group}
+
+
+def tree_group(group):
+    return {} if group is None else {"group": group}
 
 
 def assert_indices(actual, expected):
@@ -38,233 +53,233 @@ def assert_indices(actual, expected):
 @pytest.mark.parametrize("page_size", [1, 4])
 @pytest.mark.parametrize("group", [None, "", "alice"])
 def test_radix_group_reuse_and_isolation(page_size, group):
-    cache = RadixPrefixCache(DEVICE, page_size=page_size)
+    cache = tree(page_size)
     ids = tensor_range(1, 5 * page_size + 3)
     original_ids = ids.clone()
     first = tensor_range(100, len(ids))
     second = tensor_range(200, len(ids))
     length = len(ids) // page_size * page_size
-    kwargs = group_arg(group)
+    kwargs = tree_group(group)
 
-    assert cache.insert_prefix(ids, first, **kwargs).cached_len == 0
-    cold = cache.match_prefix(ids, cache_group="bob").cuda_handle
+    assert cache.insert(ids, first, **kwargs)[0] == 0
+    cold = cache.match(ids, group="bob")
     assert cold.cached_len == 0
     assert cold.get_matched_indices().numel() == 0
-    assert cache.insert_prefix(ids, second, cache_group="bob").cached_len == 0
-    assert cache.insert_prefix(ids, tensor_range(500, len(ids)), **kwargs).cached_len == length
+    assert cache.insert(ids, second, group="bob")[0] == 0
+    assert cache.insert(ids, tensor_range(500, len(ids)), **kwargs)[0] == length
 
     for actual_group, expected in [(group, first), ("bob", second)]:
-        match = cache.match_prefix(ids, **group_arg(actual_group)).cuda_handle
+        match = cache.match(ids, **tree_group(actual_group))
         assert match.cached_len == length
         assert_indices(match.get_matched_indices(), expected[:length])
     if group in (None, ""):
-        assert cache.match_prefix(ids).cuda_handle.cached_len == length
-        assert cache.match_prefix(ids, cache_group="").cuda_handle.cached_len == length
+        assert cache.match(ids).cached_len == length
+        assert cache.match(ids, group="").cached_len == length
     assert_indices(ids, original_ids)
     assert_indices(first, tensor_range(100, len(ids)))
 
 
 @pytest.mark.parametrize("page_size", [1, 4])
 def test_radix_partial_prefix_split_stays_in_group(page_size):
-    cache = RadixPrefixCache(DEVICE, page_size=page_size)
+    cache = tree(page_size)
     ids = tensor_range(1, 4 * page_size)
     branch = torch.cat((ids[: 2 * page_size], tensor_range(50, 2 * page_size)))
     first = tensor_range(100, len(ids))
     second = tensor_range(200, len(ids))
     other_group = tensor_range(300, len(ids))
-    cache.insert_prefix(ids, first, cache_group="alice")
+    cache.insert(ids, first, group="alice")
 
-    assert cache.match_prefix(branch, cache_group="alice").cuda_handle.cached_len == 2 * page_size
-    assert cache.match_prefix(branch, cache_group="bob").cuda_handle.cached_len == 0
-    assert cache.insert_prefix(branch, second, cache_group="alice").cached_len == 2 * page_size
-    assert cache.insert_prefix(branch, other_group, cache_group="bob").cached_len == 0
+    assert cache.match(branch, group="alice").cached_len == 2 * page_size
+    assert cache.match(branch, group="bob").cached_len == 0
+    assert cache.insert(branch, second, group="alice")[0] == 2 * page_size
+    assert cache.insert(branch, other_group, group="bob")[0] == 0
     expected = torch.cat((first[: 2 * page_size], second[2 * page_size :]))
-    assert_indices(cache.match_prefix(branch, cache_group="alice").cuda_handle.get_matched_indices(), expected)
-    assert_indices(cache.match_prefix(ids, cache_group="alice").cuda_handle.get_matched_indices(), first)
-    assert_indices(cache.match_prefix(branch, cache_group="bob").cuda_handle.get_matched_indices(), other_group)
+    assert_indices(cache.match(branch, group="alice").get_matched_indices(), expected)
+    assert_indices(cache.match(ids, group="alice").get_matched_indices(), first)
+    assert_indices(cache.match(branch, group="bob").get_matched_indices(), other_group)
 
 
 def test_radix_global_budget_and_locked_handle():
-    cache = RadixPrefixCache(DEVICE, page_size=1)
+    cache = tree(1)
     ids = tensor_range(1, 8)
     first, second = tensor_range(100, 8), tensor_range(200, 8)
-    cache.insert_prefix(ids, first, cache_group="alice")
-    cache.insert_prefix(ids, second, cache_group="bob")
-    assert cache.size_info.evictable_size == 16
-    assert cache.size_info.total_size == 16
-    handle = cache.match_prefix(ids, cache_group="alice").cuda_handle
-    cache.lock_handle(handle)
-    assert cache.size_info.protected_size == 8
-    assert cache.size_info.evictable_size == 8
+    cache.insert(ids, first, group="alice")
+    cache.insert(ids, second, group="bob")
+    assert cache.evictable["kv"] == 16
+    assert cache.kv_tokens == 16
+    handle = cache.match(ids, group="alice")
+    cache.lock(handle)
+    assert cache.protected["kv"] == 8
+    assert cache.evictable["kv"] == 8
 
-    assert set(cache.evict(8).tolist()) == set(second.tolist())
-    assert cache.match_prefix(ids, cache_group="alice").cuda_handle.cached_len == 8
-    assert cache.match_prefix(ids, cache_group="bob").cuda_handle.cached_len == 0
-    cache.lock_handle(handle, unlock=True)
-    assert set(cache.evict(8).tolist()) == set(first.tolist())
-    assert cache.size_info.total_size == 0
+    assert set(cache.evict_kv(8).kv.tolist()) == set(second.tolist())
+    assert cache.match(ids, group="alice").cached_len == 8
+    assert cache.match(ids, group="bob").cached_len == 0
+    cache.unlock(handle)
+    assert set(cache.evict_kv(8).kv.tolist()) == set(first.tolist())
+    assert cache.kv_tokens == 0
 
 
 def test_radix_lru_is_shared_across_groups():
-    cache = RadixPrefixCache(DEVICE, page_size=1)
+    cache = tree(1)
     ids = tensor_range(1, 8)
     first, second = tensor_range(100, 8), tensor_range(200, 8)
-    cache.insert_prefix(ids, first, cache_group="z-old")
-    cache.insert_prefix(ids, second, cache_group="a-new")
-    assert set(cache.evict(8).tolist()) == set(first.tolist())
-    assert cache.match_prefix(ids, cache_group="z-old").cuda_handle.cached_len == 0
-    assert_indices(cache.match_prefix(ids, cache_group="a-new").cuda_handle.get_matched_indices(), second)
+    cache.insert(ids, first, group="z-old")
+    cache.insert(ids, second, group="a-new")
+    assert set(cache.evict_kv(8).kv.tolist()) == set(first.tolist())
+    assert cache.match(ids, group="z-old").cached_len == 0
+    assert_indices(cache.match(ids, group="a-new").get_matched_indices(), second)
 
 
 @pytest.mark.parametrize("page_size", [1, 64])
 @pytest.mark.parametrize("group", [None, "", "alice"])
 def test_hybrid_group_reuse_and_snapshot_isolation(page_size, group):
-    cache = HybridRadixCache(DEVICE, page_size=page_size)
+    cache = tree(page_size, has_state=True)
     ids = tensor_range(1, 128)
     original_ids = ids.clone()
     first, second = tensor_range(100, 128), tensor_range(300, 128)
-    kwargs = group_arg(group)
+    kwargs = tree_group(group)
 
-    assert cache.insert(ids, first, 11, **kwargs) == (0, False)
-    cold = cache.match_prefix(ids, cache_group="bob")
+    assert hybrid_insert(cache, ids, first, 11, **kwargs) == (0, False)
+    cold = cache.match(ids, group="bob")
     assert cold.cached_len == 0
     assert cold.kv_indices.numel() == 0
-    assert cache.insert(ids, second, 22, cache_group="bob") == (0, False)
-    assert cache.insert(ids, tensor_range(500, 128), 33, **kwargs) == (128, True)
+    assert hybrid_insert(cache, ids, second, 22, group="bob") == (0, False)
+    assert hybrid_insert(cache, ids, tensor_range(500, 128), 33, **kwargs) == (128, True)
     for actual_group, expected, snapshot in [(group, first, 11), ("bob", second, 22)]:
-        match = cache.match_prefix(ids, **group_arg(actual_group))
+        match = cache.match(ids, **tree_group(actual_group))
         assert match.cached_len == 128
-        assert match.mamba_value == snapshot
+        assert match.state == snapshot
         assert_indices(match.kv_indices, expected)
     if group in (None, ""):
-        assert cache.match_prefix(ids).mamba_value == 11
-        assert cache.match_prefix(ids, cache_group="").mamba_value == 11
+        assert cache.match(ids).state == 11
+        assert cache.match(ids, group="").state == 11
     assert_indices(ids, original_ids)
 
 
 @pytest.mark.parametrize("page_size", [1, 64])
 def test_hybrid_matches_only_own_valid_snapshot_boundary(page_size):
-    cache = HybridRadixCache(DEVICE, page_size=page_size)
+    cache = tree(page_size, has_state=True)
     ids = tensor_range(1, 128)
     first, second = tensor_range(100, 128), tensor_range(300, 128)
-    assert cache.insert(ids[:64], first[:64], 11, cache_group="alice") == (0, False)
-    assert cache.insert(ids, first, 12, cache_group="alice") == (64, False)
-    assert cache.insert(ids, second, 22, cache_group="bob") == (0, False)
+    assert hybrid_insert(cache, ids[:64], first[:64], 11, group="alice") == (0, False)
+    assert hybrid_insert(cache, ids, first, 12, group="alice") == (64, False)
+    assert hybrid_insert(cache, ids, second, 22, group="bob") == (0, False)
 
-    match = cache.match_prefix(ids[:96], cache_group="alice")
+    match = cache.match(ids[:96], group="alice")
     assert match.cached_len == 64
-    assert match.mamba_value == 11
+    assert match.state == 11
     assert_indices(match.kv_indices, first[:64])
-    assert cache.match_prefix(ids[:96], cache_group="bob").cached_len == 0
-    assert cache.match_prefix(ids, cache_group="alice").mamba_value == 12
-    assert cache.match_prefix(ids, cache_group="bob").mamba_value == 22
+    assert cache.match(ids[:96], group="bob").cached_len == 0
+    assert cache.match(ids, group="alice").state == 12
+    assert cache.match(ids, group="bob").state == 22
 
 
 def test_hybrid_global_budget_and_locked_snapshot():
-    cache = HybridRadixCache(DEVICE, page_size=1)
+    cache = tree(1, has_state=True)
     ids = tensor_range(1, 64)
     first, second = tensor_range(100, 64), tensor_range(200, 64)
-    cache.insert(ids, first, 11, cache_group="alice")
-    cache.insert(ids, second, 22, cache_group="bob")
-    assert cache.full_evictable_size == 128
-    assert cache.mamba_evictable_size == 2
-    locked = cache.match_prefix(ids, cache_group="alice")
-    cache.inc_lock(locked.node)
-    assert cache.full_evictable_size == 64
-    assert cache.mamba_evictable_size == 1
+    cache.insert(ids, first, state=11, group="alice")
+    cache.insert(ids, second, state=22, group="bob")
+    assert cache.evictable["kv"] == 128
+    assert cache.evictable["state"] == 2
+    locked = cache.match(ids, group="alice")
+    cache.lock(locked)
+    assert cache.evictable["kv"] == 64
+    assert cache.evictable["state"] == 1
 
-    evicted = cache.evict_full(128)
-    assert set(evicted.kv_indices.tolist()) == set(second.tolist())
-    assert {int(slot) for slot in evicted.mamba_slots} == {22}
-    assert cache.match_prefix(ids, cache_group="alice").mamba_value == 11
-    assert cache.match_prefix(ids, cache_group="bob").cached_len == 0
-    cache.dec_lock(locked.node)
-    assert set(cache.evict_full(64).kv_indices.tolist()) == set(first.tolist())
-    assert cache.full_evictable_size == 0
-    assert cache.mamba_evictable_size == 0
+    evicted = cache.evict_kv(128)
+    assert set(evicted.kv.tolist()) == set(second.tolist())
+    assert {int(slot) for slot in evicted.states} == {22}
+    assert cache.match(ids, group="alice").state == 11
+    assert cache.match(ids, group="bob").cached_len == 0
+    cache.unlock(locked)
+    assert set(cache.evict_kv(64).kv.tolist()) == set(first.tolist())
+    assert cache.evictable["kv"] == 0
+    assert cache.evictable["state"] == 0
 
 
 def test_hybrid_snapshot_eviction_is_global_and_does_not_cross_groups():
-    cache = HybridRadixCache(DEVICE, page_size=1)
+    cache = tree(1, has_state=True)
     ids = tensor_range(1, 64)
     first, second = tensor_range(100, 64), tensor_range(200, 64)
-    cache.insert(ids, first, 11, cache_group="z-old")
-    cache.insert(ids, second, 22, cache_group="a-new")
-    evicted = cache.evict_mamba(1)
-    assert {int(slot) for slot in evicted.mamba_slots} == {11}
-    assert cache.match_prefix(ids, cache_group="z-old").cached_len == 0
-    remaining = cache.match_prefix(ids, cache_group="a-new")
-    assert remaining.mamba_value == 22
+    cache.insert(ids, first, state=11, group="z-old")
+    cache.insert(ids, second, state=22, group="a-new")
+    evicted = cache.evict_states(1)
+    assert {int(slot) for slot in evicted.states} == {11}
+    assert cache.match(ids, group="z-old").cached_len == 0
+    remaining = cache.match(ids, group="a-new")
+    assert remaining.state == 22
     assert_indices(remaining.kv_indices, second)
 
 
 @pytest.mark.parametrize("page_size", [1, 4])
 @pytest.mark.parametrize("group", [None, "", "alice"])
 def test_swa_group_reuse_and_isolation(page_size, group):
-    cache = SWARadixCache(DEVICE, page_size=page_size, sliding_window_size=16)
+    cache = tree(page_size, window=16)
     ids = tensor_range(1, 64)
     original_ids = ids.clone()
     first, second = tensor_range(100, 64), tensor_range(200, 64)
-    kwargs = group_arg(group)
+    kwargs = tree_group(group)
     assert cache.insert(ids, first, **kwargs)[0] == 0
-    cold = cache.match_prefix(ids, cache_group="bob")
+    cold = cache.match(ids, group="bob")
     assert cold.cached_len == 0
     assert cold.kv_indices.numel() == 0
-    assert cache.insert(ids, second, cache_group="bob")[0] == 0
+    assert cache.insert(ids, second, group="bob")[0] == 0
     assert cache.insert(ids, tensor_range(500, 64), **kwargs)[0] == 64
     for actual_group, expected in [(group, first), ("bob", second)]:
-        match = cache.match_prefix(ids, **group_arg(actual_group))
+        match = cache.match(ids, **tree_group(actual_group))
         assert match.cached_len == 64
         assert_indices(match.kv_indices, expected)
     if group in (None, ""):
-        assert cache.match_prefix(ids).cached_len == 64
-        assert cache.match_prefix(ids, cache_group="").cached_len == 64
+        assert cache.match(ids).cached_len == 64
+        assert cache.match(ids, group="").cached_len == 64
     assert_indices(ids, original_ids)
 
 
 @pytest.mark.parametrize("page_size", [1, 4])
 def test_swa_trimming_is_limited_to_its_group(page_size):
-    cache = SWARadixCache(DEVICE, page_size=page_size, sliding_window_size=16)
+    cache = tree(page_size, window=16)
     ids = tensor_range(1, 64)
     branch = torch.cat((ids[:32], tensor_range(1000, 32)))
     first, second = tensor_range(100, 64), tensor_range(300, 64)
     for group, indices in [("alice", first), ("bob", second)]:
-        cache.insert(ids, indices, cache_group=group)
-        cache.insert(branch, indices + 1000, cache_group=group)
-        assert cache.match_prefix(ids[:32], cache_group=group).cached_len == 32
+        cache.insert(ids, indices, group=group)
+        cache.insert(branch, indices + 1000, group=group)
+        assert cache.match(ids[:32], group=group).cached_len == 32
 
-    cache.trim_head_swa(ids, keep_from=32, cache_group="alice")
-    assert cache.match_prefix(ids[:32], cache_group="alice").cached_len == 0
-    assert cache.match_prefix(ids[:32], cache_group="bob").cached_len == 32
-    assert_indices(cache.match_prefix(ids, cache_group="alice").kv_indices, first)
-    assert_indices(cache.match_prefix(ids, cache_group="bob").kv_indices, second)
+    cache.trim_head_window(ids, 32, group="alice")
+    assert cache.match(ids[:32], group="alice").cached_len == 0
+    assert cache.match(ids[:32], group="bob").cached_len == 32
+    assert_indices(cache.match(ids, group="alice").kv_indices, first)
+    assert_indices(cache.match(ids, group="bob").kv_indices, second)
 
 
 def test_swa_global_eviction_respects_locked_handle():
-    cache = SWARadixCache(DEVICE, page_size=1, sliding_window_size=16)
+    cache = tree(1, window=16)
     ids = tensor_range(1, 64)
     first, second = tensor_range(100, 64), tensor_range(200, 64)
-    cache.insert(ids, first, cache_group="alice")
-    cache.insert(ids, second, cache_group="bob")
-    locked = cache.match_prefix(ids, cache_group="alice")
-    window_handle = cache.inc_lock(locked.node)
-    evicted = cache.evict_full(128)
-    assert set(evicted.kv_indices.tolist()) == set(second.tolist())
-    assert cache.match_prefix(ids, cache_group="alice").cached_len == 64
-    assert cache.match_prefix(ids, cache_group="bob").cached_len == 0
-    cache.dec_lock(locked.node, window_handle)
-    assert set(cache.evict_full(64).kv_indices.tolist()) == set(first.tolist())
+    cache.insert(ids, first, group="alice")
+    cache.insert(ids, second, group="bob")
+    locked = cache.match(ids, group="alice")
+    cache.lock(locked)
+    evicted = cache.evict_kv(128)
+    assert set(evicted.kv.tolist()) == set(second.tolist())
+    assert cache.match(ids, group="alice").cached_len == 64
+    assert cache.match(ids, group="bob").cached_len == 0
+    cache.unlock(locked)
+    assert set(cache.evict_kv(64).kv.tolist()) == set(first.tolist())
 
 
 def test_swa_lru_is_shared_across_groups():
-    cache = SWARadixCache(DEVICE, page_size=1, sliding_window_size=16)
+    cache = tree(1, window=16)
     ids = tensor_range(1, 64)
     first, second = tensor_range(100, 64), tensor_range(200, 64)
-    cache.insert(ids, first, cache_group="z-old")
-    cache.insert(ids, second, cache_group="a-new")
-    assert set(cache.evict_full(64).kv_indices.tolist()) == set(first.tolist())
-    assert cache.match_prefix(ids, cache_group="z-old").cached_len == 0
-    assert_indices(cache.match_prefix(ids, cache_group="a-new").kv_indices, second)
+    cache.insert(ids, first, group="z-old")
+    cache.insert(ids, second, group="a-new")
+    assert set(cache.evict_kv(64).kv.tolist()) == set(first.tolist())
+    assert cache.match(ids, group="z-old").cached_len == 0
+    assert_indices(cache.match(ids, group="a-new").kv_indices, second)
 
 
 @pytest.mark.parametrize("group", [None, "", "alice", "用户甲"])
@@ -292,8 +307,8 @@ def test_pending_and_scheduled_request_expose_group(group):
     kwargs = group_arg(group)
     params = SamplingParams()
     pending = PendingReq(uid=1, input_ids=ids, sampling_params=params, **kwargs)
-    cache = RadixPrefixCache(DEVICE, page_size=1)
-    handle = cache.match_prefix(ids, **kwargs).cuda_handle
+    cache = tree(1)
+    handle = cache.match(ids, **tree_group(group))
     req = Req(input_ids=ids, table_idx=0, cached_len=0, output_len=1, uid=1,
               sampling_params=params, cache_handle=handle, **kwargs)
     assert pending.cache_group == (group or "")

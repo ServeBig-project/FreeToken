@@ -37,9 +37,11 @@ class _FakeState:
     """Stand-in for FrontendManager exposing exactly what dispatch_rebuild / _resolve_rebuild /
     fail_pending_rebuilds read: rebuild_futures, maintenance_state, fatal_error, last_rebuild,
     the event loop (_loop, for cross-thread future resolution), and an async send_one delegating
-    to an injected impl (so a test can make the enqueue succeed or raise)."""
+    to an injected impl (so a test can make the enqueue succeed or raise). ``stats`` receives
+    the rebuilt cache's prefix-cache status."""
 
     def __init__(self, send_impl, *, maintenance_state="serving", fatal_error=None):
+        self.stats = SimpleNamespace(prefix_cache=None)
         self.rebuild_futures: dict = {}
         self.maintenance_state = maintenance_state
         self.fatal_error = fatal_error
@@ -62,6 +64,7 @@ def _reply(request_id, status, **over):
         error=None,
         gdn_replayssm=None,
         dflash=None,
+        prefix_cache={},
     )
     base.update(over)
     return SimpleNamespace(**base)
