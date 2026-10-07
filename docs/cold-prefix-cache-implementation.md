@@ -204,12 +204,12 @@ DSV4的full位置是逻辑索引，不代表另有一份覆盖所有token的普�
 class PrefixCachePolicy(Protocol):
     def checkpoint_positions(self, context): ...
     def prune_after_commit(self, context): ...
-    def eviction_order(self, candidates, *, tier, required_bytes): ...
+    def eviction_key(self, node, kind): ...
 ```
 
 - `checkpoint_positions` 选择组件已经声明可捕获的候选；返回位置与保存用途。
 - `prune_after_commit` 返回已被新状态替代、可以删除的快照引用；不直接释放。
-- `eviction_order` 从管理层提供的可淘汰对象中排序；管理层按实际回收字节执行，必要时重新收集候选。
+- `eviction_key` 给出可淘汰对象的先后键；管理层用堆维护候选，按实际回收字节执行，淘汰暴露出的父节点增量入堆，不重新全量排序。
 
 上下文只包含已有 host 元数据：位置、父子/分叉关系、最近续接点、用途、大小、最近真实复用、所在层级和当前容量。不要为“未来可能的策略”添加模型 hidden state、router 输出、预测器或训练数据接口。
 
@@ -239,7 +239,7 @@ CPU 缓存有一个总字节上限，涵盖其持有的所有组件数据。可�
 
 预算以一个 engine worker 为单位；多 rank 部署的实例 CPU 总上限是各 worker 预算之和，状态查询必须明确区分本地值与汇总值。各 rank 的组件使用原有 TP 切片和控制次序，不重复保存一份完整模型状态，不引入跨主机搬运。首轮性能数据使用单 GPU；未验收的多 rank 配置不得标为已通过，也不能以模型名或固定 GPU 编号限制公共模块。
 
-使用有界 pinned memory 支持真正异步 DMA。分配发生在启动或受控扩充已有 slab 时，不在每个 token/每个页上反复 pin/unpin。GPU 暂存缓冲启动时分配并计价；关闭 CPU 缓存时不分配这些资源。
+使用有界 pinned memory 支持真正异步 DMA。启动时按预算一次锁定整块，运行中不再 pin/unpin（按需锁页每块要在调度线程上停顿数百毫秒）。GPU 暂存缓冲启动时分配并计价；关闭 CPU 缓存时不分配这些资源。
 
 | 对象 | 所有者及释放条件 |
 | --- | --- |

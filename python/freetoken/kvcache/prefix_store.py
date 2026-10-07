@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Callable, List
 
 import torch
+from freetoken.kernel.pinned import alloc_pinned_tensor
 
 _ALIGN = 512
 STAGING_BYTES = 8 << 20  # per copy direction; a starting point, not a tuned value
@@ -27,68 +28,47 @@ def transfer_device_bytes(config) -> int:
 
 
 class HostStore:
-    """Pinned host memory under one byte budget, grown in slabs and carved first-fit."""
+    """Pinned host memory of one fixed budget, carved first-fit. It is pinned whole at startup:
+    pinning on demand stalls the scheduler for hundreds of milliseconds per block."""
 
-    def __init__(self, budget: int, slab_bytes: int = 256 << 20) -> None:
+    def __init__(self, budget: int) -> None:
         self.budget = budget
-        self.slab_bytes = slab_bytes
-        self.slabs: List[torch.Tensor] = []
-        self.free_extents: List[List[List[int]]] = []  # per slab: sorted [offset, size]
+        self.buf = alloc_pinned_tensor(budget, dtype=torch.uint8)
+        self.free_extents: List[List[int]] = [[0, budget]]  # sorted [offset, size]
         self.used = 0
 
-    @property
-    def allocated(self) -> int:
-        return sum(s.numel() for s in self.slabs)
-
     def fits(self, nbytes: int) -> bool:
-        nbytes = -(-nbytes // _ALIGN) * _ALIGN
-        empty = sum(s.numel() for i, s in enumerate(self.slabs)
-                    if s.numel() and self.free_extents[i] == [[0, s.numel()]])
-        return (self.allocated - empty + nbytes <= self.budget
-                or any(ext[1] >= nbytes for extents in self.free_extents for ext in extents))
+        nbytes = _aligned(nbytes)
+        return any(ext[1] >= nbytes for ext in self.free_extents)
 
-    def alloc(self, nbytes: int) -> tuple[int, int] | None:
-        nbytes = -(-nbytes // _ALIGN) * _ALIGN
-        for i, extents in enumerate(self.free_extents):
-            for ext in extents:
-                if ext[1] >= nbytes:
-                    off = ext[0]
-                    ext[0] += nbytes
-                    ext[1] -= nbytes
-                    if ext[1] == 0:
-                        extents.remove(ext)
-                    self.used += nbytes
-                    return i, off
-        if self.allocated + nbytes > self.budget:
-            self._release_empty_slabs()  # their budget can back a differently sized slab
-        # A new slab takes what the budget has left, up to the slab size, but at least this.
-        size = max(min(self.slab_bytes, self.budget - self.allocated), nbytes)
-        if self.allocated + size > self.budget:
-            return None
-        self.slabs.append(torch.empty(size, dtype=torch.uint8, pin_memory=True))
-        self.free_extents.append([[nbytes, size - nbytes]] if size > nbytes else [])
-        self.used += nbytes
-        return len(self.slabs) - 1, 0
+    def alloc(self, nbytes: int) -> int | None:
+        nbytes = _aligned(nbytes)
+        for ext in self.free_extents:
+            if ext[1] >= nbytes:
+                off = ext[0]
+                ext[0] += nbytes
+                ext[1] -= nbytes
+                if ext[1] == 0:
+                    self.free_extents.remove(ext)
+                self.used += nbytes
+                return off
+        return None
 
-    def _release_empty_slabs(self) -> None:
-        for i, slab in enumerate(self.slabs):
-            if slab.numel() and self.free_extents[i] == [[0, slab.numel()]]:
-                self.slabs[i] = slab.new_empty(0)  # keeps slab indices of live copies stable
-                self.free_extents[i] = []
-
-    def free(self, slab: int, off: int, nbytes: int) -> None:
-        nbytes = -(-nbytes // _ALIGN) * _ALIGN
+    def free(self, off: int, nbytes: int) -> None:
+        nbytes = _aligned(nbytes)
         self.used -= nbytes
-        extents = self.free_extents[slab]
-        extents.append([off, nbytes])
-        extents.sort()
+        extents = sorted(self.free_extents + [[off, nbytes]])
         merged = [extents[0]]
         for ext in extents[1:]:
             if merged[-1][0] + merged[-1][1] == ext[0]:
                 merged[-1][1] += ext[1]
             else:
                 merged.append(ext)
-        self.free_extents[slab] = merged
+        self.free_extents = merged
+
+
+def _aligned(nbytes: int) -> int:
+    return -(-nbytes // _ALIGN) * _ALIGN
 
 
 @dataclass(eq=False)
@@ -118,14 +98,13 @@ class HostCopy:
         self.on_free: Callable[[], None] | None = None
 
     def view(self, family: int, start: int, count: int) -> torch.Tensor:
-        slab, off = self.where
-        off += self.units * sum(self.rows[:family]) + start * self.rows[family]
-        return self.store.slabs[slab][off : off + count * self.rows[family]]
+        off = self.where + self.units * sum(self.rows[:family]) + start * self.rows[family]
+        return self.store.buf[off : off + count * self.rows[family]]
 
     def release(self) -> None:
         self.refs -= 1
         if self.refs == 0 and self.where is not None:
-            self.store.free(*self.where, self.nbytes)
+            self.store.free(self.where, self.nbytes)
             if self.on_free is not None:
                 self.on_free()
 
@@ -196,9 +175,10 @@ class PrefixTransfer:
                keep=()) -> None:
         """Run ``tasks`` after all work already queued on the current stream; ``done`` runs
         from ``poll`` once they completed."""
+        tasks = _merge_adjacent(tasks)  # before the wait: the side stream reads merged indices
         stream = self.streams[direction]
         stream.wait_stream(torch.cuda.current_stream(self.device))
-        job = _Job(tasks, done, keep)
+        job = _Job(tasks, done, [*keep, *(t.index for t in tasks)])
         with torch.cuda.stream(stream):
             job.start.record()
             for task in tasks:
@@ -254,6 +234,28 @@ class PrefixTransfer:
         for stream in self.streams.values():
             stream.synchronize()
         self.poll(group)
+
+
+def _merge_adjacent(tasks: List[CopyTask]) -> List[CopyTask]:
+    """One task per run of consecutive units of one host copy (the pieces of a split node, in
+    whatever order they were listed), so a fragmented path costs one copy per layer instead of
+    one per piece and layer. Destinations are disjoint, so task order does not matter."""
+    group: dict = {}
+    for t in tasks:
+        group.setdefault((t.comp, t.span.copy), len(group))
+    out, runs = [], []
+    for t in sorted(tasks, key=lambda t: (group[t.comp, t.span.copy], t.span.start)):
+        p = out[-1] if out else None
+        if (p is not None and p.comp is t.comp and p.span.copy is t.span.copy
+                and p.span.start + p.span.count == t.span.start):
+            out[-1] = CopyTask(t.comp, p.index, HostSpan(p.span.copy, p.span.start,
+                                                         p.span.count + t.span.count))
+            runs[-1].append(t.index)
+        else:
+            out.append(t)
+            runs.append([t.index])
+    return [CopyTask(t.comp, torch.cat(r) if len(r) > 1 else t.index, t.span)
+            for t, r in zip(out, runs)]
 
 
 def units_of(values: torch.Tensor, per_unit: int) -> torch.Tensor:

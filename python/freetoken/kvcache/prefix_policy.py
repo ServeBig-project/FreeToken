@@ -23,10 +23,10 @@ class BaselinePolicy:
     def prune_after_commit(self, published, chain) -> list:
         return []
 
-    def eviction_order(self, candidates, *, tier: str, kind: str, required: int) -> list:
-        """``candidates``: evictable tree nodes of one ``kind`` (kv, window or state) on one
-        ``tier``; the manager evicts in this order until ``required`` units are freed."""
-        return sorted(candidates, key=lambda n: n.tic)
+    def eviction_key(self, node, kind: str):
+        """Lower goes first among evictable nodes of one ``kind`` (kv, window, state or host);
+        the manager keeps candidates in a heap by this key."""
+        return node.tic
 
 
 class ContinuationPolicy(BaselinePolicy):
@@ -45,13 +45,11 @@ class ContinuationPolicy(BaselinePolicy):
         Only replaced round ends go; this round's own states and fork/anchor states stay."""
         return [n for n in chain if n not in published and n.purpose in (INPUT, OUTPUT)]
 
-    def eviction_order(self, candidates, *, tier, kind, required):
-        if kind != "state":
-            return super().eviction_order(candidates, tier=tier, kind=kind, required=required)
-        # By the state's own last real reuse: a round's resume point stays fresh while the
+    def eviction_key(self, node, kind):
+        # A state goes by its own last real reuse: a round's resume point stays fresh while the
         # session keeps coming back to it, and an abandoned branch's end ages out. (A deeper
         # state is no sign of replacement: the next round usually forks right above it.)
-        return sorted(candidates, key=lambda n: n.state_tic)
+        return node.state_tic if kind == "state" else node.tic
 
 
 POLICIES = {"baseline": BaselinePolicy, "continuation": ContinuationPolicy}

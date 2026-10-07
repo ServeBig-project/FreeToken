@@ -69,7 +69,8 @@ class HostTier:
                     + (sum(units for _, units in plan.window) * self.comps["window"].unit_bytes()
                        if plan.window else 0)
                     + (self.comps["state"].unit_bytes() if plan.state else 0))
-            if need > self.store.budget - self.store.used + tree.host_freeable_bytes():
+            free = self.store.budget - self.store.used
+            if need > free and need > free + tree.host_freeable_bytes():
                 tree.abandon(plan)  # cannot fit even after evicting: keep older host data
                 continue
             kv = [self._copies(self.comps["paged"], units) for _, units in plan.kv]
@@ -106,7 +107,7 @@ class HostTier:
         for comp in comps:
             copy = HostCopy(self.store, comp, units)
             if copy.where is None:
-                self.m.tree.evict_host(copy.nbytes, lambda n=copy.nbytes: self.store.fits(n))
+                self.m.tree.evict_host(lambda n=copy.nbytes: self.store.fits(n))
                 self.m._release(self.m.tree.take_released())
                 copy = HostCopy(self.store, comp, units)
             if copy.where is None:
@@ -182,7 +183,7 @@ class HostTier:
             "scope": "worker",
             "tp_size": 1 if self.m.tp_group is None else self.m.tp_group.size(),
             "host_budget_bytes": self.store.budget,
-            "host_allocated_bytes": self.store.allocated,
+            "host_allocated_bytes": self.store.budget,
             "host_used_bytes": self.store.used,
             "host_inflight_bytes": t.inflight_bytes,
             "transfer_device_bytes": t.device_bytes,

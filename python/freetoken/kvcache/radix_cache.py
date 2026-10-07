@@ -21,6 +21,8 @@ them. Locks protect GPU data; ``busy`` counts the copies reading or filling a no
 """
 from __future__ import annotations
 
+import heapq
+import itertools
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, NamedTuple, Tuple
 
@@ -372,10 +374,9 @@ class RadixCache:
                     and (n.host is not None or n.is_leaf())
                     and all(c.value is None for c in n.children.values()))
 
-        order = self.policy.eviction_order(
-            [n for n in self._nodes() if eligible(n)], tier="gpu", kind="kv", required=num_tokens)
-        while freed < num_tokens and order:
-            node = order.pop(0)
+        heap, push = self._queue([n for n in self._nodes() if eligible(n)], "kv")
+        while freed < num_tokens and heap:
+            node = heapq.heappop(heap)[2]
             if not (self._attached(node) and eligible(node)):
                 continue
             freed += node.length
@@ -387,11 +388,10 @@ class RadixCache:
                 survivor, cascaded = self._reclaim_dead(node.parent, out)
             freed += cascaded
             # The nearest node this exposed (an offloaded node stays, so look past it) competes
-            # right away, as an LRU heap would have it.
+            # right away.
             exposed = survivor.parent if survivor is node else survivor
             if not exposed.is_root() and eligible(exposed):
-                order = self.policy.eviction_order(
-                    order + [exposed], tier="gpu", kind="kv", required=num_tokens - freed)
+                push(exposed)
         return self._evicted(out)
 
     def evict_window(self, num_tokens: int) -> Evicted:
@@ -411,7 +411,7 @@ class RadixCache:
         out = Evicted([], [], [])
         cands = [n for n in self._nodes() if eligible(n) and not n.busy]
         freed = 0
-        for node in self.policy.eviction_order(cands, tier="gpu", kind=kind, required=amount):
+        for node in sorted(cands, key=lambda n: self.policy.eviction_key(n, kind)):
             if freed >= amount:
                 break
             if not (self._attached(node) and eligible(node)):
@@ -422,32 +422,30 @@ class RadixCache:
         return self._evicted(out)
 
     # ---------------------------------------------------------------- host tier
-    def evict_host(self, nbytes: int, enough: Callable[[], bool]) -> None:
+    def evict_host(self, enough: Callable[[], bool]) -> None:
         """Release host copies in the policy's order until ``enough()`` (the host store can
         place the request: shared copies free memory only with their last span). Paged host
         KV goes only where the GPU still has it or no descendant needs it."""
-        while not enough():
-            # A removed host-only leaf can expose its parent: collect again each round.
-            cands = [n for n in self._nodes() if not n.busy and n.ref == 0
-                     and (n.host or n.host_window or n.host_state)
-                     and (n.value is not None or n.is_leaf() or n.host_window or n.host_state)]
-            if not cands:
-                return
-            for node in self.policy.eviction_order(cands, tier="host", kind="host",
-                                                   required=nbytes):
-                if enough():
-                    return
-                if not self._attached(node) or node.busy or node.ref:
-                    continue
-                node.host_window = _release(node.host_window)
-                self._drop_host_state(node)
-                if node.host is not None and node.value is not None:
-                    node.host = _release(node.host)
-                elif node.host is not None and node.is_leaf():
-                    self._remove(node, self._released)
-                    self._reclaim_dead(node.parent, self._released)
-                else:
-                    self._reclaim_dead(node, self._released)
+        def eligible(n: TreeNode) -> bool:
+            return (not n.busy and n.ref == 0 and (n.host or n.host_window or n.host_state)
+                    and (n.value is not None or n.is_leaf() or n.host_window or n.host_state))
+
+        heap, push = self._queue([n for n in self._nodes() if eligible(n)], "host")
+        while heap and not enough():
+            node = heapq.heappop(heap)[2]
+            if not (self._attached(node) and eligible(node)):
+                continue
+            node.host_window = _release(node.host_window)
+            self._drop_host_state(node)
+            if node.host is not None and node.value is not None:
+                node.host = _release(node.host)
+                continue
+            if node.host is not None and node.is_leaf():
+                self._remove(node, self._released)
+                node = node.parent
+            survivor, _ = self._reclaim_dead(node, self._released)
+            if not survivor.is_root() and eligible(survivor):  # a removal exposed its parent
+                push(survivor)
 
     def plan_restore(self, node: TreeNode) -> CopyPlan | None:
         """Lock ``node``'s path and list what comes back from the host to make it ready; None
@@ -799,6 +797,14 @@ class RadixCache:
         sign = 1 if to_protected else -1
         self.protected[kind] += sign * amount
         self.evictable[kind] -= sign * amount
+
+    def _queue(self, nodes: List[TreeNode], kind: str):
+        """Eviction candidates as a heap by the policy's key, and a function adding one."""
+        seq = itertools.count()  # ties keep tree order
+        entry = lambda n: (self.policy.eviction_key(n, kind), next(seq), n)
+        heap = [entry(n) for n in nodes]
+        heapq.heapify(heap)
+        return heap, lambda n: heapq.heappush(heap, entry(n))
 
     def _nodes(self) -> List[TreeNode]:
         out, stack = [], list(self.roots.values())
