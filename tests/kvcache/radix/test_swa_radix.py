@@ -133,8 +133,9 @@ def test_insert_keeps_a_still_out_of_window_node(s):
 
 def test_insert_refuses_to_revive_a_locked_window_freed_node(s):
     """A locked reader still gathers the node's CURRENT locations through its own row, so reviving
-    under a lock would hand live KV to the next allocation. The node must keep its locations and
-    only become revivable once the lock clears."""
+    under a lock would hand live KV to the next allocation. The node keeps its locations; the
+    caller's window there is still live, so insert stops at the node and the caller keeps its own
+    locations from there on (nothing returned as duplicates). Reviving works once the lock clears."""
     P = s.P
     n = wp(s) + 2
     ids, pages = chain(s, n)
@@ -142,16 +143,44 @@ def test_insert_refuses_to_revive_a_locked_window_freed_node(s):
     assert sorted(s.evict_window(10 ** 6).window) == sorted(pages[0] + pages[1])
     s.check()
 
-    _, freed, _, fresh, _ = s.insert(ids, window_freed_before=0)
-    s.check()
+    prefix_len, freed, taken, fresh, _ = s.insert(ids, window_freed_before=0)
+    s.check()                                # caller-held locations are neither leaked nor freed
 
-    assert set(freed) == set(fresh)          # ONLY the incoming duplicates
-    assert s.match(ids).kv_indices.tolist()[: 2 * P] == pages[0] + pages[1]
+    assert s.last_end is None and not taken  # early stop at N0
+    assert prefix_len == 0 and freed == []
+    assert s.held == fresh                   # the caller still owns every location it passed
+    assert s.match(ids).kv_indices.tolist() == flat(*pages)
+    s.release_held()                         # the caller frees them itself, exactly once
+    s.check()
 
     s.unlock(held)
     s.insert(ids, window_freed_before=0)
     s.check()
+    assert s.last_end is not None
     assert win(s)["evictable"] == n * P      # lock cleared -> reviving is safe again
+
+
+def test_insert_into_a_locked_window_freed_node_the_caller_also_freed_returns_duplicates(s):
+    """The caller's window is freed over the locked node's whole span too -> nothing to revive and
+    nothing the caller still reads there: the node keeps its locations and the caller's copy comes
+    back as duplicates."""
+    P = s.P
+    n = wp(s) + 2
+    ids, pages = chain(s, n)
+    held = s.lock(ids)
+    assert sorted(s.evict_window(10 ** 6).window) == sorted(pages[0] + pages[1])
+
+    prefix_len, freed, _, fresh, _ = s.insert(ids, window_freed_before=2 * P)
+    s.check()
+
+    assert s.last_end is not None and s.held == []
+    assert prefix_len == n * P
+    assert set(freed) == set(fresh)          # every incoming location is a duplicate
+    assert s.match(ids).kv_indices.tolist() == flat(*pages)
+    assert win(s)["evictable"] + win(s)["protected"] == (n - 2) * P
+
+    s.unlock(held)
+    s.check()
 
 
 def test_insert_within_the_reused_prefix_frees_nothing(s):

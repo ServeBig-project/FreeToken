@@ -72,6 +72,8 @@ class Session:
         self.kv = Ledger(1_000_000)
         self.states = Ledger(9_000_000)
         self.window_freed: List[int] = []
+        self.held: List[int] = []      # locations an early-stopped insert left with the caller
+        self.last_end = None
 
     # -- ops ------------------------------------------------------------------
     def match(self, ids: Sequence[int]):
@@ -79,20 +81,28 @@ class Session:
 
     def insert(self, ids: Sequence[int], slots: Optional[Sequence[int]] = None, *,
                update_after: int = 0, window_freed_before: int = 0):
-        """Returns ``(prefix_len, freed, state_taken, slots, state)``. Everything the caller keeps
-        ownership of -- the freed duplicates, the ragged tail, an untaken state -- goes back to the
-        ledgers."""
+        """Returns ``(prefix_len, freed, state_taken, slots, state)``. Everything the caller gives
+        up -- the freed duplicates, the ragged tail, an untaken state -- goes back to the ledgers.
+        An early stop (end node ``None``) leaves the full pages from ``prefix_len`` on with the
+        caller: they go to ``held`` until ``release_held``."""
         if slots is None:
             slots = self.kv.take(len(ids))
         state = self.states.take(1)[0] if self.has_state else None
-        prefix_len, freed, taken, _ = self.tree.insert(
+        prefix_len, freed, taken, self.last_end = self.tree.insert(
             ids_tensor(ids), slots_tensor(slots), state=state, update_after=update_after,
             window_freed_before=window_freed_before)
         freed = freed.tolist()
-        self.kv.release(freed + list(slots[(len(ids) // self.P) * self.P:]))
+        full = (len(ids) // self.P) * self.P
+        if self.last_end is None:
+            self.held.extend(slots[int(prefix_len): full])
+        self.kv.release(freed + list(slots[full:]))
         if state is not None and not taken:
             self.states.release([state])
         return int(prefix_len), freed, bool(taken), list(slots), state
+
+    def release_held(self) -> None:
+        self.kv.release(self.held)
+        self.held = []
 
     def lock(self, ids: Sequence[int]):
         h = self.match(ids)
@@ -144,7 +154,7 @@ class Session:
 
     def check(self) -> None:
         self.tree.check_integrity()
-        kv_live = len(self.kv.in_use())
+        kv_live = len(self.kv.in_use() - set(self.held))
         assert self.tree.kv_tokens == kv_live, (self.tree.kv_tokens, kv_live)
         assert self.evictable("kv") + self.protected("kv") == kv_live
         if self.has_state:
