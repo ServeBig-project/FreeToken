@@ -79,6 +79,8 @@ ft serve --model ... --gpu GPU-9e8d7c6b  # the same card by UUID (a unique prefi
 | `--num-pages` / `--num-tokens` | auto | KV capacity override in pages / tokens (mutually exclusive; auto sizes from VRAM left after weights and MoE cache) |
 | `--page-size` | 1 | KV page size; DSV4 forces 128, the TRTLLM backend needs 16/32/64, SWA models require 1 |
 | `--cache-type` | radix | `radix` (prefix reuse; SWA/GDN-aware variants picked automatically) or `naive` |
+| `--prefix-cache-host-gib` | 0 | Pinned host memory (GiB per engine worker, allocated at startup) for prefix-cache data evicted from the GPU and restored on reuse; 0 disables. See [cold-prefix-cache-public-contract.md](cold-prefix-cache-public-contract.md) |
+| `--prefix-cache-policy` | baseline | Which prefix positions keep a recurrent state: `baseline` (one near each prompt end) or `continuation` (round ends and fork points, replaced round ends pruned) |
 | `--attention-backend`, `--attn` | auto | `trtllm`/`fi`/`fa`/`triton`/`dsv4_sparse`/`dsa`; `prefill,decode` pair allowed; auto picks per model + GPU. `joint` and `layered-pipeline` currently require Triton for prefill |
 
 ### MoE offload
