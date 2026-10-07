@@ -266,6 +266,9 @@ class Scheduler(SchedulerIOMixin):
         torch.cuda.synchronize(self.device)
         if self.config.tp_info.size > 1:
             self.sync_all_ranks()
+        # Every prefix-cache copy finished with the sync above; publish them and return what they
+        # freed while the old pools still own those slots.
+        self.cache_manager.poll()
         # The cached decode metadata can retain graph-capture tensor views. Drop it before
         # the idle rebuild destroys and recreates those buffers.
         self._resident_decode_input = None
