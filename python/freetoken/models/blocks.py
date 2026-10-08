@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
@@ -39,6 +39,8 @@ class LayerGroupState:
     hidden: torch.Tensor
     residual: torch.Tensor | None
     next_layer: int = 0
+    # DFlash context inputs recorded at target layers, until the last layer projects them.
+    draft_features: dict[int, torch.Tensor] = field(default_factory=dict)
 
 
 class ResidualLayerGroupCausalLM(BaseLLMModel):
@@ -76,6 +78,8 @@ class ResidualLayerGroupCausalLM(BaseLLMModel):
             hidden=torch.cat((decode.hidden, prefill.hidden), dim=0),
             residual=residual,
             next_layer=decode.next_layer,
+            draft_features={layer: torch.cat((value, prefill.draft_features[layer]), dim=0)
+                            for layer, value in decode.draft_features.items()},
         )
 
     @staticmethod
@@ -92,42 +96,48 @@ class ResidualLayerGroupCausalLM(BaseLLMModel):
                 state.hidden[:decode_rows],
                 decode_residual,
                 state.next_layer,
+                {layer: value[:decode_rows] for layer, value in state.draft_features.items()},
             ),
             LayerGroupState(
                 state.hidden[decode_rows:],
                 prefill_residual,
                 state.next_layer,
+                {layer: value[decode_rows:] for layer, value in state.draft_features.items()},
             ),
         )
 
     @staticmethod
     def create_layer_range_graph_inputs(
         seed: LayerGroupState,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> LayerGroupState:
         if seed.residual is None:
             raise RuntimeError(
                 "layer-range graphs require residual state after the first stage"
             )
+        from freetoken.core import get_global_ctx
+
+        context = get_global_ctx().draft_context
         hidden = torch.zeros_like(seed.hidden)
-        residual = torch.zeros_like(seed.residual)
-        return hidden, residual
+        features = context.feature_buffers(hidden) if context is not None else {}
+        return LayerGroupState(hidden, torch.zeros_like(seed.residual), draft_features=features)
 
     @staticmethod
     def make_layer_range_graph_state(
-        inputs: tuple[torch.Tensor, torch.Tensor],
+        inputs: LayerGroupState,
         start_layer: int,
         rows: int,
     ) -> LayerGroupState:
-        hidden, residual = inputs
         return LayerGroupState(
-            hidden[:rows],
-            residual[:rows],
+            inputs.hidden[:rows],
+            inputs.residual[:rows],
             start_layer,
+            {layer: value[:rows] for layer, value in inputs.draft_features.items()
+             if layer < start_layer},
         )
 
     @staticmethod
     def stage_layer_range_graph_inputs(
-        inputs: tuple[torch.Tensor, torch.Tensor],
+        inputs: LayerGroupState,
         state: LayerGroupState,
         rows: int,
         start_layer: int,
@@ -136,9 +146,10 @@ class ResidualLayerGroupCausalLM(BaseLLMModel):
             raise ValueError(
                 f"layer-range replay expected residual state at layer {start_layer}"
             )
-        hidden, residual = inputs
-        hidden[:rows].copy_(state.hidden)
-        residual[:rows].copy_(state.residual)
+        inputs.hidden[:rows].copy_(state.hidden)
+        inputs.residual[:rows].copy_(state.residual)
+        for layer, value in state.draft_features.items():
+            inputs.draft_features[layer][:rows].copy_(value)
 
     @staticmethod
     def finish_layer_range_graph_replay(
@@ -154,6 +165,8 @@ class ResidualLayerGroupCausalLM(BaseLLMModel):
                 else None
             ),
             end_layer,
+            # The next range replay reuses this graph's pool and staging buffers.
+            {layer: value[:rows].clone() for layer, value in captured.draft_features.items()},
         )
 
     def advance_layer_group_prefill(
@@ -166,11 +179,19 @@ class ResidualLayerGroupCausalLM(BaseLLMModel):
                 f"invalid layer-group range [{state.next_layer}, {end_layer}) for "
                 f"{self.layer_group_num_layers} layers"
             )
+        from freetoken.core import get_global_ctx
+
+        context = get_global_ctx().draft_context
         for layer_id in range(state.next_layer, end_layer):
             state.hidden, state.residual = self.model.layers.op_list[layer_id].forward(
                 state.hidden, state.residual
             )
+            if context is not None:
+                context.record(layer_id, state.hidden, state.residual, state.draft_features)
         state.next_layer = end_layer
+        if context is not None and end_layer == self.layer_group_num_layers:
+            context.flush(get_global_ctx().batch, state.draft_features)
+            state.draft_features = {}
         return state
 
     def finish_layer_group_prefill(

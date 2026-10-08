@@ -20,6 +20,8 @@ class EngineConfig:
     dtype: torch.dtype
     max_running_req: int = 4
     speculative_num_steps: int = 0
+    # Where layered batching may run SD: outside prefill waves, in both, or only inside.
+    speculative_phase: str = "outwave"
     speculative_draft_model_path: str | None = None
     speculative_draft_experts: int = 3
     speculative_draft_residency: str = "off"
@@ -144,12 +146,21 @@ class EngineConfig:
                     or model.expert_quant != "none" or self.nowag_expert_path
                     or model.moe_weight_format not in (None, "bf16")):
                 raise ValueError("new SD controls require BF16 experts with --moe-backend offload")
+        if self.speculative_phase not in ("outwave", "all", "inwave"):
+            raise ValueError("--speculative-phase must be outwave, all or inwave")
         if not self.speculative_num_steps:
             return
         if self.tp_info.size != 1:
             raise ValueError("self-speculative decoding requires a single GPU (tp_size=1)")
-        if getattr(self, "batching_policy", "legacy") != "legacy":
-            raise ValueError("self-speculative decoding requires --batching-policy legacy")
+        policy = getattr(self, "batching_policy", "legacy")
+        if policy not in ("legacy", "layered-pipeline"):
+            raise ValueError("speculative decoding requires --batching-policy legacy or layered-pipeline")
+        if policy == "legacy" and self.speculative_phase != "outwave":
+            raise ValueError(f"--speculative-phase {self.speculative_phase} requires layered-pipeline batching")
+        if policy != "legacy" and (
+                self.speculative_draft_residency != "off" or self.speculative_adaptive_cost
+                or self.speculative_draft_load_missing or self.speculative_verify_prefetch):
+            raise ValueError("SD residency, cost, missing-expert loading and prefetch require legacy batching")
         from freetoken.attention.base import AttnType
         from freetoken.moe.routing import ROUTERS
 
@@ -196,7 +207,7 @@ class EngineConfig:
             and self.model_config.moe_weight_format in (None, "bf16")
             and graph_attention and self.moe_backend in ("offload", "hybrid")
             and self.page_size == 1 and self.tp_info.size == 1
-            and getattr(self, "batching_policy", "legacy") == "legacy"
+            and getattr(self, "batching_policy", "legacy") in ("legacy", "layered-pipeline")
             and self.cuda_graph_max_bs != 0 and self.cuda_graph_bs != []
         )
 

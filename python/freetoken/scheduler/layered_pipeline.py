@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from freetoken.engine.layered_execution import PrefillExecutionSession
 
     from .decode import DecodeManager
+    from .speculative import SpeculativeDecoder, SpeculativeRound
     from .table import TableManager
 
 
@@ -68,6 +69,7 @@ class LayeredPipelineExecutor:
         open_prefill_execution: Callable[[Batch], PrefillExecutionSession | None],
         report_prompt_admissions: Callable[[Batch], None],
         free_req_resources: Callable[[Req], None],
+        speculative: SpeculativeDecoder | None = None,
     ) -> None:
         self._engine = engine
         self._prefill_manager = prefill_manager
@@ -80,8 +82,12 @@ class LayeredPipelineExecutor:
         self._open_prefill_execution = open_prefill_execution
         self._report_prompt_admissions = report_prompt_admissions
         self._free_req_resources = free_req_resources
+        self._speculative = speculative
         self._execution = engine.layered_execution_adapter
-        self._memory = PrefillMemoryBudget(engine.device)
+        self._memory = PrefillMemoryBudget(
+            engine.device,
+            engine.dflash.feature_bytes_per_token if engine.dflash is not None else 0,
+        )
         self._wave: _LayeredPipelineWave | None = None
         self._staged_admission: ResidentWaveAdmission | None = None
         self._decode_input: ForwardInput | None = None
@@ -278,13 +284,26 @@ class LayeredPipelineExecutor:
         if group_input is None or prefill_input is None:
             raise RuntimeError("layered pipeline iteration was not prepared")
 
+        decode_input = self._decode_input
+        round_ = None
+        if decode_input is not None and self._speculative is not None:
+            round_ = self._speculative.begin_inwave(decode_input.batch)
+        if round_ is not None:
+            # Verification rows run as their own batch beside the prefill group.
+            self._decode_input = None
+            group_input = prefill_input
         rows = sum(req.extend_len for req in prefill_input.batch.prefill_reqs)
         first_stage = wave.current_stage == 0
         memory_before = self._memory.start()
         stage = wave.cache_session.begin(
             wave.current_stage,
-            has_decode=self._decode_input is not None,
+            has_decode=decode_input is not None,
         )
+        verify_state = None
+        if round_ is not None and stage.start_layer:
+            verify_state = self._engine.begin_layer_group_decode(
+                round_.verify, stage.start_layer
+            )
         run = self._execution.begin_group(
             group_input,
             prefill_input,
@@ -293,12 +312,16 @@ class LayeredPipelineExecutor:
             stage.start_layer,
         )
         if (
-            self._decode_input is not None
+            decode_input is not None
             and self._execution.group_finishes_after_current_tile(wave.state)
             and wave.current_stage + 1 < wave.cache_session.stage_count
         ):
             wave.cache_session.hint_next(wave.current_stage + 1)
         try:
+            if round_ is not None:
+                verify_state = self._engine.advance_layer_group_decode(
+                    round_.verify, verify_state, stage.end_layer
+                )
             result = self._execution.advance_group(
                 group_input,
                 prefill_input,
@@ -334,6 +357,12 @@ class LayeredPipelineExecutor:
             result.decode_state,
             stage.end_layer,
         )
+        if round_ is not None:
+            outputs.append(
+                self._finish_inwave_round(
+                    wave, decode_input, round_, verify_state, stage.end_layer
+                )
+            )
         self._memory.record(memory_before, rows, first_stage=first_stage)
         self._decode_input = None
         self._group_input = None
@@ -371,6 +400,24 @@ class LayeredPipelineExecutor:
         )
         wave.decode_iterations += 1
         return [(decode_input, output)]
+
+    def _finish_inwave_round(
+        self,
+        wave: _LayeredPipelineWave,
+        decode_input: ForwardInput,
+        round_: SpeculativeRound,
+        verify_state: object,
+        resident_group_end: int,
+    ) -> ForwardData:
+        if resident_group_end < self._execution.num_stages:
+            verify_state = self._engine.advance_layer_group_decode(
+                round_.verify, verify_state, self._execution.num_stages
+            )
+        logits = self._engine.finish_layer_group_logits(round_.verify, verify_state)
+        output = self._speculative.finish(round_, logits, "inwave")
+        self._decode_manager.filter_reqs(decode_input.batch.reqs)
+        wave.decode_iterations += 1
+        return decode_input, output
 
     def _finish_wave(self, wave: _LayeredPipelineWave) -> list[ForwardData]:
         state = wave.state

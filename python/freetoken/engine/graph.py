@@ -395,6 +395,7 @@ class GraphRunner:
 
     def stats_snapshot(self) -> dict:
         result = {"enabled": bool(self.max_graph_bs), "target_decode": 0, "draft": 0, "verify": 0,
+                  "verify_range": 0,
                   "capture_seconds": self.capture_seconds, "extra_reserved_bytes": self.extra_reserved_bytes,
                   "replay_shapes": []}
         for (phase, batch_size, query_tokens, physical_query_tokens), count in sorted(self.replay_counts.items()):
@@ -405,6 +406,8 @@ class GraphRunner:
         return result
 
     def has_layer_range_graphs_for(self, batch: Batch) -> bool:
+        if batch.is_speculative_verify:
+            return self.speculative is not None and self.speculative.has_ranges(batch)
         return (
             batch.is_decode_only
             and batch.size == batch.padded_size
@@ -434,6 +437,8 @@ class GraphRunner:
         )
 
     def prepare_layer_range_replay(self, batch: Batch) -> None:
+        if batch.is_speculative_verify:
+            return self.speculative.prepare_ranges(batch)
         if not self.has_layer_range_graphs_for(batch):
             raise ValueError("batch is not eligible for a layer-range graph")
         if batch is self._prepared_layer_range_batch:
@@ -449,6 +454,11 @@ class GraphRunner:
         start_layer: int,
         end_layer: int,
     ) -> object:
+        if batch.is_speculative_verify:
+            tokens = batch.positions.numel()
+            shape = ("verify_range", batch.size, tokens, tokens)
+            self.replay_counts[shape] = self.replay_counts.get(shape, 0) + 1
+            return self.speculative.replay_range(batch, state, start_layer, end_layer)
         capture = self.layer_range_graph_map[(start_layer, end_layer, batch.size)]
         adapter = self.layered_execution_adapter
         if adapter is None:

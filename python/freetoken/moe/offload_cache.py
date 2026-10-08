@@ -1969,6 +1969,21 @@ class OffloadMoeCache:
                 self._resident_group_ready_events[buffer_id]
             )
 
+    @property
+    def captured_drafts_safe(self) -> bool:
+        """Whether a captured self-draft may replay now.
+
+        Captured offload drafts admit experts, which would unpin an open resident
+        group; its eager path maps the group's layers instead. Hybrid drafts only
+        look slots up.
+        """
+        return self.decode_target == "hybrid" or self._resident_group_range is None
+
+    def wait_resident_copies(self) -> None:
+        """Order direct slot reads after an open resident group's H2D copies."""
+        if self._resident_group_range is not None and self.prefill_copy_stream is not None:
+            torch.cuda.current_stream(self.device).wait_stream(self.prefill_copy_stream)
+
     def has_resident_prefill_layer(self, layer_id: int) -> bool:
         """Whether joint currently protects ``layer_id`` in the canonical pool."""
         if not self.prefill_group_size or self._resident_group_range is None:

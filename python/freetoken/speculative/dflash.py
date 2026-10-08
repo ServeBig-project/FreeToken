@@ -21,11 +21,18 @@ class DFlashRuntime:
         limit = engine.config.speculative_num_steps
         self.widths = sorted({1, limit, *(n for n in (2, 4, 8) if n <= limit)})
 
-    def record(self, layer, hidden, residual):
-        self.context.record(layer, hidden, residual)
+    @property
+    def feature_bytes_per_token(self):
+        return len(self.model.target_layer_ids) * self.model.hidden_size * self.engine.dtype.itemsize
 
-    def flush(self, batch):
-        self.context.flush(batch)
+    def feature_buffers(self, hidden):
+        return {layer: torch.zeros_like(hidden) for layer in self.model.target_layer_ids}
+
+    def record(self, layer, hidden, residual, features=None):
+        self.context.record(layer, hidden, residual, features)
+
+    def flush(self, batch, features=None):
+        self.context.flush(batch, features)
 
     def capture_stores(self):
         return [(self.context.kv[0, layer], self.context.kv[1, layer])

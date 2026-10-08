@@ -1157,8 +1157,8 @@ class Engine:
         return self._advance_layer_group_decode(batch, state, end_layer)
 
     def _advance_layer_group_decode(self, batch: Batch, state, end_layer: int):
-        if not batch.is_decode_only:
-            raise ValueError("layer-group decode execution requires a decode-only batch")
+        if not batch.is_decode_only and not batch.is_speculative_verify:
+            raise ValueError("layer-group decode execution requires decode or verify rows")
         start_layer = (
             0 if state is None else self.model.layer_group_state_layer(state)
         )
@@ -1218,6 +1218,14 @@ class Engine:
                 raise RuntimeError("decode layer-range walker made no progress")
             current_layer = next_layer
         return state
+
+    def finish_layer_group_logits(self, batch: Batch, state) -> torch.Tensor:
+        """Logits for every row of a state that ran all layers (SD verification)."""
+        with self.ctx.forward_batch(batch):
+            logits = self.model.finish_layer_group_prefill(state)
+        if self.cpu_moe_executor is not None:
+            self.cpu_moe_executor.raise_if_unhealthy()
+        return logits
 
     def finish_layer_group_prefill(
         self,

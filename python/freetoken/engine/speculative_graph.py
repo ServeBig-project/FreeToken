@@ -4,7 +4,7 @@ from copy import copy
 import torch
 
 from freetoken.core import Batch, get_global_ctx
-from .graph import GraphCaptureBuffer
+from .graph import GraphCaptureBuffer, _LayerRangeCapture
 from .model_forward import forward_model
 
 
@@ -15,6 +15,10 @@ class SpeculativeGraphs:
         self.router = (config.speculative_draft_residency == "router"
                        and not config.speculative_draft_load_missing)
         self.graphs = {}
+        # Full-window verify rows over the decode layer ranges, for rounds beside a wave.
+        self.ranges: dict[tuple[int, int, int], _LayerRangeCapture] = {}
+        self.range_inputs = None
+        self._prepared_range_batch = None
         self.verify_sizes: dict[int, list[int]] = {}  # captured verify token counts per batch size
         self.attention = runner.attn_backend.create_speculative_graphs(max_seq_len)
         ctx = get_global_ctx()
@@ -74,6 +78,8 @@ class SpeculativeGraphs:
                         lengths.append(1 + extra)
                         remaining -= extra
                     self._capture(model, "verify", lengths)
+            if config.speculative_phase != "outwave" and runner.layer_range_group_end_candidates:
+                self._capture_ranges(model, runner.graph_bs_list)
         finally:
             for tensor, original in zip(scratch, saved, strict=True):
                 tensor.copy_(original)
@@ -81,6 +87,70 @@ class SpeculativeGraphs:
             torch.cuda.synchronize(runner.device)
 
     def _capture(self, model, phase, lengths):
+        batch = self._prepare_capture(phase, lengths)
+        tokens = sum(lengths)
+        graph = torch.cuda.CUDAGraph()
+        with get_global_ctx().forward_batch(batch):
+            # Admission reads GPU state on replay, so warmups can retain expert residency.
+            self.buffer.logits[:tokens] = forward_model(model)
+            with torch.cuda.graph(graph, pool=self.runner.pool, stream=self.runner.stream):
+                self.buffer.logits[:tokens] = forward_model(model)
+        self.graphs[(phase, len(lengths), tokens)] = graph
+
+    def _capture_ranges(self, model, batch_sizes):
+        runner = self.runner
+        adapter = runner.layered_execution_adapter
+        groups = [(start, end) for start, ends in sorted(runner.layer_range_group_end_candidates.items())
+                  for end in ends]
+        for bs in sorted(batch_sizes, reverse=True):
+            tokens = bs * self.query_width
+            if tokens > self.max_tokens:
+                continue
+            batch = self._prepare_capture("verify", [self.query_width] * bs)
+            pool = None  # one pool per size, as for decode ranges
+            with get_global_ctx().forward_batch(batch):
+                if self.range_inputs is None:
+                    seed = model.begin_layer_group_prefill(batch.input_ids)
+                    seed = model.advance_layer_group_prefill(seed, groups[0][1])
+                    self.range_inputs = adapter.create_range_graph_inputs(seed)
+                    del seed
+                for start, end in groups:
+                    def run():
+                        state = (model.begin_layer_group_prefill(batch.input_ids) if start == 0 else
+                                 adapter.make_range_graph_state(self.range_inputs, start, tokens))
+                        return model.advance_layer_group_prefill(state, end)
+
+                    run()
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, pool=pool, stream=runner.stream):
+                        captured = run()
+                    runner._reset_moe_offload_cache()
+                    pool = pool or graph.pool()
+                    self.ranges[start, end, bs] = _LayerRangeCapture(graph, captured)
+
+    def has_ranges(self, batch) -> bool:
+        tokens = batch.positions.numel()
+        return tokens == batch.size * self.query_width and any(
+            key[2] == batch.size for key in self.ranges)
+
+    def prepare_ranges(self, batch) -> None:
+        if batch is self._prepared_range_batch:
+            return
+        # An eager stage of this batch may have planned its verify path already.
+        batch.attn_metadata.prefill.initialized = False
+        self._stage(batch, batch.positions.numel())
+        self._prepared_range_batch = batch
+
+    def replay_range(self, batch, state, start, end):
+        adapter = self.runner.layered_execution_adapter
+        tokens = batch.positions.numel()
+        capture = self.ranges[start, end, batch.size]
+        if start:
+            adapter.stage_range_graph_inputs(self.range_inputs, state, tokens, start)
+        capture.graph.replay()
+        return adapter.finish_range_graph_replay(capture.output, tokens, end)
+
+    def _prepare_capture(self, phase, lengths):
         runner = self.runner
         tokens, bs = sum(lengths), len(lengths)
         table = torch.zeros(bs, max(lengths), dtype=torch.int32, device=runner.device)
@@ -109,13 +179,7 @@ class SpeculativeGraphs:
         if self.state is not None:
             self.state.prepare_capture(batch, lengths, tokens)
         self.attention.prepare_capture(batch, table)
-        graph = torch.cuda.CUDAGraph()
-        with get_global_ctx().forward_batch(batch):
-            # Admission reads GPU state on replay, so warmups can retain expert residency.
-            self.buffer.logits[:tokens] = forward_model(model)
-            with torch.cuda.graph(graph, pool=runner.pool, stream=runner.stream):
-                self.buffer.logits[:tokens] = forward_model(model)
-        self.graphs[(phase, bs, tokens)] = graph
+        return batch
 
     def verify_tokens(self, batch_size, tokens):
         """Physical size a verify batch of ``tokens`` queries replays at, shared by replay and
@@ -130,24 +194,32 @@ class SpeculativeGraphs:
         return ("verify" if batch.is_speculative_verify else "draft", batch.size, tokens)
 
     def can_replay(self, batch) -> bool:
-        if batch.draft_experts is not None and batch.draft_experts != self.top_k:
+        if batch.draft_experts is not None and (
+                batch.draft_experts != self.top_k
+                or not self.runner.moe_offload_cache.captured_drafts_safe):
             return False
         return self._key(batch) in self.graphs
 
     def replay(self, batch):
         key = self._key(batch)
+        self._stage(batch, key[2])
+        self.graphs[key].replay()
+        return self.buffer.logits[:batch.positions.numel()]
+
+    def _stage(self, batch, physical):
+        """Copy a real batch into the captured inputs, padding to ``physical`` rows."""
         real = batch.positions.numel()
         if batch.is_speculative_verify and real > self.exact_tokens:
             self.real_tokens.fill_(real)
-            if real < key[2]:
-                self.buffer.input_ids[real:key[2]].zero_()
-                self.buffer.positions[real:key[2]].zero_()
-                self.buffer.out_loc[real:key[2]] = self.dummy_slot
+            if real < physical:
+                self.buffer.input_ids[real:physical].zero_()
+                self.buffer.positions[real:physical].zero_()
+                self.buffer.out_loc[real:physical] = self.dummy_slot
         self.buffer.copy_from(batch)
-        if batch.draft_experts is not None and self.available is not None:
-            self.available.copy_(batch.draft_available_experts)
+        if batch.draft_experts is not None:
+            self.runner.moe_offload_cache.wait_resident_copies()
+            if self.available is not None:
+                self.available.copy_(batch.draft_available_experts)
         if self.state is not None:
-            self.state.prepare_replay(batch, key[2])
+            self.state.prepare_replay(batch, physical)
         self.attention.prepare_replay(batch)
-        self.graphs[key].replay()
-        return self.buffer.logits[:real]

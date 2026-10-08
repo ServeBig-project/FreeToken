@@ -563,6 +563,21 @@ class FlashInferBackend(BaseAttnBackend):
         metadata.decode.wrapper = self.graph_wrappers[bs]
         self._ensure_metadata_plans(metadata)
 
+    @property
+    def supports_layer_range_graphs(self) -> bool:
+        return True
+
+    def prepare_for_layer_range_capture(self, batch: Batch) -> None:
+        # Reuse the solo capture's wrapper for this size rather than a second plan store.
+        self.prepare_metadata(batch)
+        self.prepare_for_replay(batch)
+
+    def prepare_for_layer_range_replay(self, batch: Batch) -> None:
+        # An eager stage may already have planned this batch's decode path. Replan it
+        # into the graph wrapper; the merged resident stage shares that decode path.
+        batch.attn_metadata.decode.initialized = False
+        self.prepare_for_replay(batch)
+
     def create_speculative_graphs(self, max_seq_len: int):
         return FISpeculativeGraphs(self, max_seq_len)
 

@@ -255,6 +255,12 @@ def parse_args(
         help="Maximum draft tokens per speculative round; 0 disables speculation (default).",
     )
     parser.add_argument(
+        "--speculative-phase", choices=["outwave", "all", "inwave"],
+        default=ServerArgs.speculative_phase,
+        help="With layered-pipeline batching, where SD runs: outside prefill waves "
+             "(default; AR inside them), in both, or only inside them.",
+    )
+    parser.add_argument(
         "--speculative-draft-model-path", type=str,
         default=ServerArgs.speculative_draft_model_path,
         help="DFlash checkpoint directory or Hugging Face model; omitted uses self drafting.",

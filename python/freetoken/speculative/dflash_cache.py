@@ -57,13 +57,18 @@ class DFlashContext:
             self.wrappers[key] = wrapper
         return self.wrappers[key]
 
-    def record(self, layer, hidden, residual):
-        index = self.feature_indices.get(layer)
-        if index is not None:
-            self.features[index] = hidden if residual is None else hidden + residual
+    def record(self, layer, hidden, residual, features=None):
+        """Keep a target layer's output; layered execution passes its state's dict."""
+        if layer in self.feature_indices:
+            output = hidden if residual is None else hidden + residual
+            if features is None:
+                self.features[self.feature_indices[layer]] = output
+            else:
+                features[layer] = output
 
-    def flush(self, batch):
-        features = torch.cat(self.features, dim=-1)
+    def flush(self, batch, features=None):
+        features = torch.cat(self.features if features is None else
+                             [features[layer] for layer in self.feature_indices], dim=-1)
         self.model.project_context(
             features, batch.positions,
             lambda layer, k, v: self.store(layer, k, v, batch.out_loc))

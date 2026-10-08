@@ -42,7 +42,7 @@ class StatsTracker:
                                             "flushes", "flushed_records", "snapshot_exports"), 0)
         self.gdn_replayssm.update(flush_gpu_ms=0.0, export_gpu_ms=0.0)
         self.prefix_cache = None  # scheduler CacheManager.status() as of the latest reply
-        self.cuda_graph = {"enabled": False, "target_decode": 0, "draft": 0, "verify": 0,
+        self.cuda_graph = {"enabled": False, "target_decode": 0, "draft": 0, "verify": 0, "verify_range": 0,
                            "replay_shapes": [], "capture_seconds": 0.0, "extra_reserved_bytes": 0}
         self.speculative = {"draft_tokens": 0, "accepted_draft_tokens": 0, "verify_steps": 0,
                             "residency_stops": 0, "draft_expert_loads": 0,
