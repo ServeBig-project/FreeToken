@@ -1,8 +1,8 @@
 """Windowed ``RadixCache``: what the sliding window adds on top of plain KV reuse.
 
 Window-freed nodes (their window KV gone, their full KV kept), the three insert-side revive cases,
-windowed match truncation, the window lock, the two evictors with their cascade, finish-time
-restamping and ``trim_head_window``.
+windowed match truncation, the window lock, the two evictors with their cascade and finish-time
+restamping.
 
 Three geometries: ``p1-w4`` (window = 4 pages), ``p4-w8`` (2 pages) and ``p128-w128`` (1 page --
 the DSV4 shape). Scenarios are written in pages and in ``wp(s)``, never in literal token counts.
@@ -256,15 +256,16 @@ def test_match_truncates_until_the_live_run_covers_the_window(s):
 
 def test_a_live_run_of_exactly_one_window_between_two_freed_nodes_is_reusable(s):
     """The boundary at a window-freed node is ``>=`` the window: a run of EXACTLY the window is
-    covered. The head comes from ``trim_head_window`` (LRU can never age a root-side node past
-    its descendants); the second has to be an internal node, so a live node stays below it."""
+    covered. A full re-match makes the head the oldest window; the second freed node has to be an
+    internal node, so a live node stays below it."""
     P, n_w = s.P, wp(s)
     if n_w == 1:
         pytest.skip("page == window: the live node below the second freed node already covers "
                     "the window on its own, so the boundary cannot be isolated")
     ids, pages = chain(s, n_w + 3)            # freed | n_w live (== W) | freed | live
 
-    assert s.trim(ids, P) == pages[0]
+    s.match(ids)
+    assert s.evict_window(1).window == pages[0]
     s.match(ids[: (1 + n_w) * P])             # restamp 1..n_w -> node n_w+1 is the oldest live
     assert s.evict_window(1).window == pages[n_w + 1]
     s.check()
@@ -452,36 +453,3 @@ def test_finish_time_restamp_soft_pins_the_prompt_window(P, W):
     assert run(restamp=False) == 0
     assert run(restamp=True) == -(-W // P) * P
 
-
-def test_trim_head_window_reclaims_the_head_and_keeps_the_window(s):
-    """Only the trailing window has to stay live for a next-turn cut, so the head below
-    ``keep_from`` loses its window eagerly; its full KV stays and keeps being served."""
-    P, n_w = s.P, wp(s)
-    n = n_w + 2
-    ids, pages = chain(s, n)
-
-    assert sorted(s.trim(ids, 2 * P)) == sorted(pages[0] + pages[1])
-    s.check()
-    assert win(s)["evictable"] == n_w * P
-    assert s.evictable("kv") == n * P
-
-    got = s.match(ids)
-    assert got.cached_len == n * P
-    assert got.kv_indices.tolist()[: 2 * P] == pages[0] + pages[1]
-
-
-def test_trim_head_window_skips_locked_leaf_and_freed_nodes(s):
-    """A reader still holding the head's window keeps it, a leaf never loses its window, and an
-    already window-freed node is not reported twice."""
-    P = s.P
-    n = wp(s) + 2
-    ids, pages = chain(s, n)
-    held = s.lock(ids)
-
-    assert s.trim(ids, 0) == []
-    assert sorted(s.trim(ids, n * P)) == sorted(pages[0] + pages[1])
-    s.check()
-    assert s.trim(ids, n * P) == []
-
-    s.unlock(held)
-    s.check()

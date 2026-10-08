@@ -182,18 +182,17 @@ def test_hybrid_chunk_donate_skips_unaligned_boundary(ps):
     assert pool.num_free_slots == free_before       # no replacement allocation
 
 
-def test_finish_retains_prompt_window_under_pressure():
-    """Faithful scheduler order incl. the boundary commit: after finish + ambient evict_swa
-    pressure, a follow-up request cutting exactly at the prompt end (the reasoning-dropped
-    next turn) still reuses [0, P)."""
-    ps = 1
-    prompt_len, n_decode = 6, 12
-    cm = _mgr(ps, "swa_radix", num_pages=64)
+def _turn(cm: CacheManager, prompt_len: int, n_decode: int) -> None:
+    """Faithful scheduler order incl. the boundary commit, the window sliding every step, then
+    finish. Prompts are ``1..prompt_len``, so turns of growing length share one path."""
     req = _req(prompt_len, n_decode)
     h = cm.match_req(req)
     req.cache_handle = h
     req.cached_len = h.cached_len
     cm.lock(h)
+    if h.cached_len > 0:   # prefill.py: the matched locs enter the page table
+        cm.page_table[req.table_idx, : h.cached_len].copy_(
+            h.get_matched_indices().to(torch.int32))
     cm.free_swa_out_of_window_extend([req])
     cm.allocate_paged([req])
     req.complete_one()
@@ -201,16 +200,53 @@ def test_finish_retains_prompt_window_under_pressure():
     for i in range(n_decode):
         req.append_host(torch.tensor([9999], dtype=torch.int32))
         req.decode_batch_idx = i + 1
-        cm.maybe_free_swa_out_of_window([req], force=True)  # window slides every step
+        cm.maybe_free_swa_out_of_window([req], force=True)
         cm.allocate_paged([req])
         req.complete_one()
     cm.cache_req(req, finished=True)
     cm.check_integrity()
 
-    ev = cm.tree.evict_window(1)                   # ambient pressure right after finish
+
+def _evict_window(cm: CacheManager, n: int):
+    """Ambient window pressure, returned to the pools the way the scheduler does."""
+    ev = cm.tree.evict_window(n)
     cm.swa_pool.free_swa(ev.window)
     if ev.kv.numel():
         cm._free(ev.kv)
     cm.check_integrity()
-    probe = _req(prompt_len + 1, 1)  # prompt + the next turn's first divergent token
-    assert cm.match_req(probe).cached_len == prompt_len
+    return ev
+
+
+def _reused(cm: CacheManager, prompt_len: int) -> int:
+    """What the next turn cutting at ``prompt_len`` (plus one divergent token) reuses."""
+    return cm.match_req(_req(prompt_len + 1, 1)).cached_len
+
+
+def test_finish_retains_prompt_window_under_pressure():
+    """After finish + ambient window pressure, a follow-up request cutting exactly at the prompt
+    end (the reasoning-dropped next turn) still reuses [0, P)."""
+    prompt_len = 6
+    cm = _mgr(1, "swa_radix", num_pages=64)
+    _turn(cm, prompt_len, n_decode=12)
+    _evict_window(cm, 1)
+    assert _reused(cm, prompt_len) == prompt_len
+
+
+@pytest.mark.parametrize("ps", [1, 8, 128])
+def test_finish_keeps_earlier_resume_points_and_pressure_takes_the_head_first(ps):
+    """Finishing a turn frees no window on its prompt path, so an earlier, shorter turn on the
+    same path stays resumable. The finish re-stamps the path so that under window pressure its
+    head goes first: the prompt windows are freed in position order from 0."""
+    short, long = 4 * ps, 8 * ps + (32 if ps < 128 else 0)
+    cm = _mgr(ps, "swa_radix", num_pages=64 if ps < 128 else 24)
+    _turn(cm, short, n_decode=12)
+    _turn(cm, long, n_decode=12)
+    assert (_reused(cm, short), _reused(cm, long)) == (short, long)
+
+    path = cm.match_req(_req(long + 1, 1)).get_matched_indices().tolist()
+    position = {loc: i for i, loc in enumerate(path)}
+    order = []
+    while cm.tree.evictable["window"]:
+        order += sorted(position[loc] for loc in _evict_window(cm, 1).window.tolist()
+                        if loc in position)
+    assert order == list(range(long))

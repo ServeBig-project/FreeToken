@@ -135,12 +135,6 @@ class Session:
     def evict_states(self, n: int) -> Evicted:
         return self._evicted(self.tree.evict_states(n))
 
-    def trim(self, ids: Sequence[int], keep_from: int) -> List[int]:
-        out = self.tree.trim_head_window(ids_tensor(ids), keep_from).tolist()
-        assert not set(out) & set(self.window_freed), "a window was freed twice"
-        self.window_freed.extend(out)
-        return out
-
     def request(self, ids: Sequence[int], prompt_len: int):
         """Match a prompt, lock it, commit the extended sequence on top, unlock: the only way a
         scenario produces ``update_after > 0`` -- the slots below it ARE the tree's own."""

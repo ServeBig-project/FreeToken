@@ -237,24 +237,6 @@ def test_swa_group_reuse_and_isolation(page_size, group):
     assert_indices(ids, original_ids)
 
 
-@pytest.mark.parametrize("page_size", [1, 4])
-def test_swa_trimming_is_limited_to_its_group(page_size):
-    cache = tree(page_size, window=16)
-    ids = tensor_range(1, 64)
-    branch = torch.cat((ids[:32], tensor_range(1000, 32)))
-    first, second = tensor_range(100, 64), tensor_range(300, 64)
-    for group, indices in [("alice", first), ("bob", second)]:
-        cache.insert(ids, indices, group=group)
-        cache.insert(branch, indices + 1000, group=group)
-        assert cache.match(ids[:32], group=group).cached_len == 32
-
-    cache.trim_head_window(ids, 32, group="alice")
-    assert cache.match(ids[:32], group="alice").cached_len == 0
-    assert cache.match(ids[:32], group="bob").cached_len == 32
-    assert_indices(cache.match(ids, group="alice").kv_indices, first)
-    assert_indices(cache.match(ids, group="bob").kv_indices, second)
-
-
 def test_swa_global_eviction_respects_locked_handle():
     cache = tree(1, window=16)
     ids = tensor_range(1, 64)
