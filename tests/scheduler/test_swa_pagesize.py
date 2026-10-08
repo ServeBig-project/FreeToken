@@ -92,7 +92,7 @@ def _run_lifecycle(cm: CacheManager, total_len: int, n_decode: int = 3,
     for i in range(steps):
         req.append_host(torch.tensor([9999], dtype=torch.int32))
         req.decode_batch_idx = i + 1
-        cm.maybe_free_swa_out_of_window([req], forward_iter=i)
+        cm.maybe_free_swa_out_of_window([req])
         cm.allocate_paged([req])
         req.complete_one()
     cm.cache_req(req, finished=True)
@@ -201,7 +201,7 @@ def test_finish_retains_prompt_window_under_pressure():
     for i in range(n_decode):
         req.append_host(torch.tensor([9999], dtype=torch.int32))
         req.decode_batch_idx = i + 1
-        cm.maybe_free_swa_out_of_window([req], forward_iter=0)  # window slides every step
+        cm.maybe_free_swa_out_of_window([req], force=True)  # window slides every step
         cm.allocate_paged([req])
         req.complete_one()
     cm.cache_req(req, finished=True)

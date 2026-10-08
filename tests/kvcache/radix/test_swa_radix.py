@@ -219,7 +219,7 @@ def test_a_lock_survives_a_split_at_its_window_boundary(s):
     ids = seq(s, n)
     s.insert(ids)                            # a single node of n pages
     held = s.lock(ids)
-    assert win(s)["protected"] == n * P
+    assert win(s)["protected"] == wp(s) * P  # exactly the trailing window, page-rounded
 
     s.match(ids[:P] + seq(s, 1, start=9))    # diverges after page 0 -> splits it
     s.check()
