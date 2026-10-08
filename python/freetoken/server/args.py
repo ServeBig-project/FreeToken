@@ -814,8 +814,8 @@ def parse_args(
             try:
                 draft_path = snapshot_download(draft_path, allow_patterns=["config.json", "*.safetensors"])
             except Exception as error:  # noqa: BLE001 -- name the flag, keep the cause
-                parser.error(f"--speculative-draft-model-path {draft_path!r} is neither a local "
-                             f"directory nor a downloadable Hugging Face model: {error}")
+                parser.error(f"--speculative-draft-model-path {draft_path!r} not found as a local "
+                             f"directory or a downloadable Hugging Face model: {error}")
         kwargs["speculative_draft_model_path"] = draft_path
 
     if kwargs["served_model_name"] is None:
