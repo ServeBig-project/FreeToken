@@ -781,6 +781,9 @@ class Scheduler(SchedulerIOMixin):
         ):
             self._execute_pending_rebuild()
 
+        # Publish finished host copies in every iteration, including pure decode and
+        # open waves; otherwise only the next prefill admission would.
+        self.cache_manager.poll()
         self.stream.wait_stream(self.engine.stream)
         blocked_phase = "outwave" if executor.active else "inwave"
         if last_outputs and self.speculative is not None and self.speculative.phase != blocked_phase:

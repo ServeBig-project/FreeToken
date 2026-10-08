@@ -27,7 +27,8 @@ from freetoken.kvcache import create_kv_pool, resolve_pool_class
 from freetoken.kvcache.base import CacheRebuildRejected
 from freetoken.kvcache.cache_status import _supports_swa_ratio
 from freetoken.kvcache.linear_state_pool import (
-    _linear_pool_min_slots, _linear_pool_num_slots, replay_records, state_pool_bytes,
+    _linear_pool_min_slots, _linear_pool_num_slots, replay_records, speculative_state_slots,
+    state_pool_bytes,
 )
 from freetoken.kvcache.prefix_store import transfer_device_bytes
 
@@ -906,6 +907,13 @@ class Engine:
                     f"num_mamba_slots {num_mamba_slots} is below the minimum {min_usable} "
                     f"(non-evictable working set for max_running_req={config.max_running_req}) "
                     f"needed to run; admission would deadlock"
+                )
+            sd_slots = speculative_state_slots(config)
+            if num_mamba_slots < min_usable + sd_slots:
+                # A rebuild never switches SD off; restart with a new configuration instead.
+                raise CacheRebuildRejected(
+                    f"num_mamba_slots {num_mamba_slots} cannot hold the configured SD window: "
+                    f"{min_usable} working-set states plus {sd_slots} draft/verify states"
                 )
         if num_swa_pages is not None:
             # An absolute window pin for the radix-SWA window pool (Gemma) or the DSV4 window tier;

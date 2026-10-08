@@ -91,7 +91,8 @@ def compute_cache_floors(engine: "Engine") -> Dict[str, int]:
                      layer's experts (num_experts). 0 when the model has no offload cache.
       mamba_slots -- rebuild_runtime_cache rejects num_mamba_slots below
                      _linear_pool_min_slots(config) - 1 (the physical floor minus the reserved
-                     padding sink -> usable-slot floor). 0 when the model has no GDN state pool.
+                     padding sink -> usable-slot floor) plus the configured SD window's scratch
+                     states. 0 when the model has no GDN state pool.
 
     Best-effort/total: any failure degrades that floor to 0 and never raises (readiness path)."""
     config = engine.config
@@ -113,11 +114,11 @@ def compute_cache_floors(engine: "Engine") -> Dict[str, int]:
         return int(config.model_config.num_experts)
 
     def _mamba() -> int:
-        from .linear_state_pool import _linear_pool_min_slots
+        from .linear_state_pool import _linear_pool_min_slots, speculative_state_slots
 
         if engine.linear_state_pool is None:
             return 0
-        return int(_linear_pool_min_slots(config) - 1)
+        return int(_linear_pool_min_slots(config) - 1 + speculative_state_slots(config))
 
     def _swa() -> int:
         # Window-pool floor in tokens (matches the pool's own page unit x count):
