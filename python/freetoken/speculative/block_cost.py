@@ -82,11 +82,11 @@ class BlockController:
         self.limit = config.speculative_num_steps
         self.nominals = [0, *sorted({min(n, self.limit) for n in (2, 4, 8)})]
         self.observe_only = config.dflash_adaptive_observe_only
-        # Drafter attention work per query position, by the history each layer group reads.
-        groups = {}
-        for limit in runtime.context.layout.limits:
-            groups[limit] = groups.get(limit, 0) + 1
-        self.groups = list(groups.items())
+        # Drafter attention work per query position: full-history layers read all of it, the
+        # others at most their limit.
+        limits = runtime.context.layout.limits
+        self.full_layers = limits.count(None)
+        self.limited = [(limit, limits.count(limit)) for limit in set(limits) if limit is not None]
         self.timer = RoundTimer()
         self.stats = dict.fromkeys((
             "init_rounds", "probe_rounds", "selected_rounds", "fixed_rounds", "switches",
@@ -127,39 +127,46 @@ class BlockController:
             self._reset()
         self.round += 1
         reqs = batch.reqs
-        greedy = [r.sampling_params.is_greedy for r in reqs]
-        history = [r.cached_len for r in reqs]
-        buckets = [h.bit_length() for h in history]
-        # Drafter attention work per query position of each request.
-        work = [sum(count * (h if limit is None else min(h, limit)) for limit, count in self.groups)
-                for h in history]
-        # Nominal lengths clipped to the same per-request vector are one option.
-        vectors = {n: tuple(min(n, cap) for cap in caps) for n in self.nominals}
+        # Requests alike in sampling, length cap and history bucket clip and score alike, so the
+        # options are priced per group: [requests, history, drafter attention work].
+        alike = {}
+        for req, cap in zip(reqs, caps, strict=True):
+            h = req.cached_len
+            group = alike.setdefault((req.sampling_params.is_greedy, cap, h.bit_length()),
+                                      [0, 0, 0])
+            group[0] += 1
+            group[1] += h
+            work = self.full_layers * h
+            for limit, count in self.limited:
+                work += count * (h if h < limit else limit)
+            group[2] += work
+        groups = list(alike.items())
+        # Nominal lengths clipped to the same per-group lengths are one option.
+        clipped = {n: tuple(min(n, cap) for (_, cap, _), _ in groups) for n in self.nominals}
         options = {}
         for nominal in self.nominals:
-            options.setdefault(vectors[nominal], nominal)
-        # Clipping keeps the cap order, so one sort orders every option's (sampling, length).
-        order = sorted(range(len(caps)), key=lambda i: (greedy[i], caps[i]))
-        keys = {vector: self._cost_key(vector, greedy, history, work, order) for vector in options}
-        survivals = {}  # this round's acceptance lookups, shared by the options
-        kind, nominal = self._decide(vectors, options, lambda vector: self._score(
-            vector, keys[vector], greedy, buckets, survivals))
+            options.setdefault(clipped[nominal], nominal)
+        keys = {lengths: self._cost_key(lengths, groups) for lengths in options}
+        kind, nominal = self._decide(
+            clipped, options, lambda lengths: self._score(lengths, keys[lengths], groups))
         if self.observe_only and kind != "init":
             self.suggested[nominal] += 1
             kind, nominal = "fixed", self.limit
-        vector = vectors[nominal]
+        lengths = clipped[nominal]
         self.executed[nominal] += 1
         self.stats[f"{kind}_rounds"] += 1
         self.stats["clipped_requests"] += sum(cap < nominal for cap in caps)
-        key = keys[vector]
-        accept = [(n, b, g) for n, b, g in zip(vector, buckets, greedy)]
+        key = keys[lengths]
+        vector = [min(nominal, cap) for cap in caps]
+        accept = [(n, r.cached_len.bit_length(), r.sampling_params.is_greedy)
+                  for n, r in zip(vector, reqs)]
         self.round_info = (kind, key, accept)
         self.timer.describe((kind, key))
         spent = (time.perf_counter() - started) * 1e6
         self.stats["decision_us"] += spent
         self.stats["decisions"] += 1
         self.decision_hist[min(int(spent // _DECISION_BUCKET_US), 20)] += 1
-        return list(vector)
+        return vector
 
     def observe(self, accepted):
         """``accepted[i]``: drafts of request i the target accepted, None when unknown."""
@@ -182,19 +189,24 @@ class BlockController:
         self._collect()
 
     # ------------------------------------------------------------------ estimates
-    def _cost_key(self, vector, greedy, history, work, order):
-        target = drafter = real = 0
-        for n, h, w in zip(vector, history, work):
-            target += (n + 1) * h
-            drafter += (n + 1) * w
-            real += n + 1
-        if real == len(vector):
-            return ("ar", real, greedy.count(False), target.bit_length())
+    def _cost_key(self, lengths, groups):
+        """The executed shape: batch, (sampling, length) histogram, real and physical draft and
+        verify positions, target and drafter attention-work buckets."""
+        batch = target = drafter = real = 0
+        shape = {}
+        for n, ((greedy, _, _), (count, history, work)) in zip(lengths, groups):
+            batch += count
+            target += (n + 1) * history
+            drafter += (n + 1) * work
+            real += count * (n + 1)
+            shape[greedy, n] = shape.get((greedy, n), 0) + count
+        if real == batch:
+            return ("ar", batch, shape.get((False, 0), 0), target.bit_length())
         graphs = self.engine.graph_runner.speculative
-        verify = graphs.verify_tokens(len(vector), real) if graphs is not None else real
-        shape = tuple((greedy[i], vector[i]) for i in order)
-        return (len(vector), shape, real, self.runtime.physical_tokens(len(vector), real),
-                verify, target.bit_length(), drafter.bit_length())
+        verify = graphs.verify_tokens(batch, real) if graphs is not None else real
+        return (batch, tuple(sorted(shape.items())), real,
+                self.runtime.physical_tokens(batch, real), verify, target.bit_length(),
+                drafter.bit_length())
 
     def _update(self, table, key, values, weight):
         """Fold one round's sums and weight into ``key``'s decayed record."""
@@ -213,20 +225,19 @@ class BlockController:
         table.move_to_end(key)
         return [value / entry[1] for value in entry[0]]
 
-    def _score(self, vector, key, greedy, buckets, survivals):
+    def _score(self, lengths, key, groups):
         """(round price, price per produced token), or None while either is unknown."""
         price = self._recent(self.costs, key)
         if price is None:
             return None
-        produced = len(vector)
-        for accept in zip(vector, buckets, greedy):
-            if accept[0]:
-                if accept not in survivals:
-                    curve = self._recent(self.accepts, accept)
-                    survivals[accept] = None if curve is None else sum(curve)
-                if survivals[accept] is None:
+        produced = 0
+        for n, ((greedy, _, bucket), (count, _, _)) in zip(lengths, groups):
+            produced += count
+            if n:
+                curve = self._recent(self.accepts, (n, bucket, greedy))
+                if curve is None:
                     return None
-                produced += survivals[accept]
+                produced += count * sum(curve)
         return price[0], price[0] / produced
 
     # ------------------------------------------------------------------ decision
