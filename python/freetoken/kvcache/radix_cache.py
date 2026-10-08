@@ -658,25 +658,6 @@ class RadixCache:
         out, self._released = self._released, Evicted([], [], [])
         return self._evicted(out)
 
-    def trim_head_window(self, ids: torch.Tensor, keep_from: int, group: str = "") -> torch.Tensor:
-        """Free the GPU window of the path strictly below ``keep_from`` (page-aligned), keeping
-        full KV: only the trailing window before a resume point needs to stay live. Locked,
-        freed and leaf nodes are left alone. Returns the locations whose window slots to free."""
-        if keep_from <= 0:
-            return self.empty
-        self.match(ids[:keep_from], group)  # splits a node boundary at keep_from
-        out = Evicted([], [], [])
-        node, pos = self._root(group), 0
-        while pos < keep_from:
-            child = node.children.get(self.key_fn(ids[pos:]))
-            if child is None or pos + child.length > keep_from:
-                break
-            if (child.value is not None and not child.window_freed and child.window_ref == 0
-                    and not child.is_leaf()):
-                self._drop_window(child, out)
-            node, pos = child, pos + child.length
-        return self._evicted(out).window
-
     # ---------------------------------------------------------------- accounting / checks
     def check_integrity(self) -> None:
         for n in self._nodes():

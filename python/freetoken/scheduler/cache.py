@@ -27,8 +27,8 @@ def _swa_eviction_interval() -> int:
 
 _SWA_EVICTION_INTERVAL = _swa_eviction_interval()
 
-# Finish-time retention keeps [P - window - gap, P) swa-live for the next turn's cut near the
-# prompt end. The gap covers templates whose generation prompt injects tokens that vanish when
+# Window retention reaches this far before a resume point (the commit's node cut, tool-call
+# anchors). The gap covers templates whose generation prompt injects tokens that vanish when
 # the client drops reasoning (Qwen's "<think>\n": the re-render diverges 2 tokens BEFORE P).
 _SWA_RETAIN_GAP = 16
 
@@ -850,22 +850,12 @@ class CacheManager:
     def _retain_prompt_window(self, req: Req) -> None:
         """Soft-pin the prompt-end window after finish: decode never re-stamps the prompt path,
         so it would be the first window victim, yet a follow-up turn that drops reasoning
-        diverges right at the prompt end and needs only that trailing window. Free the head's
-        window eagerly (full KV stays) and re-stamp the tail; it stays unlocked."""
+        diverges right at the prompt end. Re-stamp the path, its head oldest; it stays unlocked.
+        The head's windows are not dropped here: other resume points on a shared path still
+        need them, and window pressure evicts the head first anyway."""
         prompt_len = align_down(req.max_device_len - req.output_len, self.page_size)
-        if prompt_len <= 0:
-            return
-        # With recurrent states the resume point is the prompt-end state, which the chunked
-        # recurrence can only freeze up to one chunk before the prompt end.
-        from freetoken.kernel.fla.chunk import CHUNK_SIZE
-
-        resume = prompt_len - (CHUNK_SIZE if self.state_cache else 0)
-        keep_from = align_down(
-            max(resume - self.sliding_window_size - _SWA_RETAIN_GAP, 0), self.page_size)
-        if keep_from > 0:
-            self._free_swa(self.tree.trim_head_window(
-                req.input_ids[:prompt_len], keep_from, req.cache_group))
-        self.tree.match(req.input_ids[:prompt_len], req.cache_group)
+        if prompt_len > 0:
+            self.tree.match(req.input_ids[:prompt_len], req.cache_group)
 
     def discard_incomplete_layered_wave(
         self,
