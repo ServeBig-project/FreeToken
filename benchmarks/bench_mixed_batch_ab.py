@@ -486,6 +486,8 @@ def server_command(args, configuration, policy, port):
         "naive",
         "--batching-policy",
         policy,
+        "--speculative-num-steps",  # these A/B arms compare AR schedulers
+        "0",
         ]
     )
     return command

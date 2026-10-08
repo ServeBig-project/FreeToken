@@ -672,6 +672,11 @@ class CpuMoeExecutor:
             self._io[bs] = io
         return io
 
+    @property
+    def pinned_io_bytes(self) -> int:
+        """Pinned host staging held for every decode/verify row count seen so far."""
+        return sum(t.numel() * t.element_size() for io in self._io.values() for t in io.values())
+
     def _task_for(self, layer_id: int, bs: int) -> int:
         key = (layer_id, bs)
         task = self._tasks.get(key)

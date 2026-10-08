@@ -80,3 +80,4 @@ class CacheRebuildReply(BaseFrontendMsg):
     gdn_replayssm: dict | None = None
     dflash: dict | None = None
     prefix_cache: dict | None = None
+    execution: dict | None = None

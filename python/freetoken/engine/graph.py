@@ -150,15 +150,21 @@ class GraphRunner:
         self._layer_range_state_inputs: object | None = None
         self._prepared_layer_range_batch: Batch | None = None
         self.replay_counts: dict[tuple[str, int, int, int], int] = {}
+        # SD forwards that ran eagerly although SD graphs were captured: an uncovered
+        # shape, a draft beside a pinned resident group, or verify rows beside a wave.
+        self.eager_counts = {"draft": 0, "verify": 0, "verify_range": 0}
         self.speculative = None
         cost = get_global_ctx().speculative_cost
         cost_state = cost.before_capture() if cost is not None else None
         started = time.perf_counter()
         before = torch.cuda.memory_reserved(device)
         self._capture_graphs(max_seq_len, vocab_size, model)
+        self.speculative_reserved_bytes = 0
         if self.max_graph_bs and speculative_config is not None:
             from .speculative_graph import SpeculativeGraphs
+            sd_before = torch.cuda.memory_reserved(device)
             self.speculative = SpeculativeGraphs(self, model, speculative_config, max_seq_len, vocab_size)
+            self.speculative_reserved_bytes = max(0, torch.cuda.memory_reserved(device) - sd_before)
         if cost is not None:
             cost.after_capture(cost_state)
         torch.cuda.synchronize(device)
@@ -397,7 +403,7 @@ class GraphRunner:
         result = {"enabled": bool(self.max_graph_bs), "target_decode": 0, "draft": 0, "verify": 0,
                   "verify_range": 0,
                   "capture_seconds": self.capture_seconds, "extra_reserved_bytes": self.extra_reserved_bytes,
-                  "replay_shapes": []}
+                  "replay_shapes": [], "speculative_eager": dict(self.eager_counts)}
         for (phase, batch_size, query_tokens, physical_query_tokens), count in sorted(self.replay_counts.items()):
             result[phase] += count
             result["replay_shapes"].append(dict(phase=phase, batch_size=batch_size,

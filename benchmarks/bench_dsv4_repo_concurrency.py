@@ -291,6 +291,8 @@ def server_command(args: argparse.Namespace, executable: str, mode: str) -> list
         str(args.expert.resolve()),
         "--batching-policy",
         mode,
+        "--speculative-num-steps",  # these A/B arms compare AR schedulers
+        "0",
     ]
     if mode == "layered-pipeline":
         command.extend(

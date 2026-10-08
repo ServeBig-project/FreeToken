@@ -305,7 +305,14 @@ class Engine:
         from freetoken.gpu_select import bind_assigned_gpu
 
         self.device = bind_assigned_gpu(config.tp_info.rank)
-        _adjust_config(config)
+        # What the caller asked for, before resolution replaces auto values.
+        self.execution_requested = dict(
+            batching_policy=getattr(config, "batching_policy", "legacy"),
+            speculative_num_steps=config.speculative_num_steps,
+            speculative_draft_model_path=config.speculative_draft_model_path,
+            speculative_phase=config.speculative_phase,
+        )
+        self.execution_fallbacks = _adjust_config(config)
         torch.manual_seed(42)
         self.stream = torch.cuda.Stream()
         torch.cuda.set_stream(self.stream)
@@ -408,6 +415,11 @@ class Engine:
         linear_group = config.model_config.linear_attention_group()
         if linear_group is not None:
             from freetoken.kvcache.linear_state_pool import LinearStatePool
+
+            # Only now is the draft model's share of the state budget known.
+            shortfall = _sd_state_shortfall(config, draft_bytes) if config.speculative_num_steps else None
+            if shortfall:
+                raise ValueError(shortfall)
 
             self.linear_state_pool = LinearStatePool(
                 group=linear_group,
@@ -642,9 +654,16 @@ class Engine:
                 batching_policy == "layered-pipeline"
                 and config.moe_cache_size < 2 * config.model_config.num_experts
             ):
-                raise ValueError(
-                    f"{batching_policy} requires at least two expert layers of shared cache"
-                )
+                reason = f"{batching_policy} requires at least two expert layers of shared cache"
+                if (self.execution_requested["batching_policy"] != "auto"
+                        or (config.speculative_num_steps and config.speculative_phase != "outwave")):
+                    raise ValueError(reason)
+                # Only now is the auto-sized cache known; auto batching keeps serving.
+                batching_policy = "legacy"
+                object.__setattr__(config, "batching_policy", batching_policy)
+                self.execution_fallbacks.append(
+                    dict(feature="batching", reason="layered_unsupported", detail=reason))
+                logger.info_rank0(f"Not using batching: {reason}")
             _require_offload_cache_size(config.moe_cache_size, config.model_config.num_experts)
             if batching_policy in (
                 "joint",
@@ -978,6 +997,7 @@ class Engine:
             self.dflash.destroy_graphs()
         self.attn_backend.reset_capture()
         prior_replays = self.graph_runner.replay_counts
+        prior_eager = self.graph_runner.eager_counts
         self.graph_runner.destroy_cuda_graphs()
         # 2. Resize caches in place (each frees its old GPU tensors before allocating).
         # Pin the new window first (validated above) so any KV-pool rebuild below sizes the window
@@ -1029,6 +1049,7 @@ class Engine:
             speculative_config=config if config.speculative_graphs else None,
         )
         self.graph_runner.replay_counts = prior_replays
+        self.graph_runner.eager_counts = prior_eager
         if self.dflash is not None:
             self.dflash.capture_graphs(self.graph_runner)
 
@@ -1042,6 +1063,10 @@ class Engine:
             if self.graph_runner.can_use_cuda_graph(batch):
                 logits = self.graph_runner.replay(batch)
             else:
+                if self.graph_runner.speculative is not None and (
+                        batch.draft_experts is not None or batch.is_speculative_verify):
+                    self.graph_runner.eager_counts[
+                        "verify" if batch.is_speculative_verify else "draft"] += 1
                 logits = forward_model(self.model)
         if self.speculative_cost is not None:
             self.speculative_cost.end_model(batch)
@@ -1227,8 +1252,42 @@ class Engine:
             current_layer = next_layer
         return state
 
+    def execution_status(self) -> dict:
+        """Requested versus resolved batching/SD settings, and why an auto choice fell back."""
+        config, runner = self.config, self.graph_runner
+        steps = config.speculative_num_steps
+        layered = getattr(config, "batching_policy", "legacy") == "layered-pipeline"
+        return dict(
+            requested=dict(self.execution_requested),
+            effective=dict(
+                batching_policy=getattr(config, "batching_policy", "legacy"),
+                drafter=("dflash" if config.speculative_draft_model_path else "self") if steps else None,
+                speculative_num_steps=steps,
+                speculative_phase=(config.speculative_phase if layered else "outwave") if steps else None,
+                cuda_graph=dict(
+                    batch_sizes=list(runner.graph_bs_list),
+                    layer_ranges=bool(runner.layer_range_graph_map),
+                    speculative=runner.speculative is not None,
+                    inwave_verify=runner.speculative is not None and bool(runner.speculative.ranges),
+                ),
+            ),
+            fallback_reasons=[dict(fallback) for fallback in self.execution_fallbacks],
+            resources=dict(
+                speculative_graph_reserved_bytes=runner.speculative_reserved_bytes,
+                cpu_executor_pinned_io_bytes=(self.cpu_moe_executor.pinned_io_bytes
+                                              if self.cpu_moe_executor is not None else 0),
+                # Current, not peak: layered prefill resets the allocator peak every step.
+                reserved_bytes=torch.cuda.memory_reserved(self.device),
+            ),
+        )
+
     def finish_layer_group_logits(self, batch: Batch, state) -> torch.Tensor:
         """Logits for every row of a state that ran all layers (SD verification)."""
+        runner = self.graph_runner
+        if runner.speculative is not None and not runner.speculative.has_ranges(batch):
+            runner.eager_counts["verify_range"] += 1
+        if self.linear_state_pool is not None and self.linear_state_pool.replay is not None:
+            self.linear_state_pool.replay.observe(batch)
         with self.ctx.forward_batch(batch):
             logits = self.model.finish_layer_group_prefill(state)
         if self.cpu_moe_executor is not None:
@@ -1516,7 +1575,64 @@ _DENSE_MOE_SETTINGS = {
 }
 
 
-def _adjust_config(config: EngineConfig):
+_SD_GRAPH_UNSUPPORTED = (
+    "SD CUDA Graph requires BF16 activations and BF16 or NVFP4 experts "
+    "with --moe-backend offload or hybrid, "
+    "FlashInfer attention, page size 1 and at most 8 draft steps; "
+    "pass --cuda-graph-max-bs 0 to run speculation eagerly"
+)
+
+
+def _sd_state_shortfall(config: EngineConfig, draft_bytes: int = 0) -> str | None:
+    """Why the GDN state budget, after draft storage, cannot hold one SD window."""
+    if config.model_config.linear_attention_group() is None:
+        return None
+    try:
+        free = _linear_pool_num_slots(config, draft_bytes=draft_bytes) - _linear_pool_min_slots(config)
+    except ValueError as error:  # SD's replay records leave no full working set
+        return str(error)
+    if free < speculative_state_slots(config):
+        return ("the GDN state budget leaves no room for one SD window's draft/verify "
+                "states; raise --gdn-state-budget-bytes or enable ReplaySSM")
+    return None
+
+
+def _layered_pipeline_unsupported(config: EngineConfig, is_moe: bool) -> str | None:
+    """Why layered-pipeline batching cannot serve this resolved configuration, if so."""
+    from .layered_execution import LayeredExecutionAdapter
+    from freetoken.models.register import _load_attr, get_model_spec
+
+    if not is_moe or config.moe_backend not in ("offload", "hybrid"):
+        return "layered-pipeline batching requires an offloaded MoE model (--moe-backend offload or hybrid)"
+    if not config.moe_prefill_overlap:
+        return "layered-pipeline batching requires MoE prefill overlap"
+    if config.speculative_num_steps != 0 and (
+            config.speculative_draft_residency != "off" or config.speculative_adaptive_cost
+            or config.speculative_draft_load_missing or config.speculative_verify_prefetch):
+        return "the requested SD residency, cost, missing-expert loading or prefetch control runs only with legacy batching"
+    if not config.moe_cache_auto and config.moe_cache_size < 2 * config.model_config.num_experts:
+        return "layered-pipeline requires at least two expert layers of shared cache"
+    spec = get_model_spec(config.hf_config.architectures[0])
+    model_cls = _load_attr(spec.module, spec.model_cls)
+    if not hasattr(model_cls, "create_layered_execution_adapter") and not all(
+            hasattr(model_cls, name) for name in LayeredExecutionAdapter._REQUIRED_MODEL_METHODS):
+        return f"model {model_cls.__name__} does not support layer-group prefill"
+    return None
+
+
+def _speculative_unsupported(config: EngineConfig) -> tuple[str, str] | None:
+    """(reason, detail) when SD at the configured steps cannot run with these components."""
+    try:
+        config.__post_init__()
+    except ValueError as error:
+        return "unsupported", str(error)
+    if config.cuda_graph_max_bs != 0 and config.cuda_graph_bs != [] and not config.speculative_graphs:
+        return "graph_unsupported", _SD_GRAPH_UNSUPPORTED
+    shortfall = _sd_state_shortfall(config)
+    return ("state_budget", shortfall) if shortfall else None
+
+
+def _adjust_config(config: EngineConfig) -> list[dict]:
     def override(attr: str, value: Any):  # this is dangerous, use with caution
         object.__setattr__(config, attr, value)
 
@@ -1535,11 +1651,7 @@ def _adjust_config(config: EngineConfig):
         object.__setattr__(model_config, "nowag_expert_path", nowag_expert_path)
     expert_quant = getattr(model_config, "expert_quant", "none")
 
-    if config.speculative_num_steps:
-        if config.moe_backend == "auto":
-            override("moe_backend", "offload")
-            if not config.moe_cache_size and config.moe_cache_rate is None:
-                override("moe_cache_auto", True)
+    fallbacks: list[dict] = []
 
     if not is_moe:
         # A dense model has no routed experts: the MoE knobs are inert, and the offload family
@@ -1813,6 +1925,12 @@ def _adjust_config(config: EngineConfig):
         )
 
     batching_policy = getattr(config, "batching_policy", "legacy")
+    if batching_policy == "auto":
+        reason = _layered_pipeline_unsupported(config, is_moe)
+        batching_policy = "legacy" if reason else "layered-pipeline"
+        override("batching_policy", batching_policy)
+        if reason:
+            fallbacks.append(dict(feature="batching", reason="layered_unsupported", detail=reason))
     if batching_policy in (
         "layered",
         "joint",
@@ -1890,15 +2008,29 @@ def _adjust_config(config: EngineConfig):
         object.__setattr__(model_config, "moe_backend", config.moe_backend)
     object.__setattr__(model_config, "nvfp4_backend", config.nvfp4_backend)
 
+    if config.speculative_num_steps == 0:
+        override("speculative_draft_model_path", None)
+    elif config.speculative_num_steps is None:
+        override("speculative_num_steps", 4)
+        # A draft model, an SD phase or an SD control asks for SD; only a bare default
+        # may fall back.
+        asked = (config.speculative_draft_model_path or config.speculative_phase != "outwave"
+                 or config.speculative_draft_residency != "off" or config.speculative_adaptive_cost
+                 or config.speculative_draft_load_missing or config.speculative_verify_prefetch)
+        if not asked:
+            reason = _speculative_unsupported(config)
+            if reason is not None:
+                override("speculative_num_steps", 0)
+                fallbacks.append(dict(feature="speculative", reason=reason[0], detail=reason[1]))
+    if config.speculative_num_steps:
+        reason = _speculative_unsupported(config)
+        if reason is not None:
+            raise ValueError(reason[1])
+
     if config.speculative_num_steps and config.cuda_graph_max_bs != 0 and config.cuda_graph_bs != []:
         # Never fall back silently: eager SD is far slower and would mislead comparisons.
         if not config.speculative_graphs:
-            raise ValueError(
-                "SD CUDA Graph requires BF16 activations and BF16 or NVFP4 experts "
-                "with --moe-backend offload or hybrid, "
-                "FlashInfer attention, page size 1 and at most 8 draft steps; "
-                "pass --cuda-graph-max-bs 0 to run speculation eagerly"
-            )
+            raise ValueError(_SD_GRAPH_UNSUPPORTED)
         limit = min(config.cuda_graph_max_bs, config.max_running_req, 32)
         override("cuda_graph_bs", list(range(1, limit + 1)))
     elif config.speculative_num_steps:
@@ -1944,4 +2076,11 @@ def _adjust_config(config: EngineConfig):
     ]
     if is_moe:
         resolved.insert(0, f"moe_backend={config.moe_backend!r}")
+    resolved += [
+        f"batching_policy={getattr(config, 'batching_policy', 'legacy')!r}",
+        f"speculative_num_steps={config.speculative_num_steps}",
+    ]
     logger.info_rank0(f"Resolved config: {', '.join(resolved)}")
+    for fallback in fallbacks:
+        logger.info_rank0(f"Not using {fallback['feature']}: {fallback['detail']}")
+    return fallbacks

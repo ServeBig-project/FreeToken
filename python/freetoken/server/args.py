@@ -252,7 +252,9 @@ def parse_args(
         "--speculative-num-steps",
         type=int,
         default=ServerArgs.speculative_num_steps,
-        help="Maximum draft tokens per speculative round; 0 disables speculation (default).",
+        help="Maximum draft tokens per speculative round (1-8); 0 disables speculation and "
+             "ignores a draft model path. Omitted: 4 when the model, backends and budgets "
+             "support SD, else AR with the reason reported in /v1/stats.",
     )
     parser.add_argument(
         "--speculative-phase", choices=["outwave", "all", "inwave"],
@@ -390,6 +392,7 @@ def parse_args(
         "--batching-policy",
         type=str,
         choices=[
+            "auto",
             "legacy",
             "mixed",
             "layered",
@@ -398,7 +401,9 @@ def parse_args(
         ],
         default=ServerArgs.batching_policy,
         help=(
-            "Batch scheduling policy: legacy runs prefill before decode; mixed combines "
+            "Batch scheduling policy: auto (default) uses layered-pipeline when the model "
+            "and MoE backend support it, else legacy, and reports why; legacy runs prefill "
+            "before decode; mixed combines "
             "decode with chunked prefill in one forward; layered jointly schedules two "
             "independent forwards and advances prefill by layer group; joint keeps a "
             "whole layer group resident while one mixed decode/prefill state and its "
@@ -800,7 +805,8 @@ def parse_args(
     if kwargs["model_path"].startswith("~"):
         kwargs["model_path"] = os.path.expanduser(kwargs["model_path"])
     draft_path = kwargs.get("speculative_draft_model_path")
-    if draft_path:
+    # Explicitly off: a retained draft path is reported as requested, never downloaded.
+    if draft_path and kwargs["speculative_num_steps"] != 0:
         draft_path = os.path.expanduser(draft_path)
         if not os.path.isdir(draft_path):
             from huggingface_hub import snapshot_download
