@@ -73,20 +73,6 @@ class RoundTimer:
         return out
 
 
-def _bounded_get(table, key):
-    entry = table.get(key)
-    if entry is not None:
-        table.move_to_end(key)
-    return entry
-
-
-def _bounded_put(table, key, entry):
-    table[key] = entry
-    table.move_to_end(key)
-    if len(table) > _TABLE:
-        table.popitem(last=False)
-
-
 class BlockController:
     """Per-round choice among AR and the legal 2/4/8 blocks, each clipped per request."""
 
@@ -105,9 +91,8 @@ class BlockController:
         self.stats = dict.fromkeys((
             "init_rounds", "probe_rounds", "selected_rounds", "fixed_rounds", "switches",
             "clipped_requests", "samples", "compared_rounds", "compared_candidates",
-            "decisions"), 0)
-        self.times = dict.fromkeys(("round_ms", "proposal_ms", "verify_ms", "init_ms",
-                                    "probe_ms", "decision_us"), 0.0)
+            "decisions", "round_ms", "proposal_ms", "verify_ms", "init_ms", "probe_ms",
+            "decision_us"), 0)
         self.decision_hist = [0] * 21
         self.executed = dict.fromkeys(self.nominals, 0)
         self.suggested = dict.fromkeys(self.nominals, 0)
@@ -140,19 +125,25 @@ class BlockController:
         started = time.perf_counter()
         if self.engine.graph_runner is not self.runner:
             self._reset()
-        self._collect()
         self.round += 1
         reqs = batch.reqs
         greedy = [r.sampling_params.is_greedy for r in reqs]
         history = [r.cached_len for r in reqs]
         buckets = [h.bit_length() for h in history]
+        # Drafter attention work per query position of each request.
+        work = [sum(count * (h if limit is None else min(h, limit)) for limit, count in self.groups)
+                for h in history]
         # Nominal lengths clipped to the same per-request vector are one option.
         vectors = {n: tuple(min(n, cap) for cap in caps) for n in self.nominals}
         options = {}
         for nominal in self.nominals:
             options.setdefault(vectors[nominal], nominal)
-        evaluate = lambda vector: self._score(vector, greedy, history, buckets)
-        kind, nominal = self._decide(vectors, options, evaluate)
+        # Clipping keeps the cap order, so one sort orders every option's (sampling, length).
+        order = sorted(range(len(caps)), key=lambda i: (greedy[i], caps[i]))
+        keys = {vector: self._cost_key(vector, greedy, history, work, order) for vector in options}
+        survivals = {}  # this round's acceptance lookups, shared by the options
+        kind, nominal = self._decide(vectors, options, lambda vector: self._score(
+            vector, keys[vector], greedy, buckets, survivals))
         if self.observe_only and kind != "init":
             self.suggested[nominal] += 1
             kind, nominal = "fixed", self.limit
@@ -160,12 +151,12 @@ class BlockController:
         self.executed[nominal] += 1
         self.stats[f"{kind}_rounds"] += 1
         self.stats["clipped_requests"] += sum(cap < nominal for cap in caps)
-        key = self._cost_key(vector, greedy, history)
+        key = keys[vector]
         accept = [(n, b, g) for n, b, g in zip(vector, buckets, greedy)]
         self.round_info = (kind, key, accept)
         self.timer.describe((kind, key))
         spent = (time.perf_counter() - started) * 1e6
-        self.times["decision_us"] += spent
+        self.stats["decision_us"] += spent
         self.stats["decisions"] += 1
         self.decision_hist[min(int(spent // _DECISION_BUCKET_US), 20)] += 1
         return list(vector)
@@ -183,53 +174,60 @@ class BlockController:
                 for j in range(1, a + 1):
                     counts[j] += 1
         for key, counts in merged.items():
-            entry = _bounded_get(self.accepts, key)
-            if entry is None:
-                entry = [[0.0] * (len(counts) - 1), 0.0, self.round]
-            decay = 2.0 ** (-(self.round - entry[2]) / _HALF_LIFE)
-            entry[0] = [decay * old + new for old, new in zip(entry[0], counts[1:])]
-            entry[1] = decay * entry[1] + counts[0]
-            entry[2] = self.round
-            _bounded_put(self.accepts, key, entry)
+            self._update(self.accepts, key, counts[1:], counts[0])
 
     def end(self):
+        """The round's replies are queued; take in the earlier rounds the GPU has finished."""
         self.timer.end()
+        self._collect()
 
     # ------------------------------------------------------------------ estimates
-    def _cost_key(self, vector, greedy, history):
-        target = sum((n + 1) * h for n, h in zip(vector, history)).bit_length()
-        if not any(vector):
-            return ("ar", len(vector), target)
-        drafter = sum((n + 1) * count * (h if limit is None else min(h, limit))
-                      for n, h in zip(vector, history) for limit, count in self.groups)
-        real = len(vector) + sum(vector)
+    def _cost_key(self, vector, greedy, history, work, order):
+        target = drafter = real = 0
+        for n, h, w in zip(vector, history, work):
+            target += (n + 1) * h
+            drafter += (n + 1) * w
+            real += n + 1
+        if real == len(vector):
+            return ("ar", real, target.bit_length())
         graphs = self.engine.graph_runner.speculative
         verify = graphs.verify_tokens(len(vector), real) if graphs is not None else real
-        shape = tuple(sorted(zip(greedy, vector)))
+        shape = tuple((greedy[i], vector[i]) for i in order)
         return (len(vector), shape, real, self.runtime.physical_tokens(len(vector), real),
-                verify, target, drafter.bit_length())
+                verify, target.bit_length(), drafter.bit_length())
 
-    def _price(self, key):
-        entry = _bounded_get(self.costs, key)
+    def _update(self, table, key, values, weight):
+        """Fold one round's sums and weight into ``key``'s decayed record."""
+        entry = table.pop(key, None) or [[0.0] * len(values), 0.0, self.round]
+        decay = 2.0 ** (-(self.round - entry[2]) / _HALF_LIFE)
+        table[key] = [[decay * old + new for old, new in zip(entry[0], values)],
+                      decay * entry[1] + weight, self.round]
+        if len(table) > _TABLE:
+            table.popitem(last=False)
+
+    def _recent(self, table, key):
+        """Mean per unit weight of ``key``'s sums, or None when unseen or stale."""
+        entry = table.get(key)
         if entry is None or self.round - entry[2] > _STALE:
             return None
-        return entry[0] / entry[1]
+        table.move_to_end(key)
+        return [value / entry[1] for value in entry[0]]
 
-    def _yield(self, vector, greedy, buckets):
-        total = len(vector)
-        for n, bucket, g in zip(vector, buckets, greedy):
-            if not n:
-                continue
-            entry = _bounded_get(self.accepts, (n, bucket, g))
-            if entry is None or self.round - entry[2] > _STALE:
-                return None
-            total += sum(entry[0]) / entry[1]
-        return total
-
-    def _score(self, vector, greedy, history, buckets):
-        price = self._price(self._cost_key(vector, greedy, history))
-        produced = self._yield(vector, greedy, buckets) if price is not None else None
-        return None if produced is None else (price, price / produced)
+    def _score(self, vector, key, greedy, buckets, survivals):
+        """(round price, price per produced token), or None while either is unknown."""
+        price = self._recent(self.costs, key)
+        if price is None:
+            return None
+        produced = len(vector)
+        for accept in zip(vector, buckets, greedy):
+            if accept[0]:
+                if accept not in survivals:
+                    curve = self._recent(self.accepts, accept)
+                    survivals[accept] = None if curve is None else sum(curve)
+                if survivals[accept] is None:
+                    return None
+                produced += survivals[accept]
+        return price[0], price[0] / produced
 
     # ------------------------------------------------------------------ decision
     def _decide(self, vectors, options, evaluate):
@@ -289,23 +287,17 @@ class BlockController:
 
     def _collect(self):
         for (kind, key), total, proposal, verify in self.timer.collect_ready():
-            entry = _bounded_get(self.costs, key)
-            if entry is None:
-                entry = [0.0, 0.0, self.round]
-            decay = 2.0 ** (-(self.round - entry[2]) / _HALF_LIFE)
-            entry[:] = [decay * entry[0] + total, decay * entry[1] + 1, self.round]
-            _bounded_put(self.costs, key, entry)
+            self._update(self.costs, key, [total], 1)
             self.recent_ms = total
             self.stats["samples"] += 1
-            self.times["round_ms"] += total
-            self.times["proposal_ms"] += proposal
-            self.times["verify_ms"] += verify
-            if kind == "init":
-                self.times["init_ms"] += total
-            elif kind == "probe":
-                self.times["probe_ms"] += total
+            self.stats["round_ms"] += total
+            self.stats["proposal_ms"] += proposal
+            self.stats["verify_ms"] += verify
+            if kind in ("init", "probe"):
+                self.stats[f"{kind}_ms"] += total
+            if kind == "probe":
                 self.credit -= total
-            else:
+            elif kind != "init":
                 self.credit += _PROBE_SHARE * total
 
     def snapshot(self):
@@ -313,7 +305,6 @@ class BlockController:
         return {
             "dflash_control": "observe" if self.observe_only else "adaptive",
             **{f"dflash_{k}": v for k, v in self.stats.items()},
-            **{f"dflash_{k}": v for k, v in self.times.items()},
             "dflash_rounds_dropped": self.timer.dropped,
             "dflash_executed_nominal": {str(n): c for n, c in self.executed.items()},
             "dflash_suggested_nominal": {str(n): c for n, c in self.suggested.items()},
