@@ -113,6 +113,11 @@ class SpeculativeDecoder:
         if self.control is not None:
             self.control.observe(accepted)
 
+    def begin_round(self) -> None:
+        """A decode-only batch was chosen: time the round from before its preparation."""
+        if self.control is not None:
+            self.control.begin()
+
     def end_round(self) -> None:
         """The last round's replies are queued: close its timing."""
         if self.control is not None:
@@ -121,8 +126,6 @@ class SpeculativeDecoder:
     def forward(self, forward_input: ForwardInput) -> ForwardOutput:
         batch = forward_input.batch
         control = self.control
-        if control is not None:
-            control.begin()
         lengths = self._draft_lengths(batch)
         limited = self.cache.limit_speculation(lengths)
         if any(lengths) and not any(limited):

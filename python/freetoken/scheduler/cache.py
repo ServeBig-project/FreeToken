@@ -981,12 +981,20 @@ class CacheManager:
             if len(indices) > 0:
                 lazy_free_list.append(indices[:: self.page_size].clone())
 
+        def lazy_free_swa(indices: torch.Tensor) -> None:
+            # One window release per region instead of one per request.
+            if self.swa_paged and len(indices) > 0:
+                lazy_swa_list.append(indices.clone())
+
         lazy_free_list: List[torch.Tensor] = []
+        lazy_swa_list: List[torch.Tensor] = []
         try:
-            self._free = lazy_free
+            self._free, self._free_swa = lazy_free, lazy_free_swa
             yield
         finally:
-            del self._free
+            del self._free, self._free_swa
+            if lazy_swa_list:
+                self.swa_pool.free_swa(torch.cat(lazy_swa_list))
             if lazy_free_list:
                 self.free_slots = torch.cat([self.free_slots] + lazy_free_list)
 

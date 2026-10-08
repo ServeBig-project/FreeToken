@@ -60,8 +60,8 @@ class HostTier:
         self.window_inflight = 0
 
     def _take_window(self, plan) -> int | None:
-        """Window tokens this plan copies, if the copy budget has room for them."""
-        tokens = sum(units for _, units in plan.window) * self.m.page_size
+        """Window slots this plan holds, if the copy budget has room for them."""
+        tokens = plan.window_tokens
         if self.window_inflight + tokens > self.window_limit:
             return None
         self.window_inflight += tokens

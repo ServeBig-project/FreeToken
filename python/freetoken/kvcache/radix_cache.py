@@ -116,6 +116,7 @@ class CopyPlan:
     # every node this plan marked busy, with its units then (a split later moves part of a
     # node's range to new parents, which inherit the mark)
     marked: List[Tuple[TreeNode, int]] = field(default_factory=list)
+    window_tokens: int = 0  # window slots the copy holds: the live ones it locks, plus targets
 
 
 def _key_fn(page_size: int) -> KEY_FN:
@@ -346,12 +347,15 @@ class RadixCache:
         out = deque()
         for node in self._window_nodes(node):
             if not node.window_freed:
-                if node.window_ref == 0:
-                    self._move("window", node.length, to_protected=True)
-                node.window_ref += 1
+                self._hold_window(node)
                 out.appendleft((node, node.length // self.page_size, end - node.length))
             end -= node.length
         return out
+
+    def _hold_window(self, node: TreeNode) -> None:
+        if node.window_ref == 0:
+            self._move("window", node.length, to_protected=True)
+        node.window_ref += 1
 
     def advance_window(self, handle: CacheHandle, keep_from: int) -> None:
         """Release the handle's window locks before position ``keep_from``: its request has
@@ -492,14 +496,16 @@ class RadixCache:
     def plan_restore(self, node: TreeNode) -> CopyPlan | None:
         """Lock ``node``'s path and list what comes back from the host to make it ready; None
         while another copy works on any of it."""
-        window = [(n, n.length // self.page_size) for n in self._window_nodes(node)
-                  if n.value is None or n.window_freed]
+        trailing = [(n, n.length // self.page_size) for n in self._window_nodes(node)]
+        window = [(n, units) for n, units in trailing if n.value is None or n.window_freed]
         kv = [(n, n.length // self.page_size) for n in self._path(node) if n.value is None]
         state = self.has_state and node.state is None
         nodes = list(dict.fromkeys([n for n, _ in kv + window] + ([node] if state else [])))
         if any(n.busy for n in nodes):
             return None
-        return self._plan(node, kv, window, state, nodes)
+        # Restoring a window keeps the part already on the GPU until the rest arrives.
+        held = [(n, units) for n, units in trailing if (n, units) not in window] if window else []
+        return self._plan(node, kv, window, state, nodes, held)
 
     def finish_restore(self, plan: CopyPlan, kv: List[torch.Tensor], state: int | None) -> None:
         """Publish restored locations onto whatever nodes now cover each planned range."""
@@ -531,7 +537,7 @@ class RadixCache:
         nodes = list(dict.fromkeys([n for n, _ in kv + window] + ([node] if state else [])))
         if not nodes:
             return None
-        return self._plan(node, kv, window, state, nodes)
+        return self._plan(node, kv, window, state, nodes, window)
 
     def finish_backup(self, plan: CopyPlan, kv: list, window: list, state: list | None) -> None:
         """Attach the finished host copies; a node split meanwhile shares its copy's spans."""
@@ -565,16 +571,20 @@ class RadixCache:
     def abandon(self, plan: CopyPlan) -> None:
         self._end_plan(plan)
 
-    def _plan(self, node, kv, window, state, nodes) -> CopyPlan:
-        # Mark before locking: a lock may cut a node, and the cut must carry the marks. Only a
-        # copy that moves windows locks the live part of the one it serves; KV and state copies
-        # leave windows evictable.
+    def _plan(self, node, kv, window, state, nodes, held) -> CopyPlan:
+        """``held``: the live window nodes the copy locks (a backup's sources, the GPU part of
+        a restored window); KV and state copies hold none."""
         marked = [(n, n.length // self.page_size) for n in nodes]
         for n in nodes:
             n.busy += 1
         handle = CacheHandle(0, node, self.empty)
-        self.lock(handle, window=bool(window))
-        return CopyPlan(node, kv, window, state, handle, marked)
+        self.lock(handle, window=False)
+        handle.window_ranges = deque((n, units, 0) for n, units in reversed(held))
+        for n, _, _ in handle.window_ranges:
+            self._hold_window(n)
+        targets = sum(units for n, units in window if n.value is None or n.window_freed)
+        tokens = (sum(units for _, units in held) + targets) * self.page_size
+        return CopyPlan(node, kv, window, state, handle, marked, tokens)
 
     def _end_plan(self, plan: CopyPlan) -> None:
         """Take back only this plan's marks; other plans may still use the same nodes."""

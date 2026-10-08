@@ -189,7 +189,7 @@ class BlockController:
             drafter += (n + 1) * w
             real += n + 1
         if real == len(vector):
-            return ("ar", real, target.bit_length())
+            return ("ar", real, greedy.count(False), target.bit_length())
         graphs = self.engine.graph_runner.speculative
         verify = graphs.verify_tokens(len(vector), real) if graphs is not None else real
         shape = tuple((greedy[i], vector[i]) for i in order)
@@ -262,10 +262,11 @@ class BlockController:
         others = [n for n in scores if n != current]
         if not others:
             return None
-        self.probe_at += 1
+        # Wait for the next candidate in turn: cheaper ones must not spend its budget first.
         nominal = others[self.probe_at % len(others)]
         if self.credit < reserve(nominal):
             return None
+        self.probe_at += 1
         self.since_probe = 0
         return nominal
 

@@ -2,6 +2,7 @@
 bounded window behind the full->window slot mapping that the prefix cache shares."""
 from __future__ import annotations
 
+import numpy as np
 import torch
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper
 
@@ -61,12 +62,18 @@ class DFlashLayout:
         modes = {mode: limit for mode, limit in zip(self.modes, self.limits)}
         indices = sum(self.history_width(limit, pages) for limit in modes.values())
         indptr = len(modes) * sum(3 * b + 2 for b in range(1, c.max_running_req + 1))
-        metadata = 4 * (batches * indices + indptr)
+        # FlashInfer's per-wrapper buffers, then one staged history index list per mode.
+        metadata = 4 * (batches * indices + indptr) + 4 * c.max_running_req * indices
+        if self.window_layers:
+            metadata += 8 * c.max_running_req * max(
+                self.history_width(limit, pages) for mode, limit in modes.items()
+                if limit is not None)
         if self.window_layers:
             metadata += 8 * (pages + 3) + 8 * capacity  # full->window mapping, free ring
         tokens = c.max_running_req * (c.speculative_num_steps + 1)
         workspace = (len(modes) * (_INT_WORKSPACE_BYTES + c.max_running_req * _KV_LENS_BYTES)
-                     + 3 * 4 * tokens)
+                     + 3 * 4 * tokens + 8 * (2 * tokens + 2 * c.max_running_req)
+                     + 4 * c.max_running_req)
         return dict(full_context_bytes=len(self.full_layers) * (pages + 1) * self.row_bytes,
                     window_context_bytes=(len(self.window_layers) * (capacity + 1) * self.row_bytes
                                           if self.window_layers else 0),
@@ -85,6 +92,14 @@ class DFlashContext:
         maximum = engine.config.max_running_req
         self.batch_sizes = list(range(1, maximum + 1))
         self.wrappers, self.integer_workspaces = {}, {}
+        # Plan inputs per attention mode: its history limit and whether the window pool holds it.
+        self.modes = {}
+        for layer, (mode, limit) in enumerate(zip(model.attention_modes, layout.limits)):
+            self.modes[mode] = (limit, layer in layout.window_layers)
+        # Host plan descriptors, written in place: queries, last-page lengths, one indptr per mode.
+        self.host_plan = torch.empty(2 * maximum + 1 + len(self.modes) * (maximum + 1),
+                                     dtype=torch.int32, pin_memory=True)
+        self.planned = torch.cuda.Event()  # the last plan's uploads have read host_plan
         self.allocate()
         self._prime_plans()
 
@@ -102,6 +117,15 @@ class DFlashContext:
         from freetoken.models.config import KVCacheGroupSpec
 
         c, layout, pages = self.model.config, self.layout, self.engine.num_pages
+        requests = self.engine.config.max_running_req
+        device = self.engine.device
+        self.history = {mode: torch.empty(requests * layout.history_width(limit, pages),
+                                          dtype=torch.int32, device=device)
+                        for mode, (limit, _) in self.modes.items()}
+        widths = [layout.history_width(limit, pages) for limit, windowed in self.modes.values()
+                  if windowed]
+        self.window_history = (torch.empty(requests * max(widths), dtype=torch.int64, device=device)
+                               if widths else None)
         self.kv = self.pool = None
         if not layout.window_layers:
             self.kv = torch.empty(
@@ -219,29 +243,33 @@ class DFlashContext:
                     indices=indices, k=key.flatten(1), v=value.flatten(1))
 
     def plan(self, rows, firsts, widths):
-        pin = dict(dtype=torch.int32, pin_memory=True)
-        queries = torch.tensor([0, *widths], **pin).cumsum(0, dtype=torch.int32)
+        self.planned.synchronize()  # already done in steady serving; matters back to back
+        count, host = len(rows), self.host_plan.numpy()
+        maximum = self.engine.config.max_running_req
+        queries, last = self.host_plan[:count + 1], self.host_plan[maximum + 1:maximum + 1 + count]
+        np.cumsum([0, *widths], out=host[:count + 1])
+        host[maximum + 1:maximum + 1 + count] = 1
         ends = [p + w for p, w in zip(firsts, widths, strict=True)]
-        last = torch.ones(len(rows), **pin)
+        table = self.engine.page_table
         c = self.model.config
-        planned = set()
-        for layer, (mode, limit) in enumerate(zip(self.model.attention_modes, self.layout.limits)):
-            if mode in planned:
-                continue
-            planned.add(mode)
+        for slot, (mode, (limit, windowed)) in enumerate(self.modes.items()):
             # The history ends where the block starts; the whole block stays visible.
             starts = [0 if limit is None else max(0, first - limit) for first in firsts]
-            indptr = torch.tensor([0, *(e - s for s, e in zip(starts, ends))], **pin).cumsum(
-                0, dtype=torch.int32)
-            indices = torch.cat([self.engine.page_table[row, s:e]
-                                 for row, s, e in zip(rows, starts, ends, strict=True)])
-            if layer in self.layout.window_layers:
-                indices = self.window_units(indices).to(torch.int32)
-            self._wrapper(len(rows), mode, limit).plan(
-                queries, indptr, indices, last, c.num_attention_heads, c.num_key_value_heads,
-                c.head_dim, 1, causal=mode[0], window_left=mode[1],
-                q_data_type=self.engine.dtype, kv_data_type=self.engine.dtype,
-                non_blocking=True)
+            base = 2 * maximum + 1 + slot * (maximum + 1)
+            np.cumsum([0, *(e - s for s, e in zip(starts, ends))], out=host[base:base + count + 1])
+            indices = self.history[mode][:int(host[base + count])]
+            torch.cat([table[row, s:e] for row, s, e in zip(rows, starts, ends, strict=True)],
+                      out=indices)
+            if windowed:
+                units = self.window_history[:indices.numel()]
+                torch.index_select(self.pool.full_to_swa_index_mapping, 0, indices, out=units)
+                indices.copy_(units)
+            self._wrapper(count, mode, limit).plan(
+                queries, self.host_plan[base:base + count + 1], indices, last,
+                c.num_attention_heads, c.num_key_value_heads, c.head_dim, 1, causal=mode[0],
+                window_left=mode[1], q_data_type=self.engine.dtype,
+                kv_data_type=self.engine.dtype, non_blocking=True)
+        self.planned.record()
 
     def attend(self, layer, query, key, value, *, batch_size, locations):
         self.store(layer, key, value, locations)

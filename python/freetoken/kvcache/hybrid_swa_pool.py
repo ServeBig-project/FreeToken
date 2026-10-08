@@ -176,8 +176,8 @@ class HybridSWAKVCache(BaseKVCachePool):
         if n > self._swa_count:
             raise RuntimeError(f"SWA pool exhausted: need {n}, have {self._swa_count}")
         slots = self._ring(self._swa_head, n)
-        self.full_to_swa_index_mapping[full_indices.to(torch.int64)] = (
-            slots[0] if len(slots) == 1 else torch.cat(slots))
+        self.full_to_swa_index_mapping.index_copy_(
+            0, full_indices.to(torch.int64), slots[0] if len(slots) == 1 else torch.cat(slots))
         self._swa_head = (self._swa_head + n) % self._swa_free.numel()
         self._swa_count -= n
 
@@ -189,12 +189,14 @@ class HybridSWAKVCache(BaseKVCachePool):
         if n == 0:
             return
         fi = full_indices.to(torch.int64)
-        slots = self.full_to_swa_index_mapping[fi]
         offset = 0
         for part in self._ring(self._swa_head + self._swa_count, n):
-            part.copy_(slots[offset : offset + part.numel()])
+            torch.index_select(self.full_to_swa_index_mapping, 0, fi[offset : offset + part.numel()],
+                               out=part)
             offset += part.numel()
-        self.full_to_swa_index_mapping[fi] = 0
+        # index_fill_ takes the 0 as a kernel argument; ``mapping[fi] = 0`` would first copy a
+        # host scalar to the device and wait for it.
+        self.full_to_swa_index_mapping.index_fill_(0, fi, 0)
         self._swa_count += n
 
     def swa_available_size(self) -> int:

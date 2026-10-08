@@ -1650,6 +1650,7 @@ class Scheduler(SchedulerIOMixin):
         if self.speculative is not None and batch.is_decode_only:
             reqs, _ = self.speculative.selector.select(batch, self.config.max_forward_len)
             batch = Batch(reqs, decode_size=len(reqs))
+            self.speculative.begin_round()
         forward_input = self._prepare_batch(batch)
         self._report_prompt_admissions(batch)
         return forward_input

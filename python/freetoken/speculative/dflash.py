@@ -14,9 +14,16 @@ class DFlashRuntime:
         self.context = DFlashContext(engine, model, layout)
         self.graphs = {}
         self.sizes = {}
-        maximum = engine.config.max_running_req * (engine.config.speculative_num_steps + 1)
+        requests = engine.config.max_running_req
+        maximum = requests * (engine.config.speculative_num_steps + 1)
         self.inputs, self.positions, self.locations = (
             torch.zeros(maximum, dtype=torch.int32, device=engine.device) for _ in range(3))
+        # Per-round descriptors, packed: positions, flat page-table and token indices of every
+        # draft position, then each request's block offset and flat first-token index.
+        self.host = torch.empty(2 * maximum + 2 * requests, dtype=torch.int64, pin_memory=True)
+        self.staged = torch.empty_like(self.host, device=engine.device)
+        self.first_tokens = torch.empty(requests, dtype=torch.int32, device=engine.device)
+        self.uploaded = torch.cuda.Event()
         self.logits = None
         limit = engine.config.speculative_num_steps
         self.widths = sorted({1, limit, *(n for n in (2, 4, 8) if n <= limit)})
@@ -115,17 +122,30 @@ class DFlashRuntime:
         actual = offset
         physical = self.physical_tokens(count, actual)
         graph = self.graphs.get((count, physical))
-        device = self.engine.device
-        to = lambda x: torch.tensor(x, dtype=torch.int32, pin_memory=True).to(device, non_blocking=True)
-        positions = to([p + j for p, w in zip(firsts, widths, strict=True) for j in range(w)])
-        table_rows = to([row for row, w in zip(rows, widths, strict=True) for _ in range(w)])
-        total = actual
-        self.inputs[:physical].fill_(self.model.mask_token_id)
+        stride = self.engine.page_table.shape[1]
+        positions, flat = [], []
+        for row, first, width in zip(rows, firsts, widths, strict=True):
+            for position in range(first, first + width):
+                positions.append(position)
+                flat.append(row * stride + position)
+        self.uploaded.synchronize()  # the previous round's upload has read the host buffer
+        host, used = self.host.numpy(), 2 * actual + 2 * count
+        host[:actual] = positions
+        host[actual:2 * actual] = flat
+        host[2 * actual:2 * actual + count] = offsets
+        host[2 * actual + count:used] = [row * stride + p for row, p in zip(rows, firsts)]
+        staged = self.staged[:used]
+        staged.copy_(self.host[:used], non_blocking=True)
+        self.uploaded.record()
         self.positions[:physical].zero_()
-        self.positions[:total].copy_(positions)
+        self.positions[:actual].copy_(staged[:actual])
         self.locations[:physical].fill_(self.engine.num_pages)
-        self.locations[:total].copy_(self.engine.page_table[table_rows, positions])
-        self.inputs[to(offsets)] = token_table[to(rows[:count]), to(firsts[:count])]
+        torch.index_select(self.engine.page_table.view(-1), 0, staged[actual:2 * actual],
+                           out=self.locations[:actual])
+        self.inputs[:physical].fill_(self.model.mask_token_id)
+        torch.index_select(token_table.view(-1), 0, staged[2 * actual + count:used],
+                           out=self.first_tokens[:count])
+        self.inputs.index_copy_(0, staged[2 * actual:2 * actual + count], self.first_tokens[:count])
         self.context.plan(rows, firsts, widths)
         if graph is not None:
             graph.replay()
@@ -134,7 +154,7 @@ class DFlashRuntime:
             counters = self.engine.graph_runner.replay_counts
             counters[key] = counters.get(key, 0) + 1
         else:
-            result = self._forward(count, total)[:actual]
+            result = self._forward(count, actual)[:actual]
         return result, offsets
 
 
