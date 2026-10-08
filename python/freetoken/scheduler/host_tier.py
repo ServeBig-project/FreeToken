@@ -14,6 +14,7 @@ import torch
 from freetoken.kvcache.prefix_store import (
     Component, CopyTask, HostCopy, HostSpan, HostStore, PrefixTransfer, units_of,
 )
+from freetoken.utils import align_ceil
 
 if TYPE_CHECKING:
     from .cache import CacheManager
@@ -52,6 +53,23 @@ class HostTier:
         self.comps = components
         self.host_bytes = {c.name: 0 for c in self._all_comps()}
         self.restore_wait_ms = 0.0
+        # Window slots copies may hold beyond what running requests need: one window in all,
+        # which the window pool reserves.
+        self.window_limit = (align_ceil(manager.sliding_window_size, manager.page_size)
+                             if components["window"] else 0)
+        self.window_inflight = 0
+
+    def _take_window(self, plan) -> int | None:
+        """Window tokens this plan copies, if the copy budget has room for them."""
+        tokens = sum(units for _, units in plan.window) * self.m.page_size
+        if self.window_inflight + tokens > self.window_limit:
+            return None
+        self.window_inflight += tokens
+        return tokens
+
+    def _done(self, tokens: int, finish) -> None:
+        self.window_inflight -= tokens
+        finish()
 
     def _all_comps(self) -> List[Component]:
         return [c for c in (*self.comps["paged"], self.comps["window"], self.comps["state"]) if c]
@@ -75,6 +93,10 @@ class HostTier:
             if need > free and need > free + tree.host_freeable_bytes():
                 tree.abandon(plan)  # cannot fit even after evicting: keep older host data
                 continue
+            window_tokens = self._take_window(plan)
+            if window_tokens is None:
+                tree.abandon(plan)  # restores come first: skip this optional copy
+                continue
             kv = [self._copies(self.comps["paged"], units) for _, units in plan.kv]
             win = [self._copies([self.comps["window"]], units) for _, units in plan.window]
             st = self._copies([self.comps["state"]], 1) if plan.state else []
@@ -82,6 +104,7 @@ class HostTier:
                 for copies in (*kv, *win, st):
                     for c in copies or ():
                         c.release()
+                self.window_inflight -= window_tokens
                 tree.abandon(plan)
                 continue
             tasks, keep = [], []
@@ -99,8 +122,8 @@ class HostTier:
                 tasks.append(CopyTask(st[0].comp, idx, HostSpan(st[0], 0, 1)))
             self.transfer.submit(
                 "d2h", tasks,
-                lambda plan=plan, kv=kv, win=win, st=st: tree.finish_backup(
-                    plan, kv, win, st if plan.state else None),
+                lambda plan=plan, kv=kv, win=win, st=st, w=window_tokens: self._done(
+                    w, lambda: tree.finish_backup(plan, kv, win, st if plan.state else None)),
                 keep)
 
     def _copies(self, comps, units) -> list | None:
@@ -142,6 +165,10 @@ class HostTier:
                 plan.state and m.mamba_available_size < 1):
             tree.abandon(plan)
             return False
+        window_tokens = self._take_window(plan)
+        if window_tokens is None:
+            tree.abandon(plan)
+            return True  # wait for the copies in flight to return their window budget
         locs = m._page_to_token(m._allocate(tokens // ps)) if tokens else m.empty
         values, off = [], 0
         for n, _ in plan.kv:
@@ -166,8 +193,8 @@ class HostTier:
             idx = torch.tensor([slot], dtype=torch.int64, device=m.device)
             keep.append(idx)
             tasks.append(CopyTask(self.comps["state"], idx, node.host_state[0]))
-        self.transfer.submit("h2d", tasks,
-                             lambda: tree.finish_restore(plan, values, slot), keep)
+        self.transfer.submit("h2d", tasks, lambda: self._done(
+            window_tokens, lambda: tree.finish_restore(plan, values, slot)), keep)
         return True
 
     # ---------------------------------------------------------------- lifecycle

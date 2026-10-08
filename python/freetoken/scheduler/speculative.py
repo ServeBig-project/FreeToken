@@ -73,14 +73,25 @@ class SpeculativeDecoder:
         budget = config.max_forward_len - batch.size
         pages = self.cache.available_size // self.cache.page_size
         page_size = self.cache.page_size
+        cache, windows = self.cache, None
+        if cache.swa_paged:
+            # Each drafted position also binds a window slot; release what the requests have
+            # moved past before shortening any draft.
+            if cache.swa_available_size < batch.size * config.speculative_num_steps:
+                cache.maybe_free_swa_out_of_window(batch.reqs, force=True)
+            windows = cache.swa_available_size
         lengths = []
         for req in batch.reqs:
             first_page = div_ceil(req.device_len, page_size)
             capacity = (first_page + pages) * page_size - req.device_len
+            if windows is not None:
+                capacity = min(capacity, windows)
             length = min(config.speculative_num_steps, req.remain_len - 1, budget, capacity)
             lengths.append(length)
             budget -= length
             pages -= div_ceil(req.device_len + length, page_size) - first_page
+            if windows is not None:
+                windows -= (div_ceil(req.device_len + length, page_size) - first_page) * page_size
         return lengths
 
     def _logits(self, batch: Batch) -> torch.Tensor:

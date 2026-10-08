@@ -6,6 +6,7 @@ import torch
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper
 
 from freetoken.kernel import store_cache
+from freetoken.utils import align_ceil
 
 # FlashInfer allocates both per wrapper; the integer workspace is then shared per attention mode.
 _INT_WORKSPACE_BYTES = 8 << 20
@@ -30,19 +31,23 @@ class DFlashLayout:
         self.config = config
 
     def window_capacity(self, pages: int) -> int:
-        """Usable window slots: every running request's live window plus one prefill batch,
-        never more than the target positions it maps."""
+        """Usable window slots, never more than the target positions they map: per running
+        request its read window, the committed tokens one release interval lets pass and one
+        draft block (plus two pages of slack); one prefill batch; one window of prefix-cache
+        copies when the host tier is on; and a retained tool-call window per request when
+        anchors are on."""
         if not self.window_layers:
             return 0
-        from freetoken.kvcache.hybrid_swa_pool import _swa_per_req_swa_floor
-        from freetoken.scheduler.cache import _SWA_EVICTION_INTERVAL
+        from freetoken.scheduler.cache import _SWA_EVICTION_INTERVAL, _SWA_RETAIN_GAP
 
-        c = self.config
-        # A speculative round advances N+1 positions between the forward-counted reclaims.
-        per_request = (_swa_per_req_swa_floor(c, self.window)
-                       + _SWA_EVICTION_INTERVAL * c.speculative_num_steps)
-        prefill = getattr(c, "max_extend_tokens", c.max_seq_len)
-        return min(pages, c.max_running_req * per_request + prefill)
+        c, p = self.config, self.config.page_size
+        up = lambda n: align_ceil(n, p)
+        request = up(self.window + _SWA_EVICTION_INTERVAL + c.speculative_num_steps + 1) + 2 * p
+        prefill = up(getattr(c, "max_extend_tokens", c.max_seq_len))
+        copies = up(self.window) if c.prefix_cache_host_gib > 0 else 0
+        anchors = (c.max_running_req * up(self.window + _SWA_RETAIN_GAP)
+                   if getattr(c, "special_token_ckpt", False) else 0)
+        return min(pages, c.max_running_req * request + prefill + copies + anchors)
 
     def history_width(self, limit: int | None, pages: int) -> int:
         """Index entries one request's history plus its draft block can need for a mode."""

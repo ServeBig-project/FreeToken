@@ -16,7 +16,7 @@ from freetoken.utils import align_down, div_ceil
 if TYPE_CHECKING:
     from .utils import PendingReq
 
-# Proactive out-of-window free_swa runs every `interval` forwards (== sglang SWA_EVICTION_INTERVAL).
+# A decoding request releases its out-of-window windows every `interval` committed tokens.
 def _swa_eviction_interval() -> int:
     raw = os.environ.get("FREETOKEN_SWA_EVICTION_INTERVAL", "128")
     try:
@@ -365,6 +365,16 @@ class CacheManager:
                "h2d_time_ms": 0.0, "d2h_time_ms": 0.0, **self.stats}
         if self.host is not None:
             out.update(self.host.status())
+        if self.window_cache:
+            # Physical slots: free, held by the tree (locked by request handles or window
+            # copies, else evictable), and the rest owned by running requests. Copies in
+            # flight are a share of the locked and request slots, not extra ones.
+            slots, free = self.swa_pool.swa_num_tokens - 1, self.swa_pool.swa_available_size()
+            locked, unlocked = self.tree.protected["window"], self.tree.evictable["window"]
+            out["window_slots"] = dict(
+                total=slots, free=free, tree_locked=locked, tree_evictable=unlocked,
+                request_owned=slots - free - locked - unlocked,
+                copy_inflight=self.host.window_inflight if self.host is not None else 0)
         comps = self.components
         out["components"] = [
             {"name": c.name, "storage_kind": c.storage_kind,
@@ -445,21 +455,26 @@ class CacheManager:
                 self.linear_state_pool.free(c.slot)
         req.state_captures[:] = future
 
-    def maybe_free_swa_out_of_window(self, reqs: List[Req], *, forward_iter: int) -> None:
-        """Proactively free each decoding request's now-out-of-window SWA slots, bounding its swa
-        footprint to ~one window so a smaller-than-full swa pool (swa_full_tokens_ratio<1) stays
-        viable. Mirrors sglang ``ScheduleBatch.maybe_evict_swa`` / ``free_swa_out_of_window_slots``:
-        evict every ``interval`` forwards; skip a request's first decode step (its extend forward
-        may still be in-flight under overlap); floor the frontier at the request's protected
-        (reused) prefix so it only frees its OWN slots, never the tree-shared prefix's swa; and keep
-        a ``window + page_size`` margin so the freed slots are out-of-window for every in-flight
+    def maybe_free_swa_out_of_window(self, reqs: List[Req], *, force: bool = False) -> None:
+        """Proactively release each decoding request's now-out-of-window SWA slots, bounding its
+        swa footprint to ~one window so a smaller-than-full swa pool (swa_full_tokens_ratio<1)
+        stays viable. Mirrors sglang ``ScheduleBatch.maybe_evict_swa``: run every ``interval``
+        committed tokens of a request (``force``: now, under pool pressure) -- counting tokens,
+        not forwards, keeps a speculative round's several tokens inside the same bound; skip a
+        request's first decode step (its extend forward may still be in-flight under overlap);
+        free its OWN slots above the reused prefix and drop its lock on the reused prefix's
+        window below the same frontier (other holders keep theirs); and keep a
+        ``window + page_size`` margin so the freed slots are out-of-window for every in-flight
         forward."""
-        if not self.swa_paged or forward_iter % _SWA_EVICTION_INTERVAL != 0:
+        if not self.swa_paged:
             return
         window = self.sliding_window_size
         for req in reqs:
             if req.decode_batch_idx < 1:
                 continue                       # overlap guard: extend forward may still be running
+            if not force and req.cached_len < req.swa_next_reclaim:
+                continue
+            req.swa_next_reclaim = req.cached_len + _SWA_EVICTION_INTERVAL
             floor = req.cache_handle.cached_len   # reused prefix -> its swa is tree-owned, not ours
             threshold = (req.device_len - 1) - window - self.page_size
             if req.toolcall_anchor_len is not None:
@@ -479,6 +494,8 @@ class CacheManager:
                 else:
                     threshold = min(threshold, cap)
             new_evicted = align_down(threshold, self.page_size)
+            if self.window_cache:
+                self.tree.advance_window(req.cache_handle, new_evicted)
             start = max(req.swa_evicted_seqlen, floor)
             if new_evicted > start:
                 self._free_swa(self.page_table[req.table_idx, start:new_evicted])
@@ -838,8 +855,13 @@ class CacheManager:
         prompt_len = align_down(req.max_device_len - req.output_len, self.page_size)
         if prompt_len <= 0:
             return
+        # With recurrent states the resume point is the prompt-end state, which the chunked
+        # recurrence can only freeze up to one chunk before the prompt end.
+        from freetoken.kernel.fla.chunk import CHUNK_SIZE
+
+        resume = prompt_len - (CHUNK_SIZE if self.state_cache else 0)
         keep_from = align_down(
-            max(prompt_len - self.sliding_window_size - _SWA_RETAIN_GAP, 0), self.page_size)
+            max(resume - self.sliding_window_size - _SWA_RETAIN_GAP, 0), self.page_size)
         if keep_from > 0:
             self._free_swa(self.tree.trim_head_window(
                 req.input_ids[:prompt_len], keep_from, req.cache_group))

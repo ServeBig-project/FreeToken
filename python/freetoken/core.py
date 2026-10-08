@@ -58,6 +58,7 @@ class Req:
     mamba_restore_src: int | None = None            # on a prefix hit: tree snapshot slot to COW into the live slot (first chunk only)
     swa_evicted_seqlen: int = 0                      # SWA radix: positions < this had their swa KV freed (slid out of window) during decode
     decode_batch_idx: int = 0                        # SWA radix: # of decode forwards done; the proactive free_swa skips the first (overlap guard)
+    swa_next_reclaim: int = 0                        # SWA radix: committed length at which its out-of-window windows are next released
     # Set once, at the first sampled tool-call opener token (scheduler detection): the state
     # length just after that token (its index + 1). A client-side rewrite of the echoed tool
     # call diverges strictly after this point, so it is the deepest reuse boundary that

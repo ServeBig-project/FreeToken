@@ -393,7 +393,7 @@ def _naive_swa_num_tokens(config) -> int:
     return (config.max_running_req + 1) * width
 
 
-def _swa_per_req_swa_floor(config, window: int | None = None) -> int:
+def _swa_per_req_swa_floor(config) -> int:
     """One request's NON-EVICTABLE swa while it decodes, in tokens:
 
       - the trailing window the prefill-boundary commit locks -- window + retain gap, page-rounded
@@ -405,8 +405,7 @@ def _swa_per_req_swa_floor(config, window: int | None = None) -> int:
     Neither is reachable by evict_swa, so the pool must hold both for every running request."""
     from freetoken.scheduler.cache import _SWA_EVICTION_INTERVAL, _SWA_RETAIN_GAP
 
-    if window is None:
-        window = next(g.sliding_window for g in config.model_config.kv_cache_group_specs() if g.is_swa)
+    window = next(g.sliding_window for g in config.model_config.kv_cache_group_specs() if g.is_swa)
     ps = config.page_size
     locked = ((window + _SWA_RETAIN_GAP + ps - 1) // ps) * ps
     floor = locked + window + _SWA_EVICTION_INTERVAL + 2 * ps
