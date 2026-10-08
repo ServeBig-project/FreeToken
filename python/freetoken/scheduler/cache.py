@@ -206,6 +206,10 @@ class CacheManager:
         device = page_table.device
         self.free_slots = torch.arange(num_pages, dtype=torch.int32, device=device) * page_size
         self.linear_state_pool = linear_state_pool
+        kv_pool = swa_pool
+        if draft_kv is not None and draft_kv.swa_paged:
+            # SD targets have no window of their own: the drafter's window rides the tree.
+            swa_pool, sliding_window_size = draft_kv, draft_kv.window
         self.swa_pool = swa_pool
         self.sliding_window_size = sliding_window_size
         # swa_paged: the pool keeps window KV behind a full->window mapping with its own slots,
@@ -237,7 +241,7 @@ class CacheManager:
         if host_bytes and not self.reuse:
             raise ValueError("--prefix-cache-host-gib needs prefix reuse (--cache-type radix)")
         self.components = build_components(
-            swa_pool, linear_state_pool, draft_kv, window=self.window_cache,
+            kv_pool, linear_state_pool, draft_kv, window_pool=swa_pool, window=self.window_cache,
             state=self.state_cache, required=bool(host_bytes))
         self.tp_group = tp_group  # CPU group when TP > 1: ranks agree on finished copies
         self.host = HostTier(self, host_bytes, self.components) if host_bytes else None
@@ -661,7 +665,7 @@ class CacheManager:
         """Return whole provisional pages beyond the committed target KV."""
         start = div_ceil(req.cached_len, self.page_size) * self.page_size
         end = div_ceil(allocated_len, self.page_size) * self.page_size
-        self._free(self.page_table[req.table_idx, start:end])
+        self._free_pages(self.page_table[req.table_idx, start:end])
 
     def _allocate_paged_rows(
         self,

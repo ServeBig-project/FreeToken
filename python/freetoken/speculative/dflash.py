@@ -9,9 +9,9 @@ from .dflash_cache import DFlashContext
 
 
 class DFlashRuntime:
-    def __init__(self, engine, model):
+    def __init__(self, engine, model, layout):
         self.engine, self.model = engine, model
-        self.context = DFlashContext(engine, model)
+        self.context = DFlashContext(engine, model, layout)
         self.graphs = {}
         self.sizes = {}
         maximum = engine.config.max_running_req * (engine.config.speculative_num_steps + 1)
@@ -28,34 +28,35 @@ class DFlashRuntime:
         self.context.flush(batch)
 
     def capture_stores(self):
-        return [(self.context.kv[0, layer], self.context.kv[1, layer])
-                for layer in range(self.model.config.num_hidden_layers)]
+        return self.context.full_stores()
 
-    @property
-    def storage_bytes_actual(self):
-        return self.storage_bytes_for_pages(self.engine.num_pages)
-
-    def storage_bytes_for_pages(self, pages):
-        buffers = (self.inputs, self.positions, self.locations, self.model.inv_freq)
-        index_width = min(self.engine.config.max_seq_len, pages)
-        index_delta = ((index_width - self.context.index_width) * 4
-                       * sum(self.context.batch_sizes) * len(set(self.model.attention_modes)))
-        return ((pages + 1) * self.context.unit_bytes + self.context.metadata_bytes
-                + index_delta + sum(t.numel() * t.element_size() for t in buffers))
+    def protect_capture(self, tokens):
+        """Target graph capture writes context at locations [0, tokens): point their window
+        bindings at the sentinel meanwhile; the returned function restores them."""
+        pool = self.context.pool
+        if pool is None:
+            return lambda: None
+        mapping = pool.full_to_swa_index_mapping[:tokens]
+        saved = mapping.clone()
+        mapping.zero_()
+        return lambda: mapping.copy_(saved)
 
     def geometry(self):
-        context = (self.engine.num_pages + 1) * self.context.unit_bytes
-        return dict(active=True, weight_bytes=self.model.weight_bytes, context_bytes=context,
-                    metadata_bytes=self.storage_bytes_actual - context,
-                    reserved_bytes=self.model.weight_bytes + self.storage_bytes_actual)
+        out = self.context.geometry()
+        out["weight_bytes"] = self.model.weight_bytes
+        out["context_bytes"] = out["full_context_bytes"] + out["window_context_bytes"]
+        out["reserved_bytes"] = (out["weight_bytes"] + out["context_bytes"]
+                                 + out["metadata_bytes"] + out["workspace_bytes"])
+        return dict(active=True, **out)
 
     def _forward(self, batch_size, tokens):
         embeddings = self.engine.model.model.embed_tokens.forward(self.inputs[:tokens])
         embeddings = embeddings * self.model.input_embedding_scale
+        locations = self.context.slots(self.locations[:tokens])
         hidden = self.model(
             embeddings, self.positions[:tokens],
             lambda layer, q, k, v: self.context.attend(
-                layer, q, k, v, batch_size=batch_size, locations=self.locations[:tokens]))
+                layer, q, k, v, batch_size=batch_size, locations=locations))
         logits = self.engine.model.lm_head.forward_selected(hidden).float()
         logits = logits * self.model.output_multiplier
         softcap = self.model.final_logit_softcapping

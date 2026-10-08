@@ -33,7 +33,8 @@ class SpeculativeGraphs:
         self.query_width = config.speculative_num_steps + 1
         # Admission is LRU up to this many query tokens and layer-distance above it, so
         # padding a smaller verification batch past it could change the eviction policy.
-        self.exact_tokens = max(4, runner.moe_offload_cache.decode_cache_size // (
+        cache = runner.moe_offload_cache
+        self.exact_tokens = max_tokens if cache is None else max(4, cache.decode_cache_size // (
             config.model_config.num_experts_per_tok * config.model_config.num_moe_layers))
         self.real_tokens = torch.empty((), dtype=torch.int32, device=runner.device)
         self.dummy_slot = ctx.page_table[runner.dummy_req.table_idx, 0]
@@ -48,6 +49,8 @@ class SpeculativeGraphs:
         # Rebuild can preserve existing prefix KV. Capture scratch must not overwrite it.
         scratch = [storage.flatten(0, 1)[:max_tokens] for pair in stores for storage in pair]
         saved = [tensor.clone() for tensor in scratch]
+        restore_windows = (ctx.draft_context.protect_capture(max_tokens)
+                           if ctx.draft_context is not None else lambda: None)
         try:
             for bs in reversed(runner.graph_bs_list):
                 if bs > max_tokens:
@@ -77,6 +80,7 @@ class SpeculativeGraphs:
         finally:
             for tensor, original in zip(scratch, saved, strict=True):
                 tensor.copy_(original)
+            restore_windows()
             runner._reset_moe_offload_cache()
             torch.cuda.synchronize(runner.device)
 

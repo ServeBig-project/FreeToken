@@ -260,6 +260,17 @@ def parse_args(
         help="DFlash checkpoint directory or Hugging Face model; omitted uses self drafting.",
     )
     parser.add_argument(
+        "--dflash-compact-kv", action=argparse.BooleanOptionalAction,
+        default=ServerArgs.dflash_compact_kv,
+        help="Keep only the window of DFlash's sliding-attention layers on the GPU (default on; "
+             "the attention is unchanged). Ignored without a DFlash drafter.",
+    )
+    parser.add_argument(
+        "--dflash-attention-window", type=int, default=ServerArgs.dflash_attention_window,
+        help="Let DFlash's full-attention layers read at most N committed history tokens "
+             "(an approximation of the drafter only); 0 keeps the full history.",
+    )
+    parser.add_argument(
         "--speculative-draft-experts",
         type=_positive_int,
         default=ServerArgs.speculative_draft_experts,

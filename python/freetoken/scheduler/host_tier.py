@@ -19,10 +19,11 @@ if TYPE_CHECKING:
     from .cache import CacheManager
 
 
-def build_components(kv_pool, state_pool, draft_kv, *, window: bool, state: bool,
+def build_components(kv_pool, state_pool, draft_kv, *, window_pool, window: bool, state: bool,
                      required: bool) -> dict:
     """The cache's storage components by role. ``required`` (host tier on) turns a pool without
-    the needed layout views into a startup error naming the missing storage capability."""
+    the needed layout views into a startup error naming the missing storage capability.
+    ``window_pool`` holds the window KV: the target pool, or the drafter's context."""
     def comp(pool, method, name, kind):
         if hasattr(pool, method):
             return Component(name, kind, getattr(pool, method))
@@ -32,11 +33,12 @@ def build_components(kv_pool, state_pool, draft_kv, *, window: bool, state: bool
         return None
 
     paged = [comp(kv_pool, "paged_views", "paged_kv", "paged")]
-    if draft_kv is not None:
+    if draft_kv is not None and draft_kv.paged_views():
         paged.append(comp(draft_kv, "paged_views", "draft_kv", "paged"))
     out = {"paged": [c for c in paged if c is not None], "window": None, "state": None}
     if window:
-        out["window"] = comp(kv_pool, "window_views", "window_kv", "window")
+        name = "draft_window" if window_pool is draft_kv else "window_kv"
+        out["window"] = comp(window_pool, "window_views", name, "window")
     if state:
         out["state"] = comp(state_pool, "state_views", "recurrent_state", "boundary_state")
     return out

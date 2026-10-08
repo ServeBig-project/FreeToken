@@ -296,6 +296,8 @@ class ForwardOutput(NamedTuple):
 
 
 class Engine:
+    dflash_layout = None  # the drafter's storage layout, set when a DFlash path is given
+
     def __init__(self, config: EngineConfig):
         assert not torch.cuda.is_initialized()
         set_tp_info(rank=config.tp_info.rank, size=config.tp_info.size)
@@ -353,6 +355,8 @@ class Engine:
                 f"model {type(self.model).__name__} does not support layer-group prefill"
             )
         self.model.load_state_dict(self._load_weight_state_dict(config))
+        # The drafter's own weights count as resident weights in every budget.
+        self._load_dflash(config)
         post_weights_free = self._sync_get_memory()[0]
         self._weights_bytes = self._baseline_free - post_weights_free
         # Pool-budget baseline for the desktop cache sliders: free VRAM after the weights are
@@ -374,6 +378,8 @@ class Engine:
         # off it; the KV pool family owns every geometry-specific formula behind the rest.
         available_memory = _startup_kv_budget(config.memory_ratio, init_free_memory, new_free)
         available_memory -= state_pool_bytes(config) + transfer_device_bytes(config)
+        if self.dflash_layout is not None:
+            self._fit_dflash_pages(config, available_memory)
         self.num_pages = self._pool_cls.solve_num_pages(config, available_memory)
         num_tokens = self.num_pages * config.page_size
         self.ctx.kv_cache = self.kv_cache = create_kv_pool(
@@ -401,7 +407,11 @@ class Engine:
         if config.model_config.is_moe:
             self.ctx.moe_backend = self.moe_backend = create_moe_backend(config.moe_backend)
 
-        draft_bytes = self._init_dflash(config)
+        if self.dflash_layout is not None:
+            from freetoken.speculative.dflash import DFlashRuntime
+
+            self.ctx.draft_context = self.dflash = DFlashRuntime(
+                self, self.dflash_model, self.dflash_layout)
 
         # ======================= Linear (GatedDeltaNet) state initialization ========================
         linear_group = config.model_config.linear_attention_group()
@@ -410,7 +420,7 @@ class Engine:
 
             self.linear_state_pool = LinearStatePool(
                 group=linear_group,
-                num_slots=_linear_pool_num_slots(config, draft_bytes=draft_bytes),
+                num_slots=_linear_pool_num_slots(config),
                 fixed_slots=(config.max_running_req if config.cache_type != "hybrid_radix" else 0),
                 dtype=self.dtype,
                 device=self.device,
@@ -423,9 +433,7 @@ class Engine:
 
         if self.linear_state_pool is not None:
             from freetoken.kvcache.linear_state_pool import gdn_state_budget
-            self._gdn_state_budget_bytes = (
-                gdn_state_budget(config) - draft_bytes
-            )
+            self._gdn_state_budget_bytes = gdn_state_budget(config)
 
         # ======================= Sampler initialization ========================
         self.sampler = Sampler(self.device, config.model_config.vocab_size)
@@ -475,17 +483,15 @@ class Engine:
             # Prefill runs on the first comma part; warm its autotune cache.
             self._warmup_prefill()
 
-    def _init_dflash(self, config: EngineConfig) -> int:
+    def _load_dflash(self, config: EngineConfig) -> None:
         self.dflash_model = self.dflash = None
         if config.speculative_draft_model_path is None:
-            return 0
-        from freetoken.speculative.dflash import DFlashRuntime
+            return
+        from freetoken.speculative.dflash_cache import DFlashLayout
         from freetoken.speculative.dflash_model import DFlashModel, read_dflash_config
 
         if not getattr(self.model, "supports_draft_features", False):
             raise ValueError("Target model does not expose DFlash context features")
-        if config.model_config.linear_attention_group() is None:
-            raise ValueError("DFlash requires a GDN state budget to fund its storage")
         if config.attention_backend != "fi":
             raise ValueError("DFlash requires the FlashInfer attention backend")
         draft = read_dflash_config(config.speculative_draft_model_path)
@@ -500,8 +506,25 @@ class Engine:
         self.dflash_model = DFlashModel(
             config.speculative_draft_model_path, dtype=self.dtype, device=self.device,
         )
-        self.ctx.draft_context = self.dflash = DFlashRuntime(self, self.dflash_model)
-        return self.dflash_model.weight_bytes + self.dflash.storage_bytes_actual
+        self.dflash_layout = DFlashLayout(config, draft)
+
+    def _fit_dflash_pages(self, config: EngineConfig, available: int) -> None:
+        """Price the drafter's context next to the target KV: solve the page count both fit,
+        or check that an explicit one does, before anything is allocated."""
+        from freetoken.engine.cache_budget import max_pages
+
+        per_page, fixed, _, _ = self._pool_cls.kv_cost(config)
+        need = lambda pages: pages * per_page + fixed + self.dflash_layout.total_bytes(pages)
+        pages = config.num_page_override
+        if pages is None:
+            object.__setattr__(config, "num_page_override", max_pages(need, available))
+        elif need(pages) > available:
+            draft = self.dflash_layout.bytes(pages)
+            raise ValueError(
+                f"{pages} KV pages need {mem_GB(pages * per_page + fixed)} of target KV and "
+                + ", ".join(f"{k}={mem_GB(v)}" for k, v in draft.items())
+                + f" of DFlash storage; only {mem_GB(available)} is available after weights, "
+                "experts and state pools")
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
         if config.tp_info.size == 1 or config.use_pynccl:
@@ -576,6 +599,8 @@ class Engine:
             prefill_overlap_min_layers=(
                 1 if getattr(config, "batching_policy", "legacy") == "joint" else 2
             ),
+            page_extra_bytes=(self.dflash_layout.total_bytes if self.dflash_layout is not None
+                              else lambda pages: 0),
         )
 
     def _init_offload_moe_cache(self, config: EngineConfig) -> OffloadMoeCache:
@@ -936,8 +961,8 @@ class Engine:
         )
         draft_bytes = 0
         if self.dflash is not None:
-            draft_bytes = (self.dflash_model.weight_bytes + self.dflash.storage_bytes_for_pages(
-                self.num_pages if num_pages is None else num_pages))
+            draft_bytes = self.dflash_layout.total_bytes(
+                self.num_pages if num_pages is None else num_pages)
         self.kv_cache.validate_rebuild(
             config, num_pages=num_pages,
             num_swa_pages=num_swa_pages, target_moe=target_moe,
@@ -996,6 +1021,10 @@ class Engine:
         self._refresh_seq_state(config)
         if self.dflash is not None and num_pages is not None:
             self.dflash.rebuild()
+        elif self.dflash is not None and num_mamba_slots is not None:
+            # The prefix cache drops its GPU copies with the state pool, windows included;
+            # reset before capture so the new graphs never see their stale bindings.
+            self.dflash.context.reset_window()
         if self.linear_state_pool is not None and state_geometry_changed:
             self._gdn_state_budget_bytes = state_pool_bytes(config, self.linear_state_pool.num_slots)
         aligned_max_seq_len = _page_table_width(self.max_seq_len, config.page_size)
@@ -1876,7 +1905,7 @@ def _adjust_config(config: EngineConfig):
         # Never fall back silently: eager SD is far slower and would mislead comparisons.
         if not config.speculative_graphs:
             raise ValueError(
-                "SD CUDA Graph requires BF16 experts with --moe-backend offload, "
+                "SD CUDA Graph requires BF16 activations, BF16 or NVFP4 experts with --moe-backend offload, "
                 "FlashInfer attention, page size 1 and at most 8 draft steps; "
                 "pass --cuda-graph-max-bs 0 to run speculation eagerly"
             )
