@@ -4,7 +4,7 @@ from __future__ import annotations
 import torch
 
 from freetoken.speculative import DraftResult
-from .block_cost import BlockDraftCost
+from .block_cost import BlockController
 from .dflash_cache import DFlashContext
 
 
@@ -99,6 +99,10 @@ class DFlashRuntime:
     def rebuild(self):
         self.context.rebuild()
 
+    def physical_tokens(self, count, actual):
+        """Positions a draft of ``actual`` tokens over ``count`` requests runs at."""
+        return next((n for n in self.sizes.get(count, ()) if n >= actual), actual)
+
     def propose_logits(self, batch, lengths, token_table):
         count = batch.size
         rows = [r.table_idx for r in batch.reqs]
@@ -109,7 +113,7 @@ class DFlashRuntime:
             offsets.append(offset)
             offset += width
         actual = offset
-        physical = next((n for n in self.sizes.get(count, ()) if n >= actual), actual)
+        physical = self.physical_tokens(count, actual)
         graph = self.graphs.get((count, physical))
         device = self.engine.device
         to = lambda x: torch.tensor(x, dtype=torch.int32, pin_memory=True).to(device, non_blocking=True)
@@ -140,16 +144,19 @@ class DFlashDrafter:
     def __init__(self, engine, table, generator):
         self.engine, self.table, self.generator = engine, table, generator
         self.runtime = engine.dflash
-        self.cost = BlockDraftCost(engine)
+        self.control = (BlockController(engine, self.runtime)
+                        if engine.config.speculative_adaptive_cost else None)
+        self.positions = [0, 0]  # real and physical draft positions
 
     def plan(self, batch, lengths):
-        return self.cost.plan(lengths)
+        return self.control.plan(batch, lengths) if self.control is not None else lengths
 
     def propose(self, batch, views, starts, lengths):
         engine, sampler = self.engine, self.engine.sampler
-        self.cost.begin()
         logits, offsets = self.runtime.propose_logits(batch, lengths, self.table.token_pool)
-        self.cost.end(batch.size, max(lengths))
+        real = batch.size + sum(lengths)
+        self.positions[0] += real
+        self.positions[1] += self.runtime.physical_tokens(batch.size, real)
         query_rows = [off + 1 + j for off, n in zip(offsets, lengths, strict=True) for j in range(n)]
         selected = logits[query_rows]
         probabilities = sampler.probabilities(selected, sampler.prepare(batch, repeats=lengths))
@@ -166,7 +173,9 @@ class DFlashDrafter:
         return DraftResult(tokens, q, lengths)
 
     def snapshot(self):
-        return dict(drafter="dflash", residency_stops=0, draft_expert_loads=0, **self.cost.snapshot())
-
-    def observe_acceptance(self, lengths, accepted):
-        self.cost.observe_acceptance(lengths, accepted)
+        out = dict(drafter="dflash", residency_stops=0, draft_expert_loads=0,
+                   dflash_control="fixed", dflash_draft_positions=self.positions[0],
+                   dflash_draft_physical_positions=self.positions[1])
+        if self.control is not None:
+            out.update(self.control.snapshot())
+        return out

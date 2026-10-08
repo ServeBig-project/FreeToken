@@ -67,6 +67,8 @@ def _gib(n_bytes: int) -> str:
 
 
 class Scheduler(SchedulerIOMixin):
+    speculative: SpeculativeDecoder | None = None  # set when SD is configured
+
     def __init__(self, config: SchedulerConfig):
         from freetoken.engine import Engine
 
@@ -230,7 +232,9 @@ class Scheduler(SchedulerIOMixin):
         logger.info_rank0("Scheduler is idle, waiting for new reqs...")
         self.cache_manager.check_integrity()
         # Copies just finished: publish the status no reply will carry until the next request.
-        self.send_result([CacheStatusMsg(self.cache_manager.status())])
+        self.send_result([CacheStatusMsg(
+            self.cache_manager.status(),
+            self.speculative.snapshot() if self.speculative is not None else None)])
         moe_cache = self.engine.moe_offload_cache
         if moe_cache is not None and moe_cache.collect_stats:
             stats = moe_cache.cumulative_stats_snapshot()
@@ -385,6 +389,8 @@ class Scheduler(SchedulerIOMixin):
             ongoing_data = (forward_input, self._forward(forward_input))
 
         self._process_last_data(ongoing_data)
+        if self.speculative is not None:
+            self.speculative.end_round()
         self._flush_abort_acks()
 
     def layered_loop(self) -> None:
@@ -992,6 +998,7 @@ class Scheduler(SchedulerIOMixin):
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
         retained = [0] * batch.size
+        accepted = [None] * batch.size  # drafts accepted per request, before stop truncation
         completed = []
         with self.cache_manager.lazy_free_region():
             for i, req in enumerate(batch.reqs):
@@ -1023,6 +1030,7 @@ class Scheduler(SchedulerIOMixin):
                 tokens = next_tokens_cpu[i].reshape(-1)
                 if output.speculative_ends is not None:
                     tokens = tokens[tokens >= 0]
+                    accepted[i] = len(tokens) - 1
                 for j, next_token in enumerate(tokens):
                     if output.speculative_ends is not None:
                         req.complete_one()
@@ -1064,10 +1072,12 @@ class Scheduler(SchedulerIOMixin):
                 retained[i] = j + 1
                 if output.speculative_ends is not None:
                     self.cache_manager.release_speculative(req, output.speculative_ends[i])
-                    self.speculative.accepted_draft_tokens += min(j + 1, len(tokens) - 1)
+                    self.speculative.emitted_tokens += j + 1
 
                 completed.append((i, req, finished))
 
+            if output.speculative_ends is not None:
+                self.speculative.observe(accepted)
             if output.speculative_state is not None:
                 cost = self.speculative.cost
                 if cost is not None:

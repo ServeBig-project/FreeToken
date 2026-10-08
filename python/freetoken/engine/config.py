@@ -28,6 +28,8 @@ class EngineConfig:
     # a positive window also bounds the history the drafter's full-attention layers read.
     dflash_compact_kv: bool = True
     dflash_attention_window: int = 0
+    # Adaptive DFlash computes its decisions but runs the configured length (overhead A/B).
+    dflash_adaptive_observe_only: bool = False
     speculative_draft_load_missing: bool = False
     speculative_verify_prefetch: bool = False
     # GDN ReplaySSM: target AR, draft and verify read checkpoint + per-position update records.
@@ -115,6 +117,9 @@ class EngineConfig:
             raise ValueError("--dflash-attention-window must be >= 0")
         if self.dflash_attention_window and not external_draft:
             raise ValueError("--dflash-attention-window requires --speculative-draft-model-path")
+        if self.dflash_adaptive_observe_only and not (external_draft and self.speculative_adaptive_cost):
+            raise ValueError("--dflash-adaptive-observe-only requires --speculative-draft-model-path "
+                             "and --speculative-adaptive-cost")
         if external_draft:
             if not 1 <= self.speculative_num_steps <= 8:
                 raise ValueError("DFlash requires 1..8 draft tokens")

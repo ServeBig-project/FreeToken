@@ -438,7 +438,9 @@ class Engine:
         # ======================= Sampler initialization ========================
         self.sampler = Sampler(self.device, config.model_config.vocab_size)
         self.speculative_cost = None
-        if config.speculative_adaptive_cost or config.speculative_verify_prefetch:
+        # DFlash prices whole rounds on the host; only self drafting measures expert costs.
+        if ((config.speculative_adaptive_cost and self.dflash is None)
+                or config.speculative_verify_prefetch):
             from .speculative_cost import SpeculativeCost
             self.ctx.speculative_cost = self.speculative_cost = SpeculativeCost(self)
             if config.speculative_verify_prefetch:

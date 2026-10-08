@@ -185,7 +185,8 @@ def tokenize_worker(
                         )
                     )
                 elif isinstance(m, CacheStatusMsg):
-                    send_frontend.put(CacheStatusReply(prefix_cache=m.prefix_cache))
+                    send_frontend.put(CacheStatusReply(prefix_cache=m.prefix_cache,
+                                                       speculative=m.speculative))
                 elif isinstance(m, CacheRebuildResultMsg):
                     send_frontend.put(
                         CacheRebuildReply(

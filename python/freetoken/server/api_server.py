@@ -253,6 +253,8 @@ class FrontendManager:
                 continue
             if isinstance(msg, CacheStatusReply):
                 self.stats.prefix_cache = msg.prefix_cache
+                if msg.speculative is not None:
+                    self.stats.speculative.update(msg.speculative)
                 continue
             for msg in _unwrap_msg(msg):
                 # Global accounting follows actual admitted/sampled work even after the HTTP

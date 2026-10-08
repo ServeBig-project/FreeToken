@@ -44,9 +44,12 @@ class SpeculativeDecoder:
             self.drafter = DFlashDrafter(engine, table, self.generator)
         else:
             self.drafter = SelfDrafter(engine, table, self._logits, self.generator)
+        self.control = getattr(self.drafter, "control", None)
         self.selector = DecodeBatchSelector()
         self.draft_tokens = 0
         self.accepted_draft_tokens = 0
+        self.emitted_tokens = 0
+        self.verify_positions = [0, 0]  # real and physical
         self.verify_steps = 0
         self.state_slot_stops = 0
         self.draft_length_histogram = [0] * (engine.config.speculative_num_steps + 1)
@@ -55,6 +58,9 @@ class SpeculativeDecoder:
         result = {
             "draft_tokens": self.draft_tokens,
             "accepted_draft_tokens": self.accepted_draft_tokens,
+            "emitted_tokens": self.emitted_tokens,
+            "verify_positions": self.verify_positions[0],
+            "verify_physical_positions": self.verify_positions[1],
             "verify_steps": self.verify_steps,
             "state_slot_stops": self.state_slot_stops,
             "draft_length_histogram": list(self.draft_length_histogram),
@@ -100,14 +106,29 @@ class SpeculativeDecoder:
         batch.input_ids = self.table.token_pool[forward_input.input_tuple]
         return self.engine.compute_logits(batch)
 
+    def observe(self, accepted: list) -> None:
+        """Committed outcome of the last round: per request the drafts the target accepted
+        (None when unknown), before any stop truncated them."""
+        self.accepted_draft_tokens += sum(a for a in accepted if a is not None)
+        if self.control is not None:
+            self.control.observe(accepted)
+
+    def end_round(self) -> None:
+        """The last round's replies are queued: close its timing."""
+        if self.control is not None:
+            self.control.end()
+
     def forward(self, forward_input: ForwardInput) -> ForwardOutput:
         batch = forward_input.batch
+        control = self.control
+        if control is not None:
+            control.begin()
         lengths = self._draft_lengths(batch)
         limited = self.cache.limit_speculation(lengths)
         if any(lengths) and not any(limited):
             self.state_slot_stops += 1
         lengths = limited
-        if not any(lengths):
+        if not any(lengths) and control is None:
             self._record_lengths(lengths)
             return self.engine.forward_batch(batch, forward_input.sample_args)
 
@@ -131,7 +152,11 @@ class SpeculativeDecoder:
             req.cached_len, req.device_len = start, end
         self.cache.allocate_paged(views)
 
+        if control is not None:
+            control.mark(1)
         draft = self.drafter.propose(batch, views, starts, lengths)
+        if control is not None:
+            control.mark(2)
         proposals, draft_probs, lengths = draft.tokens, draft.probabilities, draft.lengths
         self.draft_tokens += sum(lengths)
         self._record_lengths(lengths)
@@ -144,6 +169,13 @@ class SpeculativeDecoder:
         if state is not None:
             state.prepare_verify(verify, lengths)
         logits = self._logits(verify)
+        if control is not None:
+            control.mark(3)
+        real = batch.size + sum(lengths)
+        graphs = engine.graph_runner.speculative
+        self.verify_positions[0] += real
+        self.verify_positions[1] += (graphs.verify_tokens(batch.size, real) if graphs is not None
+                                     else real)
         target_probs = sampler.probabilities(
             logits, sampler.prepare(verify, repeats=[length + 1 for length in lengths])
         )

@@ -284,7 +284,13 @@ def parse_args(
     )
     parser.add_argument(
         "--speculative-adaptive-cost", action="store_true",
-        help="Use measured costs and accepted prefixes to decide after each draft step whether to continue.",
+        help="Use measured costs and accepted prefixes to choose draft lengths (DFlash: one whole "
+             "block of AR/2/4/8 per round).",
+    )
+    parser.add_argument(
+        "--dflash-adaptive-observe-only", action="store_true",
+        help="With adaptive DFlash: after its initial measurements, compute every decision but "
+             "draft the configured length (controller overhead A/B).",
     )
     parser.add_argument(
         "--speculative-draft-load-missing", action="store_true",
