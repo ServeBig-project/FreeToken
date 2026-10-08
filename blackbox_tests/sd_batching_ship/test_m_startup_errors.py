@@ -18,8 +18,11 @@ CASES = {
                       ("phase",)),
     "legacy_inwave_steps_omitted": (["--batching-policy", "legacy", "--speculative-phase", "inwave"], ("phase",)),
     "steps_9": (["--speculative-num-steps", "9"], ("speculative-num-steps", "speculative_num_steps", "steps")),
-    "draft_path_missing": (["--speculative-draft-model-path", "/nonexistent/dflash-dir"], ("draft", "nonexistent")),
-    "draft_size_mismatch": (["--speculative-draft-model-path", env.DFLASH], ("draft", "dflash")),
+    # F2: the message must say what is wrong, not only echo the path or an unrelated budget
+    "draft_path_missing": (["--speculative-draft-model-path", "/nonexistent/dflash-dir"],
+                           ("not exist", "not found", "no such", "missing", "invalid draft")),
+    "draft_size_mismatch": (["--speculative-draft-model-path", env.DFLASH],
+                            ("target", "match", "compatib", "hidden", "size")),
     "cpu_moe_explicit_sd": (["--moe-backend", "cpu", "--moe-cpu-threads", "8", "--speculative-num-steps", "4"],
                             ("cpu", "moe", "backend")),
 }

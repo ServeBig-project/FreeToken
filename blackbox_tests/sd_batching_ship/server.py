@@ -25,10 +25,23 @@ def wait_gpu_free(timeout=3600):
         time.sleep(10)
 
 
-def free_port():
+def _free(port):
     with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+        try:
+            s.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def free_port():
+    """An HTTP port whose +1 (the server's torch distributed port) is also free."""
+    while True:
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            p = s.getsockname()[1]
+        if p < 65535 and _free(p + 1):
+            return p
 
 
 def launch_env():

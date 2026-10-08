@@ -20,7 +20,7 @@ PATHS = {
     # speculative counters (section 4, cumulative)
     "drafted": ["speculative.draft_tokens", "speculative.drafted_tokens", "speculative.num_draft_tokens"],
     "accepted": ["speculative.accepted_draft_tokens", "speculative.accepted_tokens", "speculative.num_accepted_tokens"],
-    "rounds": ["speculative.verify_rounds", "speculative.verify_steps"],
+    "rounds": ["speculative.verify_rounds"],
     "sd_inwave": ["speculative.verify_rounds.inwave", "speculative.inwave_rounds", "speculative.phase_rounds.inwave",
                   "speculative.execution.inwave"],
     "sd_outwave": ["speculative.verify_rounds.outwave", "speculative.outwave_rounds", "speculative.phase_rounds.outwave",
@@ -95,16 +95,8 @@ def sd_on(stats):
     return bool(num(stats, "steps")) and d not in (None, "", "none", "off", False)
 
 
-def delta(before, after, name, missing_zero=False):
-    """With SD off the per-phase round counters are absent; missing_zero reads them as 0."""
-    def n(s):
-        try:
-            return num(s, name)
-        except AssertionError:
-            if missing_zero:
-                return 0
-            raise
-    return n(after) - n(before)
+def delta(before, after, name):
+    return num(after, name) - num(before, name)
 
 
 def text(obj):

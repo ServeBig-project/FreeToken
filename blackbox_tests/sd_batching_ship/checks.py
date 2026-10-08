@@ -14,6 +14,8 @@ def effective(se, batching, sd, phase=None, drafter=None):
     """Section 2/4: ready stats report the actual batching and SD state separately."""
     s = se.c.stats()
     assert (s.get("execution") or {}).get("effective") is not None, f"no execution.effective: {s}"
+    for k in ("sd_inwave", "sd_outwave"):  # section 4: per-phase counters exist (zero) from ready, SD on or off
+        assert isinstance(view.get(s, k), (int, float)), f"{k} not a number at ready: {view.get(s, k)}"
     b = str(view.get(s, "batching")).lower()
     assert batching in b, f"effective batching {b!r}, expected {batching!r}"
     assert view.sd_on(s) == sd, f"effective SD on={view.sd_on(s)}, expected {sd}: {view.text(s)[:1500]}"
@@ -73,7 +75,7 @@ def staggered_wave(se, long_tokens=2500, n_long=3, decode_tokens=256, wave_token
     exact_len(res[0], decode_tokens)
     for r in res[1:]:
         exact_len(r, wave_tokens)
-    d = {k: view.delta(b, a, k, missing_zero=not view.sd_on(a)) for k in ("rounds", "sd_inwave", "sd_outwave", "drafted")}
+    d = {k: view.delta(b, a, k) for k in ("rounds", "sd_inwave", "sd_outwave", "drafted")}
     d["ar_by_reason"] = {k: v - view.reasons(b).get(k, 0) for k, v in view.reasons(a).items()
                          if isinstance(v, (int, float))}
     record(se.name + ":staggered_wave", d)

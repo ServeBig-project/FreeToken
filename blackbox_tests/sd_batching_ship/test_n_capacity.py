@@ -1,5 +1,6 @@
 """Section 5 persistent budget: the same tight GDN budget gives AR + reason when SD is omitted and a
-startup error when SD is explicit. FT_TIGHT_GDN_BYTES must hold the AR state pool but not SD's."""
+startup error when SD is explicit. FT_TIGHT_GDN_BYTES (coordinator value, ReplaySSM off, default cache
+type) holds the AR state pool but not one SD window."""
 import pytest
 
 from . import checks, env, view
@@ -17,10 +18,9 @@ def test_budget_pair():
         c = Client(s.url)
         st = c.stats()
         record("N_default_tight_gdn", {"execution": st.get("execution")})
-        if view.sd_on(st):
-            pytest.skip(f"budget {env.TIGHT_GDN_BYTES} still fits SD; pair not triggered")
+        assert not view.sd_on(st), f"budget {env.TIGHT_GDN_BYTES} cannot hold an SD window, yet SD is on"
         t = view.fallback_text(st)
-        assert any(w in t for w in ("budget", "capacity", "memory", "state", "gdn")), t
+        assert any(w in t for w in ("budget", "state", "gdn")), f"no state-budget fallback reason: {t}"
         r = c.complete("Continue: 1, 2, 3,", 32)
         checks.exact_len(r, 32)
     finally:

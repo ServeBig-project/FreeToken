@@ -19,8 +19,8 @@ DFLASH = os.environ.get(
     "f181eece646affea2c38b2765f1aaa01a9734ccd",
 )
 # A GDN budget that holds the AR state pool but not the extra SD state (section 5).
-# Set from a default run's reported GDN bytes; the capacity pair is skipped when unset.
-TIGHT_GDN_BYTES = os.environ.get("FT_TIGHT_GDN_BYTES")
+# Coordinator-provided public value for Qwen3.6 NVFP4 with ReplaySSM off and the default cache type.
+TIGHT_GDN_BYTES = os.environ.get("FT_TIGHT_GDN_BYTES", "1250000000")
 
 BUDGET = ["--max-running-requests", "4", "--num-tokens", "16384", "--max-seq-len-override", "4096",
           "--cuda-graph-max-bs", "4"]
