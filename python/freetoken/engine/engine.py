@@ -510,6 +510,24 @@ class Engine:
         )
         self.dflash_layout = DFlashLayout(config, draft)
 
+    def _fit_dflash_experts(self, config: EngineConfig, banks) -> None:
+        """An explicit expert pool must leave the drafter and the smallest legal KV their
+        bytes; say what each needs before anything is allocated."""
+        from freetoken.engine.cache_budget import expert_bytes_per_slot, net_cache_budget_bytes
+
+        per_page, fixed, _, _ = self._pool_cls.kv_cost(config)
+        fixed += state_pool_bytes(config) + transfer_device_bytes(config)
+        budget = net_cache_budget_bytes(
+            config.memory_ratio, self._baseline_free, self._weights_bytes, fixed)
+        pages = config.num_page_override or 2
+        experts = config.moe_cache_size * expert_bytes_per_slot(banks.sources)
+        draft = self.dflash_layout.total_bytes(pages)
+        if experts + pages * per_page + draft > budget:
+            raise ValueError(
+                f"--moe-cache-size {config.moe_cache_size} needs {mem_GB(experts)} of experts; "
+                f"with {pages} KV pages ({mem_GB(pages * per_page)}) and {mem_GB(draft)} of "
+                f"DFlash storage it exceeds the {mem_GB(budget)} left after weights and state pools")
+
     def _fit_dflash_pages(self, config: EngineConfig, available: int) -> None:
         """Price the drafter's context next to the target KV: solve the page count both fit,
         or check that an explicit one does, before anything is allocated."""
@@ -672,6 +690,8 @@ class Engine:
                     f"{batching_policy} requires at least two expert layers of shared cache"
                 )
             _require_offload_cache_size(config.moe_cache_size, config.model_config.num_experts)
+            if self.dflash_layout is not None and not config.moe_cache_auto:
+                self._fit_dflash_experts(config, banks)
             if batching_policy in (
                 "joint",
                 "layered-pipeline",
