@@ -72,7 +72,7 @@ class DFlashLayout:
             metadata += 8 * (pages + 3) + 8 * capacity  # full->window mapping, free ring
         tokens = c.max_running_req * (c.speculative_num_steps + 1)
         workspace = (len(modes) * (_INT_WORKSPACE_BYTES + c.max_running_req * _KV_LENS_BYTES)
-                     + 3 * 4 * tokens + 8 * (2 * tokens + 2 * c.max_running_req)
+                     + 3 * 4 * tokens + 8 * (3 * tokens + 2 * c.max_running_req)
                      + 4 * c.max_running_req)
         return dict(full_context_bytes=len(self.full_layers) * (pages + 1) * self.row_bytes,
                     window_context_bytes=(len(self.window_layers) * (capacity + 1) * self.row_bytes

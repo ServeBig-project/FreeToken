@@ -503,8 +503,9 @@ class RadixCache:
         nodes = list(dict.fromkeys([n for n, _ in kv + window] + ([node] if state else [])))
         if any(n.busy for n in nodes):
             return None
-        # Restoring a window keeps the part already on the GPU until the rest arrives.
-        held = [(n, units) for n, units in trailing if (n, units) not in window] if window else []
+        # A restore keeps the window part already on the GPU until the rest arrives: the resume
+        # point needs it whichever components come back.
+        held = [(n, units) for n, units in trailing if n.value is not None and not n.window_freed]
         return self._plan(node, kv, window, state, nodes, held)
 
     def finish_restore(self, plan: CopyPlan, kv: List[torch.Tensor], state: int | None) -> None:

@@ -18,9 +18,9 @@ class DFlashRuntime:
         maximum = requests * (engine.config.speculative_num_steps + 1)
         self.inputs, self.positions, self.locations = (
             torch.zeros(maximum, dtype=torch.int32, device=engine.device) for _ in range(3))
-        # Per-round descriptors, packed: positions, flat page-table and token indices of every
-        # draft position, then each request's block offset and flat first-token index.
-        self.host = torch.empty(2 * maximum + 2 * requests, dtype=torch.int64, pin_memory=True)
+        # Per-round descriptors, packed: positions and flat page-table indices of every draft
+        # position, each request's block offset and flat first-token index, the sampled rows.
+        self.host = torch.empty(3 * maximum + 2 * requests, dtype=torch.int64, pin_memory=True)
         self.staged = torch.empty_like(self.host, device=engine.device)
         self.first_tokens = torch.empty(requests, dtype=torch.int32, device=engine.device)
         self.uploaded = torch.cuda.Event()
@@ -128,12 +128,15 @@ class DFlashRuntime:
             for position in range(first, first + width):
                 positions.append(position)
                 flat.append(row * stride + position)
+        sampled = [off + 1 + j for off, n in zip(offsets, lengths, strict=True) for j in range(n)]
         self.uploaded.synchronize()  # the previous round's upload has read the host buffer
-        host, used = self.host.numpy(), 2 * actual + 2 * count
+        host, heads = self.host.numpy(), 2 * actual + 2 * count
+        used = heads + len(sampled)
         host[:actual] = positions
         host[actual:2 * actual] = flat
         host[2 * actual:2 * actual + count] = offsets
-        host[2 * actual + count:used] = [row * stride + p for row, p in zip(rows, firsts)]
+        host[2 * actual + count:heads] = [row * stride + p for row, p in zip(rows, firsts)]
+        host[heads:used] = sampled
         staged = self.staged[:used]
         staged.copy_(self.host[:used], non_blocking=True)
         self.uploaded.record()
@@ -143,7 +146,7 @@ class DFlashRuntime:
         torch.index_select(self.engine.page_table.view(-1), 0, staged[actual:2 * actual],
                            out=self.locations[:actual])
         self.inputs[:physical].fill_(self.model.mask_token_id)
-        torch.index_select(token_table.view(-1), 0, staged[2 * actual + count:used],
+        torch.index_select(token_table.view(-1), 0, staged[2 * actual + count:heads],
                            out=self.first_tokens[:count])
         self.inputs.index_copy_(0, staged[2 * actual:2 * actual + count], self.first_tokens[:count])
         self.context.plan(rows, firsts, widths)
@@ -155,7 +158,7 @@ class DFlashRuntime:
             counters[key] = counters.get(key, 0) + 1
         else:
             result = self._forward(count, actual)[:actual]
-        return result, offsets
+        return result.index_select(0, staged[heads:used])
 
 
 class DFlashDrafter:
@@ -173,12 +176,10 @@ class DFlashDrafter:
 
     def propose(self, batch, views, starts, lengths):
         engine, sampler = self.engine, self.engine.sampler
-        logits, offsets = self.runtime.propose_logits(batch, lengths, self.table.token_pool)
+        selected = self.runtime.propose_logits(batch, lengths, self.table.token_pool)
         real = batch.size + sum(lengths)
         self.positions[0] += real
         self.positions[1] += self.runtime.physical_tokens(batch.size, real)
-        query_rows = [off + 1 + j for off, n in zip(offsets, lengths, strict=True) for j in range(n)]
-        selected = logits[query_rows]
         probabilities = sampler.probabilities(selected, sampler.prepare(batch, repeats=lengths))
         samples = torch.multinomial(probabilities, 1, generator=self.generator).flatten().to(torch.int32)
         width = max(lengths) + 1
