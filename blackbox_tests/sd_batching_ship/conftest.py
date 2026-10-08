@@ -24,7 +24,10 @@ class Session:
 def srv(request):
     """One server per test module: SESSION = (name, model key, extra CLI args, expected max steps)."""
     name, model, extra, steps = request.module.SESSION
-    s = start_ready(name, env.model_args(model) + extra)
+    attach = os.environ.get("FT_ATTACH_URL")  # reuse an already-ready server of this SESSION
+    s = Server(name, []) if attach else start_ready(name, env.model_args(model) + extra)
+    if attach:
+        s.url = attach
     try:
         c = Client(s.url)
         dump(f"{name}_ready_stats", c.stats())
@@ -32,4 +35,5 @@ def srv(request):
         yield Session(name, s, c, Tok(env.tokenizer_path(model)), steps)
         dump(f"{name}_final_stats", c.stats())
     finally:
-        s.stop()
+        if not attach:
+            s.stop()

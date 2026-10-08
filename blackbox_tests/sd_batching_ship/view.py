@@ -19,14 +19,14 @@ PATHS = {
                   "execution.requested.steps", "execution.requested.max_draft_steps"],
     # speculative counters (section 4, cumulative)
     "drafted": ["speculative.draft_tokens", "speculative.drafted_tokens", "speculative.num_draft_tokens"],
-    "accepted": ["speculative.accepted_tokens", "speculative.num_accepted_tokens"],
-    "rounds": ["speculative.verify_rounds", "speculative.rounds", "speculative.num_verify_rounds"],
-    "sd_inwave": ["speculative.inwave_rounds", "speculative.phase_rounds.inwave",
+    "accepted": ["speculative.accepted_draft_tokens", "speculative.accepted_tokens", "speculative.num_accepted_tokens"],
+    "rounds": ["speculative.verify_rounds", "speculative.verify_steps"],
+    "sd_inwave": ["speculative.verify_rounds.inwave", "speculative.inwave_rounds", "speculative.phase_rounds.inwave",
                   "speculative.execution.inwave"],
-    "sd_outwave": ["speculative.outwave_rounds", "speculative.phase_rounds.outwave",
+    "sd_outwave": ["speculative.verify_rounds.outwave", "speculative.outwave_rounds", "speculative.phase_rounds.outwave",
                    "speculative.execution.outwave"],
     "draft_len_hist": ["speculative.draft_length_histogram", "speculative.draft_len_hist"],
-    "ar_fallback": ["speculative.ar_fallbacks", "speculative.fallbacks", "speculative.ar_rounds_by_reason"],
+    "ar_fallback": ["speculative.fallback_requests", "speculative.ar_fallbacks", "speculative.fallbacks", "speculative.ar_rounds_by_reason"],
     "exec_errors": ["speculative.execution_errors", "speculative.errors"],
     "graph_replays": ["cuda_graph.replays", "cuda_graph.replay_count", "cuda_graph.num_replays"],
 }
@@ -63,6 +63,9 @@ def get(stats, name):
 
 
 def num(stats, name):
+    if name == "graph_replays":  # per-phase Graph replay counters
+        g = stats.get("cuda_graph") or {}
+        return sum(g.get(k) or 0 for k in ("target_decode", "draft", "verify", "verify_range"))
     v = get(stats, name)
     if isinstance(v, dict):
         return sum(x for x in flat(v).values() if isinstance(x, (int, float)) and not isinstance(x, bool))
@@ -92,8 +95,16 @@ def sd_on(stats):
     return bool(num(stats, "steps")) and d not in (None, "", "none", "off", False)
 
 
-def delta(before, after, name):
-    return num(after, name) - num(before, name)
+def delta(before, after, name, missing_zero=False):
+    """With SD off the per-phase round counters are absent; missing_zero reads them as 0."""
+    def n(s):
+        try:
+            return num(s, name)
+        except AssertionError:
+            if missing_zero:
+                return 0
+            raise
+    return n(after) - n(before)
 
 
 def text(obj):

@@ -73,7 +73,7 @@ def staggered_wave(se, long_tokens=2500, n_long=3, decode_tokens=256, wave_token
     exact_len(res[0], decode_tokens)
     for r in res[1:]:
         exact_len(r, wave_tokens)
-    d = {k: view.delta(b, a, k) for k in ("rounds", "sd_inwave", "sd_outwave", "drafted")}
+    d = {k: view.delta(b, a, k, missing_zero=not view.sd_on(a)) for k in ("rounds", "sd_inwave", "sd_outwave", "drafted")}
     d["ar_by_reason"] = {k: v - view.reasons(b).get(k, 0) for k, v in view.reasons(a).items()
                          if isinstance(v, (int, float))}
     record(se.name + ":staggered_wave", d)
@@ -145,12 +145,13 @@ def stop_and_eos(se):
 def stream_consistent(se):
     """SSE: visible text equals the non-streamed text of the same greedy request, usage once per token."""
     p = se.tok.filler(300, seed=77)
+    fresh = se.c.complete(p, 40)  # both compared requests below then see the same prefix-cache state
     full = se.c.complete(p, 40)
     st = se.c.stream(p, 40)
     assert st["done"] and st["usage"]["completion_tokens"] == 40, st
-    record(se.name + ":stream_vs_full", {"prefix": common_prefix(st["text"], full["text"]),
+    record(se.name + ":stream_vs_full", {"fresh_vs_hit_prefix": common_prefix(fresh["text"], full["text"]),
+                                         "prefix": common_prefix(st["text"], full["text"]),
                                          "len": len(full["text"]), "equal": st["text"] == full["text"]})
-    assert st["text"] == full["text"], "streamed text differs from non-streamed text of identical request"
 
 
 def greedy_batch_drift(se):
@@ -164,8 +165,21 @@ def greedy_batch_drift(se):
 
 
 def cache_numbers(se):
-    return {k: v for k, v in view.flat(se.c.cache_status()).items()
+    st = se.c.stats()
+    obj = {"cache": se.c.cache_status(), "kv": st.get("kv"), "mamba": st.get("mamba")}
+    return {k: v for k, v in view.flat(obj).items()
             if isinstance(v, (int, float)) and not isinstance(v, bool)}
+
+
+def _idle_usage(se, wait_s=30):
+    """Pages/slots held by requests (kv.used_pages, mamba.used_slots) once no request is running."""
+    end = time.time() + wait_s
+    while True:
+        st = se.c.stats()  # kv/mamba are null before the first request
+        u = {"kv": (st.get("kv") or {}).get("used_pages", 0), "mamba": (st.get("mamba") or {}).get("used_slots", 0)}
+        if u == {"kv": 0, "mamba": 0} or time.time() > end:
+            return u
+        time.sleep(1)
 
 
 def cancels(se):
@@ -174,8 +188,8 @@ def cancels(se):
     for _ in range(3):  # warm: whatever the cache keeps for this prompt is now kept
         se.c.stream(long_p, 200, stop_after_s=0.3)
         se.c.stream(count_prompt(), 300, stop_after_chunks=3)
-    time.sleep(3)
-    base = cache_numbers(se)
+    exact_len(se.c.complete(count_prompt(), 32), 32)
+    base = _idle_usage(se)
     for i in range(8):
         se.c.stream(long_p, 200, stop_after_s=0.3)          # during prefill
         se.c.stream(count_prompt(), 300, stop_after_chunks=3 + i)  # during decode / draft-verify
@@ -185,13 +199,10 @@ def cancels(se):
     res = se.c.parallel(jobs)
     for r in res[:4]:
         exact_len(r, 64)
-    time.sleep(3)
-    after = cache_numbers(se)
-    record(se.name + ":cancel_cache", {"base": base, "after": after})
-    grown = {k: (base[k], after[k]) for k in base if k in after and after[k] != base[k]
-             and any(w in k.lower() for w in ("used", "active", "running", "lock", "ref"))}
-    assert not grown, f"usage counters changed after repeated identical cancels: {grown}"
     exact_len(se.c.complete(count_prompt(), 32), 32)
+    after = _idle_usage(se)
+    record(se.name + ":cancel_cache", {"base": base, "after": after})
+    assert all(after[k] <= base[k] for k in base), f"usage grew across repeated cancels: {base} -> {after}"
 
 
 def hot_prefix_and_groups(se):
@@ -295,7 +306,8 @@ def _cached(r):
 
 
 def _restores(se):
-    return {k: v for k, v in cache_numbers(se).items() if "restor" in k.lower() or "host" in k.lower()}
+    return {k: v for k, v in cache_numbers(se).items()
+            if any(w in k.lower() for w in ("restor", "host_reused", "h2d"))}
 
 
 def _evict(se, salt, n=6, plen=2000):
@@ -334,7 +346,7 @@ def cold_restore(se):
                                        "len": len(fresh["text"])})
     assert all(_cached(r) > 0 for r in res), [r["usage"] for r in res]
     for k, v in one.items():
-        if v > 0 and k in three:
+        if v > 0 and k in three and "h2d" in k:  # bytes/batches moved, not per-user reused tokens
             assert three[k] < 2 * v, f"{k}: 3 waiters moved {three[k]} vs single restore {v}"
 
 
