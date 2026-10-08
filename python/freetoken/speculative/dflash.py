@@ -73,6 +73,11 @@ class DFlashRuntime:
     def capture_graphs(self, runner):
         if runner.speculative is None:
             return
+        before = torch.cuda.memory_reserved(self.engine.device)
+        self._capture_graphs(runner)
+        runner.speculative_reserved_bytes += max(0, torch.cuda.memory_reserved(self.engine.device) - before)
+
+    def _capture_graphs(self, runner):
         self.logits = runner.speculative.buffer.logits
         dummy = self.engine.config.max_running_req
         self.locations.fill_(self.engine.num_pages)
@@ -136,6 +141,8 @@ class DFlashRuntime:
             counters = self.engine.graph_runner.replay_counts
             counters[key] = counters.get(key, 0) + 1
         else:
+            if self.graphs:
+                self.engine.graph_runner.eager_counts["draft"] += 1
             result = self._forward(count, total)[:actual]
         return result, offsets
 

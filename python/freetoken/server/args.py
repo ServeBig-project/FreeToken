@@ -811,7 +811,11 @@ def parse_args(
         if not os.path.isdir(draft_path):
             from huggingface_hub import snapshot_download
 
-            draft_path = snapshot_download(draft_path, allow_patterns=["config.json", "*.safetensors"])
+            try:
+                draft_path = snapshot_download(draft_path, allow_patterns=["config.json", "*.safetensors"])
+            except Exception as error:  # noqa: BLE001 -- name the flag, keep the cause
+                parser.error(f"--speculative-draft-model-path {draft_path!r} is neither a local "
+                             f"directory nor a downloadable Hugging Face model: {error}")
         kwargs["speculative_draft_model_path"] = draft_path
 
     if kwargs["served_model_name"] is None:

@@ -495,17 +495,17 @@ class Engine:
         from freetoken.speculative.dflash import DFlashRuntime
         from freetoken.speculative.dflash_model import DFlashModel, read_dflash_config
 
+        draft = read_dflash_config(config.speculative_draft_model_path)
+        target = config.model_config
+        if (draft.hidden_size != target.hidden_size or draft.vocab_size != target.vocab_size
+                or draft.num_target_layers != target.num_layers):
+            raise ValueError("DFlash checkpoint dimensions do not match the target model")
         if not getattr(self.model, "supports_draft_features", False):
             raise ValueError("Target model does not expose DFlash context features")
         if config.model_config.linear_attention_group() is None:
             raise ValueError("DFlash requires a GDN state budget to fund its storage")
         if config.attention_backend != "fi":
             raise ValueError("DFlash requires the FlashInfer attention backend")
-        draft = read_dflash_config(config.speculative_draft_model_path)
-        target = config.model_config
-        if (draft.hidden_size != target.hidden_size or draft.vocab_size != target.vocab_size
-                or draft.num_target_layers != target.num_layers):
-            raise ValueError("DFlash checkpoint dimensions do not match the target model")
         if (not draft.target_layer_ids
                 or any(not 0 <= layer < target.num_layers for layer in draft.target_layer_ids)
                 or not 0 <= draft.mask_token_id < target.vocab_size):
@@ -1057,8 +1057,7 @@ class Engine:
         assert torch.cuda.current_stream() == self.stream
         if self.speculative_cost is not None:
             self.speculative_cost.begin_model(batch)
-        if self.linear_state_pool is not None and self.linear_state_pool.replay is not None:
-            self.linear_state_pool.replay.observe(batch)
+        self._observe_replay(batch)
         with self.ctx.forward_batch(batch):
             if self.graph_runner.can_use_cuda_graph(batch):
                 logits = self.graph_runner.replay(batch)
@@ -1272,13 +1271,6 @@ class Engine:
                 ),
             ),
             fallback_reasons=[dict(fallback) for fallback in self.execution_fallbacks],
-            resources=dict(
-                speculative_graph_reserved_bytes=runner.speculative_reserved_bytes,
-                cpu_executor_pinned_io_bytes=(self.cpu_moe_executor.pinned_io_bytes
-                                              if self.cpu_moe_executor is not None else 0),
-                # Current, not peak: layered prefill resets the allocator peak every step.
-                reserved_bytes=torch.cuda.memory_reserved(self.device),
-            ),
         )
 
     def finish_layer_group_logits(self, batch: Batch, state) -> torch.Tensor:
@@ -1286,13 +1278,16 @@ class Engine:
         runner = self.graph_runner
         if runner.speculative is not None and not runner.speculative.has_ranges(batch):
             runner.eager_counts["verify_range"] += 1
-        if self.linear_state_pool is not None and self.linear_state_pool.replay is not None:
-            self.linear_state_pool.replay.observe(batch)
+        self._observe_replay(batch)
         with self.ctx.forward_batch(batch):
             logits = self.model.finish_layer_group_prefill(state)
         if self.cpu_moe_executor is not None:
             self.cpu_moe_executor.raise_if_unhealthy()
         return logits
+
+    def _observe_replay(self, batch: Batch) -> None:
+        if self.linear_state_pool is not None and self.linear_state_pool.replay is not None:
+            self.linear_state_pool.replay.observe(batch)
 
     def finish_layer_group_prefill(
         self,
@@ -1353,6 +1348,7 @@ class Engine:
                     top_p=(args.top_p[request_slice] if args.top_p is not None else None),
                 )
             logits = self.model.finish_layer_group_prefill(state, output_indices)
+        self._observe_replay(batch)  # layered decode rows bypass compute_logits
         if self.cpu_moe_executor is not None:
             self.cpu_moe_executor.raise_if_unhealthy()
         for req in selected_reqs:

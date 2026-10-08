@@ -46,6 +46,9 @@ class StatsTracker:
                            "speculative_eager": {"draft": 0, "verify": 0, "verify_range": 0},
                            "replay_shapes": [], "capture_seconds": 0.0, "extra_reserved_bytes": 0}
         self.speculative = {"draft_tokens": 0, "accepted_draft_tokens": 0, "verify_steps": 0,
+                            "verify_rounds": {"inwave": 0, "outwave": 0},
+                            "verify_requests": {"inwave": 0, "outwave": 0},
+                            "fallback_requests": {},
                             "residency_stops": 0, "draft_expert_loads": 0,
                             "cost_ar_requests": 0, "cost_stopped_requests": 0,
                             "cost_probe_requests": 0, "cost_control_ms": 0.0,
