@@ -213,7 +213,7 @@ def _ensure_experts_hybrid_cpu(
     most-recently-active misses (ties -> lower id); else the lowest ids."""
     seen = []
     for expert in expert_ids.view(-1).tolist():
-        if expert not in seen:
+        if 0 <= expert < cache.num_experts and expert not in seen:
             seen.append(expert)
 
     cache.active_mask.zero_()
@@ -263,7 +263,9 @@ def _ensure_experts_hybrid_cpu(
     # Overflow misses keep slot_for_id == -1, so the rewrite below yields -1 for them.
     flat = expert_ids.view(-1)
     for i in range(flat.numel()):
-        flat[i] = int(cache.slot_for_id[layer_id, int(flat[i].item())].item())
+        expert = int(flat[i].item())
+        flat[i] = (int(cache.slot_for_id[layer_id, expert].item())
+                   if 0 <= expert < cache.num_experts else -1)
 
 
 def _materialize_layer_gpu(cache, layer_id: int) -> None:
@@ -652,7 +654,9 @@ def _ensure_experts_hybrid_kernel(
     # ---- Phase 3: rewrite expert_ids -> slot id (hit/fetched) or -1 (overflow -> CPU) ----
     for i in tl.range(num_active):
         e = tl.load(expert_ids_ptr + i)
-        s = tl.load(slot_for_id_ptr + base + e)
+        # Padded verify rows route to -1; keep them inactive instead of reading
+        # the preceding layer's slots.
+        s = tl.load(slot_for_id_ptr + base + e, mask=(e >= 0) & (e < num_experts), other=-1)
         tl.store(expert_ids_ptr + i, s)
 
     # Bump every active expert's recency to this step (LRU on the expert): an overflow miss

@@ -367,13 +367,27 @@ class OffloadMoELayer(MoELayer):
         executor = cache.cpu_executor
         assert executor is not None, "CPU MoE executor was not initialized"
         raw = topk_ids.clone()  # raw expert ids for the CPU partial
-        cache.ensure_experts_hybrid(self.layer_id, topk_ids)  # -> slot (hit/fetched) or -1
-        if cache.collect_stats:
-            cache.record_decode_stats_hybrid(self.layer_id)
+        draft = get_global_ctx().batch.draft_experts is not None
+        if draft:
+            # Drafts never admit or fetch experts: GPU hits stay on the GPU, misses go
+            # to the CPU, and the target's cache policy sees only target routes.
+            topk_ids.copy_(cache.slot_for_id[self.layer_id][topk_ids.long()])
+        else:
+            cache.ensure_experts_hybrid(self.layer_id, topk_ids)  # slot (hit/fetched) or -1
+            if cache.collect_stats:
+                cache.record_decode_stats_hybrid(self.layer_id)
         on_gpu = topk_ids >= 0
 
-        cpu_ids = torch.where(on_gpu, raw.new_full((), -1), raw).contiguous()
-        pending = executor.decode_submit(self.layer_id, hidden_states, topk_weights, cpu_ids)
+        cpu_ids = torch.where(on_gpu, raw.new_full((), -1), raw)
+        cpu_weights = topk_weights
+        if cpu_ids.shape[1] != executor.top_k:
+            # Native tasks use the target's route stride; a narrower draft pads
+            # with skipped routes.
+            pad = executor.top_k - cpu_ids.shape[1]
+            cpu_ids = torch.nn.functional.pad(cpu_ids, (0, pad), value=-1)
+            cpu_weights = torch.nn.functional.pad(topk_weights, (0, pad), value=0)
+        pending = executor.decode_submit(
+            self.layer_id, hidden_states, cpu_weights, cpu_ids.contiguous())
 
         # Measurement knob: FREETOKEN_HYBRID_OVERLAP=0 syncs the CPU pool *before* the
         # PCIe fetch + GPU GEMM, serializing the two so an A/B isolates the overlap win.
@@ -381,7 +395,8 @@ class OffloadMoELayer(MoELayer):
             executor.decode_sync(pending) if not _HYBRID_OVERLAP else None
         )
 
-        cache.copy_missing()
+        if not draft:
+            cache.copy_missing()
         gpu_slots = topk_ids.clamp_min(0)  # -1 -> slot 0 (zero-weighted below)
         gpu_w = torch.where(on_gpu, topk_weights, topk_weights.new_zeros(())).contiguous()
         gpu_routed = self._expert_gemm(

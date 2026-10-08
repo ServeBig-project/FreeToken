@@ -775,8 +775,10 @@ class Engine:
                 f"(MoE layer {type(sample).__name__} is missing {required})."
             )
         # Decode batches never exceed max_running_req, but CUDA-graph padding can
-        # round a batch up to the largest captured size; cover both.
+        # round a batch up to the largest captured size; cover both. Verification
+        # runs every draft position of each row.
         max_tokens = max(config.max_running_req, config.cuda_graph_max_bs or 0, 1)
+        max_tokens *= config.speculative_num_steps + 1
         # gpt-oss mxfp4 carries clamped-swiglu scalars; other formats use the defaults.
         executor = CpuMoeExecutor(
             cache,
@@ -1877,7 +1879,7 @@ def _adjust_config(config: EngineConfig):
         if not config.speculative_graphs:
             raise ValueError(
                 "SD CUDA Graph requires BF16 activations and BF16 or NVFP4 experts "
-                "with --moe-backend offload, "
+                "with --moe-backend offload or hybrid, "
                 "FlashInfer attention, page size 1 and at most 8 draft steps; "
                 "pass --cuda-graph-max-bs 0 to run speculation eagerly"
             )

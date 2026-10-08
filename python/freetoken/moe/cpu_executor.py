@@ -373,7 +373,8 @@ class CpuMoeExecutor:
         # lifetime (flag_sync itself was decided above, before thread sizing).
         self._ready = self._done = self._err = None
         self._flag_slots: dict[tuple[int, int], int] = {}  # (layer_id, bs) -> slot
-        self._flag_capacity = self.num_layers * _FLAG_SLOTS_PER_LAYER
+        # SD verification adds one decode shape per query-row count.
+        self._flag_capacity = self.num_layers * max(_FLAG_SLOTS_PER_LAYER, self.max_tokens)
         if self._flag_sync:
             self._ready = alloc_pinned_tensor(self._flag_capacity, dtype=torch.int64)
             self._done = alloc_pinned_tensor(self._flag_capacity, dtype=torch.int64)

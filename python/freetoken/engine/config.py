@@ -166,10 +166,10 @@ class EngineConfig:
                 "speculative_draft_experts must not exceed the target's experts per token "
                 f"({self.model_config.num_experts_per_tok})"
             )
-        if self.moe_backend in ("cpu", "hybrid") or self.moe_cpu_layers:
+        if self.moe_backend == "cpu" or self.moe_cpu_layers:
             raise ValueError(
-                "self-speculative decoding requires GPU expert execution; use "
-                "--moe-backend offload or fused without --moe-cpu-layers"
+                "speculative decoding does not support all-CPU expert layers; use "
+                "--moe-backend offload, hybrid or fused without --moe-cpu-layers"
             )
 
     @cached_property
@@ -194,7 +194,7 @@ class EngineConfig:
             and self.dtype == torch.bfloat16
             and self.model_config.expert_quant in ("none", "nvfp4") and not self.nowag_expert_path
             and self.model_config.moe_weight_format in (None, "bf16")
-            and graph_attention and self.moe_backend == "offload"
+            and graph_attention and self.moe_backend in ("offload", "hybrid")
             and self.page_size == 1 and self.tp_info.size == 1
             and getattr(self, "batching_policy", "legacy") == "legacy"
             and self.cuda_graph_max_bs != 0 and self.cuda_graph_bs != []
