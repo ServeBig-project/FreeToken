@@ -192,7 +192,7 @@ class EngineConfig:
         return bool(
             0 < self.speculative_num_steps <= 8
             and self.dtype == torch.bfloat16
-            and self.model_config.expert_quant == "none" and not self.nowag_expert_path
+            and self.model_config.expert_quant in ("none", "nvfp4") and not self.nowag_expert_path
             and self.model_config.moe_weight_format in (None, "bf16")
             and graph_attention and self.moe_backend == "offload"
             and self.page_size == 1 and self.tp_info.size == 1

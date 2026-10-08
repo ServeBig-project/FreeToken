@@ -1876,7 +1876,8 @@ def _adjust_config(config: EngineConfig):
         # Never fall back silently: eager SD is far slower and would mislead comparisons.
         if not config.speculative_graphs:
             raise ValueError(
-                "SD CUDA Graph requires BF16 experts with --moe-backend offload, "
+                "SD CUDA Graph requires BF16 activations and BF16 or NVFP4 experts "
+                "with --moe-backend offload, "
                 "FlashInfer attention, page size 1 and at most 8 draft steps; "
                 "pass --cuda-graph-max-bs 0 to run speculation eagerly"
             )

@@ -82,6 +82,10 @@ def _decode_nvfp4_moe_kernel(
     n_mask = offs_n < N
 
     slot = tl.load(topk_ids_ptr + token_id * stride_tid_m + route_k * stride_tid_k).to(tl.int64)
+    c_ptrs = c_ptr + token_id * stride_cm + route_k * stride_ck + offs_n * stride_cn
+    if slot < 0:
+        tl.store(c_ptrs, 0.0, mask=(route_id < total_routes) & n_mask)
+        return
     a_row = route_id if A_ROW_IS_ROUTE else token_id
     a_base = a_ptr + a_row * stride_am
 
@@ -126,7 +130,6 @@ def _decode_nvfp4_moe_kernel(
         weight = tl.load(topk_weights_ptr + token_id * stride_tw_m + route_k * stride_tw_k)
         accumulator = accumulator * weight
 
-    c_ptrs = c_ptr + token_id * stride_cm + route_k * stride_ck + offs_n * stride_cn
     tl.store(c_ptrs, accumulator.to(compute_type), mask=(route_id < total_routes) & n_mask)
 
 
@@ -181,6 +184,10 @@ def _decode_nvfp4_marlin_kernel(
     n_mask = offs_n < N
 
     slot = tl.load(topk_ids_ptr + token_id * stride_tid_m + route_k * stride_tid_k).to(tl.int64)
+    c_ptrs = c_ptr + token_id * stride_cm + route_k * stride_ck + offs_n * stride_cn
+    if slot < 0:
+        tl.store(c_ptrs, 0.0, mask=(route_id < total_routes) & n_mask)
+        return
     a_row = route_id if A_ROW_IS_ROUTE else token_id
     a_base = a_ptr + a_row * stride_am
 
@@ -223,7 +230,6 @@ def _decode_nvfp4_marlin_kernel(
         weight = tl.load(topk_weights_ptr + token_id * stride_tw_m + route_k * stride_tw_k)
         accumulator = accumulator * weight
 
-    c_ptrs = c_ptr + token_id * stride_cm + route_k * stride_ck + offs_n * stride_cn
     tl.store(c_ptrs, accumulator.to(compute_type), mask=(route_id < total_routes) & n_mask)
 
 
