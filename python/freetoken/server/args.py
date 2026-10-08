@@ -253,8 +253,8 @@ def parse_args(
         type=int,
         default=ServerArgs.speculative_num_steps,
         help="Maximum draft tokens per speculative round (1-8); 0 disables speculation and "
-             "ignores a draft model path. Omitted: 4 when the model, backends and budgets "
-             "support SD, else AR with the reason reported in /v1/stats.",
+             "ignores a draft model path. Omitted: 4 when a draft model path, a non-default "
+             "--speculative-phase or an SD control is given, else 0 (AR).",
     )
     parser.add_argument(
         "--speculative-phase", choices=["outwave", "all", "inwave"],

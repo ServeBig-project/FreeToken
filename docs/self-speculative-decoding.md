@@ -26,8 +26,9 @@ expert execution with CPU weight offload (`--moe-backend offload`) and the hybri
 CPU/GPU backend (`--moe-backend hybrid`; hybrid drafts compute cache misses on the
 CPU instead of fetching them). All-CPU expert layers (`--moe-backend cpu`,
 `--moe-cpu-layers`) are unsupported. When `--speculative-num-steps` is omitted the
-server tries 4 steps and serves AR with a reported reason if these components or
-the state budget cannot run SD; an explicit request fails at startup instead.
+server runs 4 steps only if a draft model path, a non-default phase or an SD control
+asks for SD, and serves AR otherwise; an SD request the components or the state
+budget cannot run fails at startup.
 CUDA Graph execution is described in [speculative CUDA graphs](sd-cuda-graphs.md).
 
 ## Public interface
@@ -35,7 +36,7 @@ CUDA Graph execution is described in [speculative CUDA graphs](sd-cuda-graphs.md
 `ft serve` adds:
 
 - `--speculative-num-steps N`: number of proposed tokens per round; integer,
-  omitted = 4 when supported, else ordinary serving; `0` = ordinary serving.
+  omitted = 4 when SD is asked for (see above), else ordinary serving; `0` = ordinary serving.
 - `--speculative-draft-experts K`: routed experts used per draft token; integer,
   default `3`. With speculation enabled, `1 <= K <= target experts per token`.
   Equality is supported as an unchanged-drafter control.
@@ -44,7 +45,7 @@ All speculative switches, their defaults and legal combinations:
 
 | Option | Default | Off / default behavior | Constraint |
 | --- | --- | --- | --- |
-| `--speculative-num-steps N` | omitted (4 when supported) | `0`: ordinary serving | `N` is the draft ceiling; the three controls below and CUDA Graph need `1 <= N <= 8` |
+| `--speculative-num-steps N` | omitted (4 when SD is asked for) | `0`: ordinary serving | `N` is the draft ceiling; the three controls below and CUDA Graph need `1 <= N <= 8` |
 | `--speculative-draft-experts K` | `3` | — | `1 <= K <=` target experts per token; any K works with CUDA Graph |
 | `--speculative-draft-residency off\|router` | `off` | draft uses the original top-K and loads misses | `router`: only cached experts; see [adaptive serving](adaptive-loading.md) |
 | `--speculative-draft-load-missing` | off | `router` falls back to ordinary generation when a layer has fewer than K cached experts | requires `router` |
@@ -164,8 +165,8 @@ full concurrency can draft: protected prefixes also consume it. The existing idl
 cache rebuild can explicitly resize `num_mamba_slots`.
 
 With `--cache-type naive`, fixed live-state slots and the padding sink are
-reserved. The default naive pool has no temporary-state capacity, so omitted SD
-serves AR with a `state_budget` reason and an explicit SD request fails at startup;
+reserved. The default naive pool has no temporary-state capacity, so an SD request
+fails at startup;
 ReplaySSM or a larger state budget can run SD.
 Rebuild and Graph capture preserve those ownership boundaries.
 

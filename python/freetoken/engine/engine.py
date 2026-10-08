@@ -1616,18 +1616,6 @@ def _layered_pipeline_unsupported(config: EngineConfig, is_moe: bool) -> str | N
     return None
 
 
-def _speculative_unsupported(config: EngineConfig) -> tuple[str, str] | None:
-    """(reason, detail) when SD at the configured steps cannot run with these components."""
-    try:
-        config.__post_init__()
-    except ValueError as error:
-        return "unsupported", str(error)
-    if config.cuda_graph_max_bs != 0 and config.cuda_graph_bs != [] and not config.speculative_graphs:
-        return "graph_unsupported", _SD_GRAPH_UNSUPPORTED
-    shortfall = _sd_state_shortfall(config)
-    return ("state_budget", shortfall) if shortfall else None
-
-
 def _adjust_config(config: EngineConfig) -> list[dict]:
     def override(attr: str, value: Any):  # this is dangerous, use with caution
         object.__setattr__(config, attr, value)
@@ -2007,21 +1995,16 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
     if config.speculative_num_steps == 0:
         override("speculative_draft_model_path", None)
     elif config.speculative_num_steps is None:
-        override("speculative_num_steps", 4)
-        # A draft model, an SD phase or an SD control asks for SD; only a bare default
-        # may fall back.
+        # A draft model, an SD phase or an SD control asks for SD; without one the default is AR
+        # because self-drafting measured slower than AR.
         asked = (config.speculative_draft_model_path or config.speculative_phase != "outwave"
                  or config.speculative_draft_residency != "off" or config.speculative_adaptive_cost
                  or config.speculative_draft_load_missing or config.speculative_verify_prefetch)
-        if not asked:
-            reason = _speculative_unsupported(config)
-            if reason is not None:
-                override("speculative_num_steps", 0)
-                fallbacks.append(dict(feature="speculative", reason=reason[0], detail=reason[1]))
+        override("speculative_num_steps", 4 if asked else 0)
     if config.speculative_num_steps:
-        reason = _speculative_unsupported(config)
-        if reason is not None:
-            raise ValueError(reason[1])
+        config.__post_init__()  # re-check the SD constraints against the resolved components
+        if shortfall := _sd_state_shortfall(config):
+            raise ValueError(shortfall)
 
     if config.speculative_num_steps and config.cuda_graph_max_bs != 0 and config.cuda_graph_bs != []:
         # Never fall back silently: eager SD is far slower and would mislead comparisons.
