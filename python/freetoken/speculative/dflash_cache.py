@@ -58,7 +58,7 @@ class DFlashLayout:
         indptr = len(modes) * sum(3 * b + 2 for b in range(1, c.max_running_req + 1))
         metadata = 4 * (batches * indices + indptr)
         if self.window_layers:
-            metadata += 8 * (pages + 3) + 4 * capacity  # full->window mapping, free slots
+            metadata += 8 * (pages + 3) + 8 * capacity  # full->window mapping, free ring
         tokens = c.max_running_req * (c.speculative_num_steps + 1)
         workspace = (len(modes) * (_INT_WORKSPACE_BYTES + c.max_running_req * _KV_LENS_BYTES)
                      + 3 * 4 * tokens)

@@ -202,7 +202,7 @@ class RadixCache:
 
     def insert(self, ids: torch.Tensor, kv: torch.Tensor, *, group: str = "",
                state: int | None = None, purpose: str | None = None, update_after: int = 0,
-               window_freed_before: int = 0) -> Tuple[int, torch.Tensor, bool, TreeNode]:
+               window_freed_before: int = 0) -> Tuple[int, Evicted, bool, TreeNode]:
         """Insert the committed page-aligned prefix of ``ids`` with locations ``kv``.
 
         ``update_after`` is the request's reused-prefix length: matched nodes past it carry the
@@ -213,12 +213,13 @@ class RadixCache:
         inserted window-freed. ``state`` is donated to the end node when that node has none.
         Publishing stops early at a node a copy is still filling with the GPU data the caller
         would give up: the caller keeps its own pages from there. Returns (matched length
-        before insertion -- where it stopped, if it stopped early --, locations the caller
-        frees from every pool, whether ``state`` was taken, the end node or None if it
+        before insertion -- where it stopped, if it stopped early --, the caller's duplicate
+        locations to free: all of them from the paged pools, those whose window the caller still
+        held from the window pool, whether ``state`` was taken, the end node or None if it
         stopped early)."""
         n = align_down(len(ids), self.page_size)
         ids, kv = ids[:n], kv[:n]
-        freed: List[torch.Tensor] = []
+        freed = Evicted([], [], [])
         node, total = self._root(group), 0
         while total < n:
             child = node.children.get(self.key_fn(ids[total:]))
@@ -234,7 +235,7 @@ class RadixCache:
                 self.window is not None and child.window_freed
                 and window_freed_before < total + m)
             if update_after < total + m and (child.ref > 0 or child.busy) and lacks:
-                return total, (torch.cat(freed) if freed else self.empty), False, None
+                return total, self._evicted(freed), False, None
             partial = m < child.length
             if partial:
                 child = self._split(child, m)
@@ -243,7 +244,7 @@ class RadixCache:
                 if child.value is None or child.window_freed:
                     child = self._adopt(child, seg, total, window_freed_before, freed)
                 else:
-                    freed.append(seg.clone())
+                    self._duplicate(seg, total, window_freed_before, freed)
             total += m
             node = child
             if partial:
@@ -271,10 +272,17 @@ class RadixCache:
                 self.stats["gpu_checkpoint_peak"], self.state_count)
         elif state is not None and node.state is not None:
             self.stats["checkpoint_deduplicated"] += 1
-        return total, (torch.cat(freed) if freed else self.empty), taken, node
+        return total, self._evicted(freed), taken, node
+
+    def _duplicate(self, seg: torch.Tensor, total: int, freed_before: int, freed: Evicted) -> None:
+        """The caller's copy of [total, total + len(seg)) goes back; its window only from where
+        the caller had not freed it yet."""
+        freed.kv.append(seg.clone())
+        if self.window is not None:
+            freed.window.append(seg[max(0, freed_before - total):].clone())
 
     def _adopt(self, child: TreeNode, seg: torch.Tensor, total: int, freed_before: int,
-               freed: List[torch.Tensor]) -> TreeNode:
+               freed: Evicted) -> TreeNode:
         """Give ``child`` the request's GPU copy of what it lacks on the GPU (its window, or
         everything when only the host has it), where the request still holds it."""
         assert child.window_ref == 0, "a window-freed node cannot hold a window lock"
@@ -284,16 +292,16 @@ class RadixCache:
                 child.value is not None and freed_before >= end):
             # A reader still uses the node's current data, a copy uses it, or the request
             # freed this window too: keep the node, drop the request's copy.
-            freed.append(seg.clone())
+            self._duplicate(seg, total, freed_before, freed)
             return child
         if not live and freed_before < end:
             # The request's freed frontier falls inside: the head keeps what it has.
             start = freed_before - total
             self._split(child, start)
-            freed.append(seg[:start].clone())
+            freed.kv.append(seg[:start].clone())
             seg, live = seg[start:], True
         if child.value is not None:
-            freed.append(child.value)
+            freed.kv.append(child.value)  # its window was already gone
         else:
             self._account("kv", child.length, locked=False)
         child.value = seg.clone()

@@ -551,8 +551,8 @@ class CacheManager:
             self._release(self.tree.take_released())
 
     def _free_swa(self, indices: torch.Tensor) -> None:
-        """Free the swa-pool slots backing ``indices`` (full-pool slots). Idempotent over the
-        0 sentinel, so safe to call on any slots being returned to free_slots."""
+        """Free the swa-pool slots bound to ``indices`` (full-pool slots); each must still hold
+        a binding the caller owns."""
         if self.swa_paged and len(indices) > 0:
             self.swa_pool.free_swa(indices)
 
@@ -665,7 +665,9 @@ class CacheManager:
         """Return whole provisional pages beyond the committed target KV."""
         start = div_ceil(req.cached_len, self.page_size) * self.page_size
         end = div_ceil(allocated_len, self.page_size) * self.page_size
-        self._free_pages(self.page_table[req.table_idx, start:end])
+        pages = self.page_table[req.table_idx, start:end]
+        self._free_swa(pages)
+        self._free(pages)
 
     def _allocate_paged_rows(
         self,
@@ -731,7 +733,7 @@ class CacheManager:
             # No reuse (or multimodal content the token ids do not identify): nothing is shared.
             self.unlock(old)
             if finished:
-                self._free_pages(self._padded_tail(req, old.cached_len))
+                self._free_tail(req, old.cached_len)
                 self._free_req_slots(req)
             return
         boundaries = self._commit_boundaries(req, finished=finished)
@@ -747,7 +749,8 @@ class CacheManager:
                 req.input_ids[:pos], pages[:pos], group=req.cache_group, state=slot,
                 purpose=purpose, update_after=free_upto,
                 window_freed_before=req.swa_evicted_seqlen)
-            self._free_pages(freed)
+            self._free_swa(freed.window)
+            self._free(freed.kv)
             if taken and capture is not None:
                 capture.slot = None
             elif taken:
@@ -766,7 +769,7 @@ class CacheManager:
         if finished:
             if published:
                 self._prune_round(req, published[-1])
-            self._free_pages(self._padded_tail(req, free_upto))
+            self._free_tail(req, free_upto)
             self._free_req_slots(req)
             if self.window_cache:
                 self._retain_prompt_window(req)
@@ -873,16 +876,18 @@ class CacheManager:
         end = div_ceil(req.cached_len, self.page_size) * self.page_size
         return self.page_table[req.table_idx, start:end]
 
+    def _free_tail(self, req: Req, start: int) -> None:
+        """Free the request's own pages from ``start``; its window only where still bound."""
+        tail = self._padded_tail(req, start)
+        self._free_swa(tail[max(0, req.swa_evicted_seqlen - start):])
+        self._free(tail)
+
     def _free_req_slots(self, req: Req) -> None:
         """Return remaining private state; donated public states belong to the cache."""
         self._release_captures(req)
         if req.linear_slot_idx is not None:
             self.linear_state_pool.free(req.linear_slot_idx)
         req.linear_slot_idx = None
-
-    def _free_pages(self, indices: torch.Tensor) -> None:
-        self._free_swa(indices)
-        self._free(indices)
 
     def check_integrity(self) -> None:
         if self.host is not None:
