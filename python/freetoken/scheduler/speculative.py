@@ -60,14 +60,19 @@ class SpeculativeDecoder:
             self.drafter = DFlashDrafter(engine, table, self.generator)
         else:
             self.drafter = SelfDrafter(engine, table, self._logits, self.generator)
+        self.control = getattr(self.drafter, "control", None)
         self.selector = DecodeBatchSelector()
         self.draft_tokens = 0
         self.accepted_draft_tokens = 0
+        self.emitted_tokens = 0
+        self.verify_positions = [0, 0]  # real and physical
         self.verify_steps = 0
         self.verify_rounds = {"inwave": 0, "outwave": 0}
         self.verify_requests = {"inwave": 0, "outwave": 0}
         # Decode requests that ran AR instead of SD, by reason.
         self.fallback_requests: dict[str, int] = {}
+        # Requests that ran SD with a shorter draft: cut by their own output tail or by a resource.
+        self.clipped_requests = {"tail": 0, "capacity": 0}
         self.state_slot_stops = 0
         self.draft_length_histogram = [0] * (engine.config.speculative_num_steps + 1)
 
@@ -77,10 +82,14 @@ class SpeculativeDecoder:
             "phase": self.phase,
             "draft_tokens": self.draft_tokens,
             "accepted_draft_tokens": self.accepted_draft_tokens,
+            "emitted_tokens": self.emitted_tokens,
+            "verify_positions": self.verify_positions[0],
+            "verify_physical_positions": self.verify_positions[1],
             "verify_steps": self.verify_steps,
             "verify_rounds": dict(self.verify_rounds),
             "verify_requests": dict(self.verify_requests),
             "fallback_requests": dict(self.fallback_requests),
+            "clipped_requests": dict(self.clipped_requests),
             "state_slot_stops": self.state_slot_stops,
             "draft_length_histogram": list(self.draft_length_histogram),
         }
@@ -97,22 +106,33 @@ class SpeculativeDecoder:
         self.fallback_requests[reason] = self.fallback_requests.get(reason, 0) + batch.size
 
     def _draft_lengths(self, batch: Batch) -> tuple[list[int], bool]:
-        """Per-request draft limits and whether free KV pages, not the tail, cut one."""
+        """Per-request draft limits and whether free KV pages or window slots, not the tail, cut one."""
         config = self.engine.config
         budget = config.max_forward_len - batch.size
         pages = self.cache.available_size // self.cache.page_size
         page_size = self.cache.page_size
+        cache, windows = self.cache, None
+        if cache.swa_paged:
+            # Each drafted position also binds a window slot; release what the requests have
+            # moved past before shortening any draft.
+            if cache.swa_available_size < batch.size * config.speculative_num_steps:
+                cache.maybe_free_swa_out_of_window(batch.reqs, force=True)
+            windows = cache.swa_available_size
         lengths = []
         kv_short = False
         for req in batch.reqs:
             first_page = div_ceil(req.device_len, page_size)
             capacity = (first_page + pages) * page_size - req.device_len
+            if windows is not None:
+                capacity = min(capacity, windows)
             wanted = min(config.speculative_num_steps, req.remain_len - 1, budget)
             length = min(wanted, capacity)
             kv_short |= length < wanted
             lengths.append(length)
             budget -= length
             pages -= div_ceil(req.device_len + length, page_size) - first_page
+            if windows is not None:
+                windows -= (div_ceil(req.device_len + length, page_size) - first_page) * page_size
         return lengths, kv_short
 
     def _logits(self, batch: Batch) -> torch.Tensor:
@@ -128,6 +148,23 @@ class SpeculativeDecoder:
         """Whether this iteration can speculate; without a wave one may still open."""
         return self.allows(True) or (not wave_active and self.allows(False))
 
+    def observe(self, accepted: list) -> None:
+        """Committed outcome of the last round: per request the drafts the target accepted
+        (None when unknown), before any stop truncated them."""
+        self.accepted_draft_tokens += sum(a for a in accepted if a is not None)
+        if self.control is not None:
+            self.control.observe(accepted)
+
+    def begin_round(self) -> None:
+        """A decode-only batch was chosen: time the round from before its preparation."""
+        if self.control is not None:
+            self.control.begin()
+
+    def end_round(self) -> None:
+        """The last round's replies are queued: close its timing."""
+        if self.control is not None:
+            self.control.end()
+
     def forward(self, forward_input: ForwardInput) -> ForwardOutput:
         """One decode step outside a prefill wave: SD when allowed, else AR."""
         batch = forward_input.batch
@@ -139,7 +176,12 @@ class SpeculativeDecoder:
             round_ = self.start(batch, lengths) if lengths is not None else None
         if round_ is None:
             return self.engine.forward_batch(batch, forward_input.sample_args)
-        return self.finish(round_, self.engine.compute_logits(round_.verify), "outwave")
+        logits = self.engine.compute_logits(round_.verify)
+        real = batch.size + sum(round_.lengths)
+        graphs = self.engine.graph_runner.speculative
+        self.verify_positions[0] += real
+        self.verify_positions[1] += graphs.verify_tokens(batch.size, real) if graphs is not None else real
+        return self.finish(round_, logits, "outwave")
 
     def admit_inwave(self, batch: Batch) -> list[int] | None:
         """Draft lengths of one same-width round beside a prefill wave, or None for AR."""
@@ -173,6 +215,12 @@ class SpeculativeDecoder:
             self._fallback(reason, batch)
             self._record_lengths([0] * batch.size)
             return None
+        steps = self.engine.config.speculative_num_steps
+        for req, length in zip(batch.reqs, limited):
+            if length < min(steps, req.remain_len - 1):
+                self.clipped_requests["capacity"] += 1
+            elif length < steps:
+                self.clipped_requests["tail"] += 1
         return lengths
 
     def start(self, batch: Batch, lengths: list[int]) -> SpeculativeRound:
@@ -192,7 +240,11 @@ class SpeculativeDecoder:
             req.cached_len, req.device_len = start, end
         self.cache.allocate_paged(views)
 
+        if self.control is not None:
+            self.control.mark(1)
         draft = self.drafter.propose(batch, views, starts, lengths)
+        if self.control is not None:
+            self.control.mark(2)
         lengths = draft.lengths
         self.draft_tokens += sum(lengths)
         self._record_lengths(lengths)
@@ -212,6 +264,8 @@ class SpeculativeDecoder:
 
     def finish(self, round_: SpeculativeRound, logits: torch.Tensor, phase: str) -> ForwardOutput:
         """Accept a prefix from complete target logits; the scheduler commits it."""
+        if self.control is not None:
+            self.control.mark(3)
         engine, sampler = self.engine, self.engine.sampler
         batch, lengths, starts, proposals = round_.batch, round_.lengths, round_.starts, round_.proposals
         target_probs = sampler.probabilities(

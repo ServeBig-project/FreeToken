@@ -74,6 +74,7 @@ class Session:
         self.window_freed: List[int] = []
         self.held: List[int] = []      # locations an early-stopped insert left with the caller
         self.last_end = None
+        self.last_window: List[int] = []
 
     # -- ops ------------------------------------------------------------------
     def match(self, ids: Sequence[int]):
@@ -81,8 +82,9 @@ class Session:
 
     def insert(self, ids: Sequence[int], slots: Optional[Sequence[int]] = None, *,
                update_after: int = 0, window_freed_before: int = 0):
-        """Returns ``(prefix_len, freed, state_taken, slots, state)``. Everything the caller gives
-        up -- the freed duplicates, the ragged tail, an untaken state -- goes back to the ledgers.
+        """Returns ``(prefix_len, freed, state_taken, slots, state)`` with ``freed`` the returned
+        duplicates (``Evicted.kv``); ``last_window`` keeps the subset whose window binding the
+        caller still holds (``Evicted.window``). Everything the caller gives up -- the freed duplicates, the ragged tail, an untaken state -- goes back to the ledgers.
         An early stop (end node ``None``) leaves the full pages from ``prefix_len`` on with the
         caller: they go to ``held`` until ``release_held``."""
         if slots is None:
@@ -91,7 +93,11 @@ class Session:
         prefix_len, freed, taken, self.last_end = self.tree.insert(
             ids_tensor(ids), slots_tensor(slots), state=state, update_after=update_after,
             window_freed_before=window_freed_before)
-        freed = freed.tolist()
+        assert list(freed.states) == []
+        self.last_window = freed.window.tolist()
+        freed = freed.kv.tolist()
+        live = set(slots[window_freed_before:]) if self.W is not None else set()
+        assert sorted(self.last_window) == sorted(set(freed) & live)
         full = (len(ids) // self.P) * self.P
         if self.last_end is None:
             self.held.extend(slots[int(prefix_len): full])
@@ -128,12 +134,6 @@ class Session:
 
     def evict_states(self, n: int) -> Evicted:
         return self._evicted(self.tree.evict_states(n))
-
-    def trim(self, ids: Sequence[int], keep_from: int) -> List[int]:
-        out = self.tree.trim_head_window(ids_tensor(ids), keep_from).tolist()
-        assert not set(out) & set(self.window_freed), "a window was freed twice"
-        self.window_freed.extend(out)
-        return out
 
     def request(self, ids: Sequence[int], prompt_len: int):
         """Match a prompt, lock it, commit the extended sequence on top, unlock: the only way a

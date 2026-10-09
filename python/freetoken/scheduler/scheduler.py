@@ -67,6 +67,8 @@ def _gib(n_bytes: int) -> str:
 
 
 class Scheduler(SchedulerIOMixin):
+    speculative: SpeculativeDecoder | None = None  # set when SD is configured
+
     def __init__(self, config: SchedulerConfig):
         from freetoken.engine import Engine
 
@@ -192,7 +194,6 @@ class Scheduler(SchedulerIOMixin):
         # tombstone so an abort-before-admission request can never be resurrected after its
         # terminal accounting acknowledgement has already been published.
         self._abort_tombstones: dict[int, None] = {}
-        self._forward_iter = 0  # global forward counter; drives the SWA proactive-eviction cadence
         # The launched-but-not-yet-drained batch (overlap): set at the top of each overlap_loop
         # iteration so the abort handler can tell whether a request's forward is still in flight
         # (mark it, defer the free to _process_last_data) or not (free immediately). Stays None
@@ -232,7 +233,9 @@ class Scheduler(SchedulerIOMixin):
         logger.info_rank0("Scheduler is idle, waiting for new reqs...")
         self.cache_manager.check_integrity()
         # Copies just finished: publish the status no reply will carry until the next request.
-        self.send_result([CacheStatusMsg(self.cache_manager.status())])
+        self.send_result([CacheStatusMsg(
+            self.cache_manager.status(),
+            self.speculative.snapshot() if self.speculative is not None else None)])
         moe_cache = self.engine.moe_offload_cache
         if moe_cache is not None and moe_cache.collect_stats:
             stats = moe_cache.cumulative_stats_snapshot()
@@ -387,6 +390,8 @@ class Scheduler(SchedulerIOMixin):
             ongoing_data = (forward_input, self._forward(forward_input))
 
         self._process_last_data(ongoing_data)
+        if self.speculative is not None:
+            self.speculative.end_round()
         self._flush_abort_acks()
 
     def layered_loop(self) -> None:
@@ -1003,6 +1008,7 @@ class Scheduler(SchedulerIOMixin):
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
         retained = [0] * batch.size
+        accepted = [None] * batch.size  # drafts accepted per request, before stop truncation
         completed = []
         with self.cache_manager.lazy_free_region():
             for i, req in enumerate(batch.reqs):
@@ -1034,6 +1040,7 @@ class Scheduler(SchedulerIOMixin):
                 tokens = next_tokens_cpu[i].reshape(-1)
                 if output.speculative_ends is not None:
                     tokens = tokens[tokens >= 0]
+                    accepted[i] = len(tokens) - 1
                 for j, next_token in enumerate(tokens):
                     if output.speculative_ends is not None:
                         req.complete_one()
@@ -1075,10 +1082,12 @@ class Scheduler(SchedulerIOMixin):
                 retained[i] = j + 1
                 if output.speculative_ends is not None:
                     self.cache_manager.release_speculative(req, output.speculative_ends[i])
-                    self.speculative.accepted_draft_tokens += min(j + 1, len(tokens) - 1)
+                    self.speculative.emitted_tokens += j + 1
 
                 completed.append((i, req, finished))
 
+            if output.speculative_ends is not None:
+                self.speculative.observe(accepted)
             if output.speculative_state is not None:
                 cost = self.speculative.cost
                 if cost is not None:
@@ -1544,13 +1553,11 @@ class Scheduler(SchedulerIOMixin):
             self.engine.graph_runner.pad_batch(batch)
         else:
             batch.padded_reqs = list(batch.reqs)
-        self._forward_iter += 1
         if batch.has_decode:
             # Free each decoding request's now-out-of-window SWA slots BEFORE the alloc below,
             # so they can back the new token -- this is what bounds the per-request swa
             # footprint during decode. (no-op unless the model is SWA / paged swa pool.)
-            self.cache_manager.maybe_free_swa_out_of_window(
-                batch.decode_reqs, forward_iter=self._forward_iter)
+            self.cache_manager.maybe_free_swa_out_of_window(batch.decode_reqs)
             for req in batch.decode_reqs:
                 req.decode_batch_idx += 1
         if batch.has_prefill:
@@ -1655,6 +1662,7 @@ class Scheduler(SchedulerIOMixin):
         if self.speculative is not None and batch.is_decode_only:
             reqs, _ = self.speculative.selector.select(batch, self.config.max_forward_len)
             batch = Batch(reqs, decode_size=len(reqs))
+            self.speculative.begin_round()
         forward_input = self._prepare_batch(batch)
         self._report_prompt_admissions(batch)
         return forward_input

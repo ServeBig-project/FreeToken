@@ -268,6 +268,17 @@ def parse_args(
         help="DFlash checkpoint directory or Hugging Face model; omitted uses self drafting.",
     )
     parser.add_argument(
+        "--dflash-compact-kv", action=argparse.BooleanOptionalAction,
+        default=ServerArgs.dflash_compact_kv,
+        help="Keep only the window of DFlash's sliding-attention layers on the GPU (default on; "
+             "the attention is unchanged). Ignored without a DFlash drafter.",
+    )
+    parser.add_argument(
+        "--dflash-attention-window", type=int, default=ServerArgs.dflash_attention_window,
+        help="Let DFlash's full-attention layers read at most N committed history tokens "
+             "(an approximation of the drafter only); 0 keeps the full history.",
+    )
+    parser.add_argument(
         "--speculative-draft-experts",
         type=_positive_int,
         default=ServerArgs.speculative_draft_experts,
@@ -281,7 +292,13 @@ def parse_args(
     )
     parser.add_argument(
         "--speculative-adaptive-cost", action="store_true",
-        help="Use measured costs and accepted prefixes to decide after each draft step whether to continue.",
+        help="Use measured costs and accepted prefixes to choose draft lengths (DFlash: one whole "
+             "block of AR/2/4/8 per round).",
+    )
+    parser.add_argument(
+        "--dflash-adaptive-observe-only", action="store_true",
+        help="With adaptive DFlash: after its initial measurements, compute every decision but "
+             "draft the configured length (controller overhead A/B).",
     )
     parser.add_argument(
         "--speculative-draft-load-missing", action="store_true",

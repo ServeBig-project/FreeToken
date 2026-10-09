@@ -49,7 +49,7 @@ All speculative switches, their defaults and legal combinations:
 | `--speculative-draft-experts K` | `3` | — | `1 <= K <=` target experts per token; any K works with CUDA Graph |
 | `--speculative-draft-residency off\|router` | `off` | draft uses the original top-K and loads misses | `router`: only cached experts; see [adaptive serving](adaptive-loading.md) |
 | `--speculative-draft-load-missing` | off | `router` falls back to ordinary generation when a layer has fewer than K cached experts | requires `router` |
-| `--speculative-adaptive-cost` | off | every round drafts up to `N` | — |
+| `--speculative-adaptive-cost` | off | every round drafts up to `N` | DFlash: one whole block of AR/2/4/8 (capped by `N`) per round, chosen from measured round costs |
 | `--speculative-verify-prefetch` | off | no prefetch | — |
 | `--cuda-graph-max-bs` | automatic | `0` runs speculation eagerly | SD Graph needs BF16 activations, BF16 or NVFP4 experts, `--moe-backend offload` or `hybrid`, FlashInfer and page size 1; otherwise an explicit SD request fails at startup |
 
@@ -57,6 +57,24 @@ The last three boolean controls, and `router` residency, require `legacy`
 batching; the boolean controls also require BF16 experts with `--moe-backend offload`
 and may be combined freely with each other, any K and either residency mode,
 except `--speculative-draft-load-missing` without `router`.
+
+An external DFlash drafter (`--speculative-draft-model-path PATH`, at most 8 draft
+tokens) adds:
+
+| Option | Default | Behavior |
+| --- | --- | --- |
+| `--dflash-compact-kv` / `--no-dflash-compact-kv` | on | drafter layers with a native sliding window keep only a bounded window pool on the GPU; the attention is unchanged. Ignored without a drafter |
+| `--dflash-attention-window W` | `0` | `W > 0` lets the drafter's full-attention layers read at most `W` committed history tokens (approximates the drafter only; the target still verifies everything) |
+| `--dflash-adaptive-observe-only` | off | with `--speculative-adaptive-cost`: after the initial measurements, compute every decision but draft the configured `N` (controller-overhead A/B) |
+
+The drafter's weights, context, metadata and workspace are priced in the engine
+budget next to the target KV; they do not draw on `--gdn-state-budget-bytes`.
+Explicit expert, KV and GDN capacities stay as given and fail before ready when the
+drafter does not fit. `/v1/cache/status` reports them under `geometry.dflash`
+(`weight_bytes`, `context_bytes` = `full_context_bytes` + `window_context_bytes`,
+`metadata_bytes`, `workspace_bytes`, `reserved_bytes`, window slots), and the prefix
+cache status reports `window_slots` (free, tree-locked, tree-evictable,
+request-owned, copies in flight).
 
 Existing model, GPU, expert-cache, KV-cache, concurrency, and server arguments
 retain their meanings. The main model uses an already-supported checkpoint
@@ -69,11 +87,19 @@ Only committed tokens count toward generated-token usage and output limits.
 Temporary draft tokens must never be emitted to clients.
 
 `GET /v1/stats` exposes a `speculative` object with `enabled`, `draft_tokens`,
-`accepted_draft_tokens`, and `verify_steps`. Counters are cumulative since server
-startup. Accepted draft tokens count only tokens retained for output; target
-correction/bonus tokens are not accepted draft tokens. Counters include work
-spent on subsequently cancelled requests. Disabled serving reports `enabled:
-false` and zero counters.
+`accepted_draft_tokens`, `emitted_tokens`, `verify_steps`, and the real and
+physical (graph-padded) `verify_positions` / `verify_physical_positions` of rounds
+outside prefill waves. Counters
+are cumulative since server startup. Accepted draft tokens are the drafts the target
+accepted, counted before EOS, stop strings or output limits cut the reply;
+`emitted_tokens` are the tokens speculative rounds actually delivered. Target
+correction/bonus tokens are not accepted draft tokens. Counters include work spent
+on subsequently cancelled requests. Disabled serving reports `enabled: false` and
+zero counters. DFlash adds `dflash_*` counters: real/physical draft positions, the
+control mode, executed (and in observe-only mode suggested) block lengths, init,
+probe, selected and fixed rounds, requests clipped by resources, whole-round,
+proposal and verify time with their `dflash_timing_scope`, decision time and its
+histogram, samples and dropped samples.
 
 ## Required behavior
 
@@ -160,7 +186,9 @@ state pool or take memory from experts or KV.
 
 `state_slot_stops` counts whole-batch fallbacks due to state capacity.
 `draft_length_histogram` records actual request-round draft lengths, after all
-resource and cost decisions. The default state budget is not a guarantee that
+resource and cost decisions. `clipped_requests` counts requests that ran SD with a
+shorter draft, by cause: `tail` (their own remaining output) or `capacity` (KV
+pages, window slots, forward width or state slots). The default state budget is not a guarantee that
 full concurrency can draft: protected prefixes also consume it. The existing idle
 cache rebuild can explicitly resize `num_mamba_slots`.
 
@@ -178,6 +206,6 @@ ReplaySSM or a larger state budget can run SD.
 Rebuild and Graph capture preserve those ownership boundaries.
 
 Draft and verification CUDA Graphs are implemented for the migrated Gated
-DeltaNet models under the same BF16/offload/FlashInfer/page-size-1 conditions.
+DeltaNet models under the same SD Graph conditions listed above.
 Requesting unsupported Graph components fails at startup; explicit
 `--cuda-graph-max-bs 0` remains the way to choose eager execution.

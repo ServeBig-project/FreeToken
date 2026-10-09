@@ -16,7 +16,7 @@ from freetoken.utils import align_down, div_ceil
 if TYPE_CHECKING:
     from .utils import PendingReq
 
-# Proactive out-of-window free_swa runs every `interval` forwards (== sglang SWA_EVICTION_INTERVAL).
+# A decoding request releases its out-of-window windows every `interval` committed tokens.
 def _swa_eviction_interval() -> int:
     raw = os.environ.get("FREETOKEN_SWA_EVICTION_INTERVAL", "128")
     try:
@@ -27,8 +27,8 @@ def _swa_eviction_interval() -> int:
 
 _SWA_EVICTION_INTERVAL = _swa_eviction_interval()
 
-# Finish-time retention keeps [P - window - gap, P) swa-live for the next turn's cut near the
-# prompt end. The gap covers templates whose generation prompt injects tokens that vanish when
+# Window retention reaches this far before a resume point (the commit's node cut, tool-call
+# anchors). The gap covers templates whose generation prompt injects tokens that vanish when
 # the client drops reasoning (Qwen's "<think>\n": the re-render diverges 2 tokens BEFORE P).
 _SWA_RETAIN_GAP = 16
 
@@ -206,6 +206,12 @@ class CacheManager:
         device = page_table.device
         self.free_slots = torch.arange(num_pages, dtype=torch.int32, device=device) * page_size
         self.linear_state_pool = linear_state_pool
+        kv_pool = swa_pool
+        if draft_kv is not None and draft_kv.swa_paged:
+            # SD targets have no window of their own: the drafter's window rides the tree.
+            swa_pool, sliding_window_size = draft_kv, draft_kv.window
+            self.draft_block = draft_kv.layout.config.speculative_num_steps + 1
+            self.anchor_windows = getattr(draft_kv.layout.config, "special_token_ckpt", False)
         self.swa_pool = swa_pool
         self.sliding_window_size = sliding_window_size
         # swa_paged: the pool keeps window KV behind a full->window mapping with its own slots,
@@ -237,7 +243,7 @@ class CacheManager:
         if host_bytes and not self.reuse:
             raise ValueError("--prefix-cache-host-gib needs prefix reuse (--cache-type radix)")
         self.components = build_components(
-            swa_pool, linear_state_pool, draft_kv, window=self.window_cache,
+            kv_pool, linear_state_pool, draft_kv, window_pool=swa_pool, window=self.window_cache,
             state=self.state_cache, required=bool(host_bytes))
         self.tp_group = tp_group  # CPU group when TP > 1: ranks agree on finished copies
         self.host = HostTier(self, host_bytes, self.components) if host_bytes else None
@@ -249,6 +255,8 @@ class CacheManager:
     # ----- capability hooks (defaults; plugged-in pools may narrow them) -----
     supports_runtime_rebuild = True
     prefill_chunk_budget = None  # generic shared page pool: no per-model prefill chunk cap
+    draft_block = 0  # tokens one draft round adds when the window pool is the drafter's
+    anchor_windows = False  # a retained tool-call anchor may hold one more window
 
     def _make_tree(self) -> RadixCache | None:
         if not self.reuse:
@@ -309,6 +317,23 @@ class CacheManager:
             total += (last_page - first_page) * ps
         return total
 
+    def wave_window_growth(self, reqs: Iterable[Req]) -> int:
+        """Window slots decoding requests may take before their next release while a layered
+        wave runs without new admissions: the rest of a window not filled yet, then one release
+        interval and one draft round (plus the retained window before an anchor drops), never
+        more than each can still generate. Drafter pool only (it is sized per running request);
+        a reused prefix holds at most one window."""
+        if not self.draft_block:
+            return 0
+        window = self.sliding_window_size
+        steady = _SWA_EVICTION_INTERVAL + self.draft_block + 2 * self.page_size
+        if self.anchor_windows:
+            steady += window + _SWA_RETAIN_GAP
+        return sum(
+            min(req.max_device_len - req.device_len + self.draft_block,
+                window - min(req.device_len - req.swa_evicted_seqlen, window) + steady)
+            for req in reqs)
+
     def decode_reserved_tokens_for(self, reqs: Iterable[Req]) -> int:
         """Full-token capacity already held for these runnable decode requests."""
         return sum(
@@ -361,6 +386,17 @@ class CacheManager:
                "h2d_time_ms": 0.0, "d2h_time_ms": 0.0, **self.stats}
         if self.host is not None:
             out.update(self.host.status())
+        if self.swa_paged:
+            # Physical slots: free, held by the tree (locked by request handles or window
+            # copies, else evictable), and the rest owned by running requests. Copies in
+            # flight are a share of the locked and request slots, not extra ones.
+            slots, free = self.swa_pool.swa_num_tokens - 1, self.swa_pool.swa_available_size()
+            locked, unlocked = ((self.tree.protected["window"], self.tree.evictable["window"])
+                                if self.window_cache else (0, 0))
+            out["window_slots"] = dict(
+                total=slots, free=free, tree_locked=locked, tree_evictable=unlocked,
+                request_owned=slots - free - locked - unlocked,
+                copy_inflight=self.host.window_inflight if self.host is not None else 0)
         comps = self.components
         out["components"] = [
             {"name": c.name, "storage_kind": c.storage_kind,
@@ -441,21 +477,26 @@ class CacheManager:
                 self.linear_state_pool.free(c.slot)
         req.state_captures[:] = future
 
-    def maybe_free_swa_out_of_window(self, reqs: List[Req], *, forward_iter: int) -> None:
-        """Proactively free each decoding request's now-out-of-window SWA slots, bounding its swa
-        footprint to ~one window so a smaller-than-full swa pool (swa_full_tokens_ratio<1) stays
-        viable. Mirrors sglang ``ScheduleBatch.maybe_evict_swa`` / ``free_swa_out_of_window_slots``:
-        evict every ``interval`` forwards; skip a request's first decode step (its extend forward
-        may still be in-flight under overlap); floor the frontier at the request's protected
-        (reused) prefix so it only frees its OWN slots, never the tree-shared prefix's swa; and keep
-        a ``window + page_size`` margin so the freed slots are out-of-window for every in-flight
+    def maybe_free_swa_out_of_window(self, reqs: List[Req], *, force: bool = False) -> None:
+        """Proactively release each decoding request's now-out-of-window SWA slots, bounding its
+        swa footprint to ~one window so a smaller-than-full swa pool (swa_full_tokens_ratio<1)
+        stays viable. Mirrors sglang ``ScheduleBatch.maybe_evict_swa``: run every ``interval``
+        committed tokens of a request (``force``: now, under pool pressure) -- counting tokens,
+        not forwards, keeps a speculative round's several tokens inside the same bound; skip a
+        request's first decode step (its extend forward may still be in-flight under overlap);
+        free its OWN slots above the reused prefix and drop its lock on the reused prefix's
+        window below the same frontier (other holders keep theirs); and keep a
+        ``window + page_size`` margin so the freed slots are out-of-window for every in-flight
         forward."""
-        if not self.swa_paged or forward_iter % _SWA_EVICTION_INTERVAL != 0:
+        if not self.swa_paged:
             return
         window = self.sliding_window_size
         for req in reqs:
             if req.decode_batch_idx < 1:
                 continue                       # overlap guard: extend forward may still be running
+            if not force and req.cached_len < req.swa_next_reclaim:
+                continue
+            req.swa_next_reclaim = req.cached_len + _SWA_EVICTION_INTERVAL
             floor = req.cache_handle.cached_len   # reused prefix -> its swa is tree-owned, not ours
             threshold = (req.device_len - 1) - window - self.page_size
             if req.toolcall_anchor_len is not None:
@@ -475,12 +516,14 @@ class CacheManager:
                 else:
                     threshold = min(threshold, cap)
             new_evicted = align_down(threshold, self.page_size)
+            if self.window_cache:
+                self.tree.advance_window(req.cache_handle, new_evicted)
             start = max(req.swa_evicted_seqlen, floor)
             if new_evicted > start:
                 self._free_swa(self.page_table[req.table_idx, start:new_evicted])
                 req.swa_evicted_seqlen = new_evicted
 
-    def free_swa_out_of_window_extend(self, reqs: List[Req]) -> None:
+    def free_swa_out_of_window_extend(self, reqs: List[Req], *, before: int | None = None) -> None:
         """Prefill sibling of ``maybe_free_swa_out_of_window``: before allocating a chunk, return
         each request's now-out-of-window SWA slots so a chunked prompt's live swa stays ~one window
         regardless of prompt length (else a prompt longer than the swa pool exhausts alloc_swa).
@@ -491,13 +534,16 @@ class CacheManager:
         freed, floored at the tree-owned reused prefix. Overlap-safe by the same scheduler stream
         gate + ``window + page_size`` margin the decode driver relies on; ``free_swa`` is idempotent
         over the sentinel, so re-freeing an earlier chunk's range is a no-op. The pool is always
-        sized > one window (see the swa-pool floor), so a chunk can always make forward progress."""
+        sized > one window (see the swa-pool floor), so a chunk can always make forward progress.
+        ``before`` frees less: only below it."""
         if not self.swa_paged:
             return
         window = self.sliding_window_size
         for req in reqs:
             floor = req.cache_handle.cached_len   # reused prefix -> its swa is tree-owned, not ours
-            new_evicted = align_down(req.cached_len - window - self.page_size, self.page_size)
+            frontier = req.cached_len - window - self.page_size
+            new_evicted = align_down(frontier if before is None else min(before, frontier),
+                                     self.page_size)
             start = max(req.swa_evicted_seqlen, floor)
             if new_evicted > start:
                 self._free_swa(self.page_table[req.table_idx, start:new_evicted])
@@ -547,8 +593,8 @@ class CacheManager:
             self._release(self.tree.take_released())
 
     def _free_swa(self, indices: torch.Tensor) -> None:
-        """Free the swa-pool slots backing ``indices`` (full-pool slots). Idempotent over the
-        0 sentinel, so safe to call on any slots being returned to free_slots."""
+        """Free the swa-pool slots bound to ``indices`` (full-pool slots); each must still hold
+        a binding the caller owns."""
         if self.swa_paged and len(indices) > 0:
             self.swa_pool.free_swa(indices)
 
@@ -661,7 +707,9 @@ class CacheManager:
         """Return whole provisional pages beyond the committed target KV."""
         start = div_ceil(req.cached_len, self.page_size) * self.page_size
         end = div_ceil(allocated_len, self.page_size) * self.page_size
-        self._free(self.page_table[req.table_idx, start:end])
+        pages = self.page_table[req.table_idx, start:end]
+        self._free_swa(pages)
+        self._free(pages)
 
     def _allocate_paged_rows(
         self,
@@ -716,6 +764,18 @@ class CacheManager:
             self._free_decode_reservation(reservation)
 
     def cache_req(self, req: Req, *, finished: bool) -> None:
+        if not finished and self.draft_block:
+            # The drafter's pool is sized per running request, but a layered wave can prefill
+            # far more than one window and decode's own release skips a request's first step:
+            # return what lies a window before the first resume point now. Holding it would
+            # also stop the commit at a shared node whose window another request released.
+            bounds = self._commit_boundaries(req, finished=False)
+            if bounds:
+                self.free_swa_out_of_window_extend(
+                    [req], before=bounds[0][0] - self.sliding_window_size - _SWA_RETAIN_GAP)
+        self._commit_req(req, finished=finished)
+
+    def _commit_req(self, req: Req, *, finished: bool) -> None:
         """Publish the request's committed prefix; on finish also release what it owns.
 
         The tree may already hold part of the prefix: the request's own pages for it are
@@ -727,7 +787,7 @@ class CacheManager:
             # No reuse (or multimodal content the token ids do not identify): nothing is shared.
             self.unlock(old)
             if finished:
-                self._free_pages(self._padded_tail(req, old.cached_len))
+                self._free_tail(req, old.cached_len)
                 self._free_req_slots(req)
             return
         boundaries = self._commit_boundaries(req, finished=finished)
@@ -743,7 +803,8 @@ class CacheManager:
                 req.input_ids[:pos], pages[:pos], group=req.cache_group, state=slot,
                 purpose=purpose, update_after=free_upto,
                 window_freed_before=req.swa_evicted_seqlen)
-            self._free_pages(freed)
+            self._free_swa(freed.window)
+            self._free(freed.kv)
             if taken and capture is not None:
                 capture.slot = None
             elif taken:
@@ -762,7 +823,7 @@ class CacheManager:
         if finished:
             if published:
                 self._prune_round(req, published[-1])
-            self._free_pages(self._padded_tail(req, free_upto))
+            self._free_tail(req, free_upto)
             self._free_req_slots(req)
             if self.window_cache:
                 self._retain_prompt_window(req)
@@ -826,17 +887,12 @@ class CacheManager:
     def _retain_prompt_window(self, req: Req) -> None:
         """Soft-pin the prompt-end window after finish: decode never re-stamps the prompt path,
         so it would be the first window victim, yet a follow-up turn that drops reasoning
-        diverges right at the prompt end and needs only that trailing window. Free the head's
-        window eagerly (full KV stays) and re-stamp the tail; it stays unlocked."""
+        diverges right at the prompt end. Re-stamp the path, its head oldest; it stays unlocked.
+        The head's windows are not dropped here: other resume points on a shared path still
+        need them, and window pressure evicts the head first anyway."""
         prompt_len = align_down(req.max_device_len - req.output_len, self.page_size)
-        if prompt_len <= 0:
-            return
-        keep_from = align_down(
-            max(prompt_len - self.sliding_window_size - _SWA_RETAIN_GAP, 0), self.page_size)
-        if keep_from > 0:
-            self._free_swa(self.tree.trim_head_window(
-                req.input_ids[:prompt_len], keep_from, req.cache_group))
-        self.tree.match(req.input_ids[:prompt_len], req.cache_group)
+        if prompt_len > 0:
+            self.tree.match(req.input_ids[:prompt_len], req.cache_group)
 
     def discard_incomplete_layered_wave(
         self,
@@ -869,16 +925,18 @@ class CacheManager:
         end = div_ceil(req.cached_len, self.page_size) * self.page_size
         return self.page_table[req.table_idx, start:end]
 
+    def _free_tail(self, req: Req, start: int) -> None:
+        """Free the request's own pages from ``start``; its window only where still bound."""
+        tail = self._padded_tail(req, start)
+        self._free_swa(tail[max(0, req.swa_evicted_seqlen - start):])
+        self._free(tail)
+
     def _free_req_slots(self, req: Req) -> None:
         """Return remaining private state; donated public states belong to the cache."""
         self._release_captures(req)
         if req.linear_slot_idx is not None:
             self.linear_state_pool.free(req.linear_slot_idx)
         req.linear_slot_idx = None
-
-    def _free_pages(self, indices: torch.Tensor) -> None:
-        self._free_swa(indices)
-        self._free(indices)
 
     def check_integrity(self) -> None:
         if self.host is not None:
@@ -950,12 +1008,20 @@ class CacheManager:
             if len(indices) > 0:
                 lazy_free_list.append(indices[:: self.page_size].clone())
 
+        def lazy_free_swa(indices: torch.Tensor) -> None:
+            # One window release per region instead of one per request.
+            if self.swa_paged and len(indices) > 0:
+                lazy_swa_list.append(indices.clone())
+
         lazy_free_list: List[torch.Tensor] = []
+        lazy_swa_list: List[torch.Tensor] = []
         try:
-            self._free = lazy_free
+            self._free, self._free_swa = lazy_free, lazy_free_swa
             yield
         finally:
-            del self._free
+            del self._free, self._free_swa
+            if lazy_swa_list:
+                self.swa_pool.free_swa(torch.cat(lazy_swa_list))
             if lazy_free_list:
                 self.free_slots = torch.cat([self.free_slots] + lazy_free_list)
 

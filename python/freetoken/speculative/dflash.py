@@ -4,19 +4,26 @@ from __future__ import annotations
 import torch
 
 from freetoken.speculative import DraftResult
-from .block_cost import BlockDraftCost
+from .block_cost import BlockController
 from .dflash_cache import DFlashContext
 
 
 class DFlashRuntime:
-    def __init__(self, engine, model):
+    def __init__(self, engine, model, layout):
         self.engine, self.model = engine, model
-        self.context = DFlashContext(engine, model)
+        self.context = DFlashContext(engine, model, layout)
         self.graphs = {}
         self.sizes = {}
-        maximum = engine.config.max_running_req * (engine.config.speculative_num_steps + 1)
+        requests = engine.config.max_running_req
+        maximum = requests * (engine.config.speculative_num_steps + 1)
         self.inputs, self.positions, self.locations = (
             torch.zeros(maximum, dtype=torch.int32, device=engine.device) for _ in range(3))
+        # Per-round descriptors, packed: positions and flat page-table indices of every draft
+        # position, each request's block offset and flat first-token index, the sampled rows.
+        self.host = torch.empty(3 * maximum + 2 * requests, dtype=torch.int64, pin_memory=True)
+        self.staged = torch.empty_like(self.host, device=engine.device)
+        self.first_tokens = torch.empty(requests, dtype=torch.int32, device=engine.device)
+        self.uploaded = torch.cuda.Event()
         self.logits = None
         limit = engine.config.speculative_num_steps
         self.widths = sorted({1, limit, *(n for n in (2, 4, 8) if n <= limit)})
@@ -35,34 +42,35 @@ class DFlashRuntime:
         self.context.flush(batch, features)
 
     def capture_stores(self):
-        return [(self.context.kv[0, layer], self.context.kv[1, layer])
-                for layer in range(self.model.config.num_hidden_layers)]
+        return self.context.full_stores()
 
-    @property
-    def storage_bytes_actual(self):
-        return self.storage_bytes_for_pages(self.engine.num_pages)
-
-    def storage_bytes_for_pages(self, pages):
-        buffers = (self.inputs, self.positions, self.locations, self.model.inv_freq)
-        index_width = min(self.engine.config.max_seq_len, pages)
-        index_delta = ((index_width - self.context.index_width) * 4
-                       * sum(self.context.batch_sizes) * len(set(self.model.attention_modes)))
-        return ((pages + 1) * self.context.unit_bytes + self.context.metadata_bytes
-                + index_delta + sum(t.numel() * t.element_size() for t in buffers))
+    def protect_capture(self, tokens):
+        """Target graph capture writes context at locations [0, tokens): point their window
+        bindings at the sentinel meanwhile; the returned function restores them."""
+        pool = self.context.pool
+        if pool is None:
+            return lambda: None
+        mapping = pool.full_to_swa_index_mapping[:tokens]
+        saved = mapping.clone()
+        mapping.zero_()
+        return lambda: mapping.copy_(saved)
 
     def geometry(self):
-        context = (self.engine.num_pages + 1) * self.context.unit_bytes
-        return dict(active=True, weight_bytes=self.model.weight_bytes, context_bytes=context,
-                    metadata_bytes=self.storage_bytes_actual - context,
-                    reserved_bytes=self.model.weight_bytes + self.storage_bytes_actual)
+        out = self.context.geometry()
+        out["weight_bytes"] = self.model.weight_bytes
+        out["context_bytes"] = out["full_context_bytes"] + out["window_context_bytes"]
+        out["reserved_bytes"] = (out["weight_bytes"] + out["context_bytes"]
+                                 + out["metadata_bytes"] + out["workspace_bytes"])
+        return dict(active=True, **out)
 
     def _forward(self, batch_size, tokens):
         embeddings = self.engine.model.model.embed_tokens.forward(self.inputs[:tokens])
         embeddings = embeddings * self.model.input_embedding_scale
+        locations = self.context.slots(self.locations[:tokens])
         hidden = self.model(
             embeddings, self.positions[:tokens],
             lambda layer, q, k, v: self.context.attend(
-                layer, q, k, v, batch_size=batch_size, locations=self.locations[:tokens]))
+                layer, q, k, v, batch_size=batch_size, locations=locations))
         logits = self.engine.model.lm_head.forward_selected(hidden).float()
         logits = logits * self.model.output_multiplier
         softcap = self.model.final_logit_softcapping
@@ -110,6 +118,10 @@ class DFlashRuntime:
     def rebuild(self):
         self.context.rebuild()
 
+    def physical_tokens(self, count, actual):
+        """Positions a draft of ``actual`` tokens over ``count`` requests runs at."""
+        return next((n for n in self.sizes.get(count, ()) if n >= actual), actual)
+
     def propose_logits(self, batch, lengths, token_table):
         count = batch.size
         rows = [r.table_idx for r in batch.reqs]
@@ -120,19 +132,35 @@ class DFlashRuntime:
             offsets.append(offset)
             offset += width
         actual = offset
-        physical = next((n for n in self.sizes.get(count, ()) if n >= actual), actual)
+        physical = self.physical_tokens(count, actual)
         graph = self.graphs.get((count, physical))
-        device = self.engine.device
-        to = lambda x: torch.tensor(x, dtype=torch.int32, pin_memory=True).to(device, non_blocking=True)
-        positions = to([p + j for p, w in zip(firsts, widths, strict=True) for j in range(w)])
-        table_rows = to([row for row, w in zip(rows, widths, strict=True) for _ in range(w)])
-        total = actual
-        self.inputs[:physical].fill_(self.model.mask_token_id)
+        stride = self.engine.page_table.shape[1]
+        positions, flat = [], []
+        for row, first, width in zip(rows, firsts, widths, strict=True):
+            for position in range(first, first + width):
+                positions.append(position)
+                flat.append(row * stride + position)
+        sampled = [off + 1 + j for off, n in zip(offsets, lengths, strict=True) for j in range(n)]
+        self.uploaded.synchronize()  # the previous round's upload has read the host buffer
+        host, heads = self.host.numpy(), 2 * actual + 2 * count
+        used = heads + len(sampled)
+        host[:actual] = positions
+        host[actual:2 * actual] = flat
+        host[2 * actual:2 * actual + count] = offsets
+        host[2 * actual + count:heads] = [row * stride + p for row, p in zip(rows, firsts)]
+        host[heads:used] = sampled
+        staged = self.staged[:used]
+        staged.copy_(self.host[:used], non_blocking=True)
+        self.uploaded.record()
         self.positions[:physical].zero_()
-        self.positions[:total].copy_(positions)
+        self.positions[:actual].copy_(staged[:actual])
         self.locations[:physical].fill_(self.engine.num_pages)
-        self.locations[:total].copy_(self.engine.page_table[table_rows, positions])
-        self.inputs[to(offsets)] = token_table[to(rows[:count]), to(firsts[:count])]
+        torch.index_select(self.engine.page_table.view(-1), 0, staged[actual:2 * actual],
+                           out=self.locations[:actual])
+        self.inputs[:physical].fill_(self.model.mask_token_id)
+        torch.index_select(token_table.view(-1), 0, staged[2 * actual + count:heads],
+                           out=self.first_tokens[:count])
+        self.inputs.index_copy_(0, staged[2 * actual:2 * actual + count], self.first_tokens[:count])
         self.context.plan(rows, firsts, widths)
         if graph is not None:
             graph.replay()
@@ -143,8 +171,8 @@ class DFlashRuntime:
         else:
             if self.graphs:
                 self.engine.graph_runner.eager_counts["draft"] += 1
-            result = self._forward(count, total)[:actual]
-        return result, offsets
+            result = self._forward(count, actual)[:actual]
+        return result.index_select(0, staged[heads:used])
 
 
 class DFlashDrafter:
@@ -153,18 +181,19 @@ class DFlashDrafter:
     def __init__(self, engine, table, generator):
         self.engine, self.table, self.generator = engine, table, generator
         self.runtime = engine.dflash
-        self.cost = BlockDraftCost(engine)
+        self.control = (BlockController(engine, self.runtime)
+                        if engine.config.speculative_adaptive_cost else None)
+        self.positions = [0, 0]  # real and physical draft positions
 
     def plan(self, batch, lengths):
-        return self.cost.plan(lengths)
+        return self.control.plan(batch, lengths) if self.control is not None else lengths
 
     def propose(self, batch, views, starts, lengths):
         engine, sampler = self.engine, self.engine.sampler
-        self.cost.begin()
-        logits, offsets = self.runtime.propose_logits(batch, lengths, self.table.token_pool)
-        self.cost.end(batch.size, max(lengths))
-        query_rows = [off + 1 + j for off, n in zip(offsets, lengths, strict=True) for j in range(n)]
-        selected = logits[query_rows]
+        selected = self.runtime.propose_logits(batch, lengths, self.table.token_pool)
+        real = batch.size + sum(lengths)
+        self.positions[0] += real
+        self.positions[1] += self.runtime.physical_tokens(batch.size, real)
         probabilities = sampler.probabilities(selected, sampler.prepare(batch, repeats=lengths))
         samples = torch.multinomial(probabilities, 1, generator=self.generator).flatten().to(torch.int32)
         width = max(lengths) + 1
@@ -179,7 +208,9 @@ class DFlashDrafter:
         return DraftResult(tokens, q, lengths)
 
     def snapshot(self):
-        return dict(drafter="dflash", residency_stops=0, draft_expert_loads=0, **self.cost.snapshot())
-
-    def observe_acceptance(self, lengths, accepted):
-        self.cost.observe_acceptance(lengths, accepted)
+        out = dict(drafter="dflash", residency_stops=0, draft_expert_loads=0,
+                   dflash_control="fixed", dflash_draft_positions=self.positions[0],
+                   dflash_draft_physical_positions=self.positions[1])
+        if self.control is not None:
+            out.update(self.control.snapshot())
+        return out

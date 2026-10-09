@@ -66,6 +66,7 @@ class UserReply(BaseFrontendMsg):
 @dataclass
 class CacheStatusReply(BaseFrontendMsg):
     prefix_cache: dict
+    speculative: dict | None = None
 
 
 @dataclass

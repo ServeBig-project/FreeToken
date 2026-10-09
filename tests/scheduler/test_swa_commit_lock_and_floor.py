@@ -109,13 +109,13 @@ def _prefill(cm, pm, prompt_len: int, n_decode: int, base: int = 1):
 
 
 def _decode(cm, reqs, n: int):
-    """Shared decode loop over the scheduler's global forward counter, which is what drives the
-    out-of-window eviction cadence."""
+    """Shared decode loop; each request's committed length drives its out-of-window eviction
+    cadence."""
     for i in range(n):
         for r in reqs:
             r.append_host(torch.tensor([9999], dtype=torch.int32))
             r.decode_batch_idx = i + 1
-        cm.maybe_free_swa_out_of_window(reqs, forward_iter=i + 1)
+        cm.maybe_free_swa_out_of_window(reqs)
         cm.allocate_paged(reqs)
         for r in reqs:
             r.complete_one()
@@ -124,7 +124,7 @@ def _decode(cm, reqs, n: int):
 # --------------------------------------------------------------- what the commit locks
 @pytest.mark.parametrize("ps", [1, 8, 128])
 def test_commit_locks_one_window_not_the_whole_extend(ps, monkeypatch):
-    """The lock covers the retained window (page-rounded); the head stays live and unlocked, so
+    """The lock covers exactly one window (page-rounded); the head stays live and unlocked, so
     ambient pressure can still reclaim it. ps == window == 128 is the DSV4 shape, where the
     boundary must also stay page-aligned for the pool's whole-page free path."""
     monkeypatch.setattr(cache_mod, "_SWA_EVICTION_INTERVAL", 1)
@@ -133,17 +133,15 @@ def test_commit_locks_one_window_not_the_whole_extend(ps, monkeypatch):
                             num_pages=256 if ps > 1 else 4096, width=64 * max(ps, 32))
     _prefill(cm, pm, prompt, n_decode=1)
 
-    retained = -(-(window + GAP) // ps) * ps
+    retained = -(-window // ps) * ps
     assert cm.tree.protected["window"] == retained
     assert cm.tree.evictable["window"] == prompt - retained
     cm.tree.check_integrity()
 
 
 def test_short_final_chunk_locks_no_more_than_a_window(monkeypatch):
-    """The boundary is the retain gap, not the window: the committed live region is
-    [L - c_last - window - 1, L), so keep_from (L - window - gap) only falls inside it once
-    c_last > gap. Below that the split lands in the tombstoned head and does nothing -- and does
-    not need to, the node is already short. Either way the lock stays <= window + gap."""
+    """The committed live region is [L - c_last - window - 1, L); whatever the final chunk's
+    length, the lock covers at most one window of it."""
     monkeypatch.setattr(cache_mod, "_SWA_EVICTION_INTERVAL", 1)
     window, first_chunk, n_decode = 8, 100, 40
     for c_last in (1, 14, 15, 16, 17, 60):
@@ -165,7 +163,7 @@ def test_short_final_chunk_locks_no_more_than_a_window(monkeypatch):
         live_node = total - req.swa_evicted_seqlen
         cm.cache_req(req, finished=False)
 
-        assert cm.tree.protected["window"] == min(live_node, window + GAP), f"c_last={c_last}"
+        assert cm.tree.protected["window"] == min(live_node, window), f"c_last={c_last}"
         _decode(cm, [req], n_decode)
         cm.cache_req(req, finished=True)
         tm.free(req.table_idx)
@@ -175,8 +173,8 @@ def test_short_final_chunk_locks_no_more_than_a_window(monkeypatch):
 # --------------------------------------------------------------- what that buys at runtime
 @pytest.mark.parametrize("interval", [1, 128])
 def test_decode_survives_any_prompt_length(interval, monkeypatch):
-    """The pool holds the window working set and nothing chunk-sized, at both an every-forward
-    cadence and the shipped 128-forward one (where it must also absorb a full interval of decode
+    """The pool holds the window working set and nothing chunk-sized, at both an every-token
+    cadence and the shipped 128-token one (where it must also absorb a full interval of decode
     growth before the first reclaim). The prompt length -- hence the final chunk's -- must not
     decide whether decode completes."""
     monkeypatch.setattr(cache_mod, "_SWA_EVICTION_INTERVAL", interval)
@@ -209,12 +207,13 @@ def test_a_full_batch_decodes_on_a_pool_sized_to_the_declared_floor(n_req, monke
 
 
 def test_a_per_request_sized_pool_cannot_hold_a_full_batch(monkeypatch):
-    """Why the floor carries the max_running_req factor. Two manifestations, both fatal and
-    neither handled: alloc_swa raising once the pool is dry, or -- reached first here --
-    PrefillAdder's swa cap collapsing a continuation chunk to zero tokens (prefill.py:138),
-    which builds a Req with device_len == cached_len. Continuations take the chunked branch of
-    try_add_one, so the admission gate never sees them."""
-    monkeypatch.setattr(cache_mod, "_SWA_EVICTION_INTERVAL", 1)
+    """Why the floor carries the max_running_req factor: at the shipped 128-token cadence every
+    request grows a full interval of uncollected decode tail. Two manifestations, both fatal and
+    neither handled: alloc_swa raising once the pool is dry, or PrefillAdder's swa cap collapsing
+    a continuation chunk to zero tokens (prefill.py:138), which builds a Req with
+    device_len == cached_len. Continuations take the chunked branch of try_add_one, so the
+    admission gate never sees them."""
+    monkeypatch.setattr(cache_mod, "_SWA_EVICTION_INTERVAL", 128)
     window, n_decode = 8, 200
     per_req = _swa_per_req_swa_floor(_cfg(window, max_running_req=3))
     cm, _tm, pm = _managers(window, num_swa_tokens=per_req + 1)
@@ -227,7 +226,7 @@ def test_a_per_request_sized_pool_cannot_hold_a_full_batch(monkeypatch):
 def test_floor_terms_and_page_rounding():
     for window in (8, 128, 1024):
         for ps in (1, 8, 64, 128):
-            locked = -(-(window + GAP) // ps) * ps       # what the commit locks
+            locked = -(-(window + GAP) // ps) * ps       # reserved per commit (lock is one window)
             tail = window + 2 * ps + cache_mod._SWA_EVICTION_INTERVAL  # uncollected decode tail
             assert _swa_per_req_swa_floor(_cfg(window, ps)) == locked + tail, (window, ps)
 

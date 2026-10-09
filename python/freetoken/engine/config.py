@@ -29,6 +29,12 @@ class EngineConfig:
     speculative_draft_experts: int = 3
     speculative_draft_residency: str = "off"
     speculative_adaptive_cost: bool = False
+    # DFlash: windowed drafter layers keep only their window on the GPU (same attention math);
+    # a positive window also bounds the history the drafter's full-attention layers read.
+    dflash_compact_kv: bool = True
+    dflash_attention_window: int = 0
+    # Adaptive DFlash computes its decisions but runs the configured length (overhead A/B).
+    dflash_adaptive_observe_only: bool = False
     speculative_draft_load_missing: bool = False
     speculative_verify_prefetch: bool = False
     # GDN ReplaySSM: target AR, draft and verify read checkpoint + per-position update records.
@@ -122,6 +128,15 @@ class EngineConfig:
             return  # the engine resolves it against the model's components, then validates
         # An explicit 0 turns SD off even beside a draft path, which is then ignored.
         external_draft = self.speculative_draft_model_path is not None and self.speculative_num_steps != 0
+        if self.dflash_attention_window < 0:
+            raise ValueError("--dflash-attention-window must be >= 0")
+        # With SD off the DFlash-only settings are ignored along with the draft path.
+        if self.dflash_attention_window and self.speculative_num_steps and not external_draft:
+            raise ValueError("--dflash-attention-window requires --speculative-draft-model-path")
+        if (self.dflash_adaptive_observe_only and self.speculative_num_steps
+                and not (external_draft and self.speculative_adaptive_cost)):
+            raise ValueError("--dflash-adaptive-observe-only requires --speculative-draft-model-path "
+                             "and --speculative-adaptive-cost")
         if external_draft:
             if not 1 <= self.speculative_num_steps <= 8:
                 raise ValueError("DFlash requires 1..8 draft tokens")
@@ -150,10 +165,15 @@ class EngineConfig:
             if self.speculative_draft_load_missing and self.speculative_draft_residency != "router":
                 raise ValueError("--speculative-draft-load-missing requires --speculative-draft-residency router")
             model = self.model_config
+            # Measured costs need no particular expert format; the expert-loading controls
+            # read BF16 expert rows.
+            formats = ("none",) if (self.speculative_draft_load_missing
+                                   or self.speculative_verify_prefetch) else ("none", "nvfp4")
             if (self.moe_backend not in ("auto", "offload") or self.dtype != torch.bfloat16
-                    or model.expert_quant != "none" or self.nowag_expert_path
+                    or model.expert_quant not in formats or self.nowag_expert_path
                     or model.moe_weight_format not in (None, "bf16")):
-                raise ValueError("new SD controls require BF16 experts with --moe-backend offload")
+                raise ValueError("SD controls require --moe-backend offload with BF16 activations; "
+                                 "missing-expert loads and prefetch also require BF16 experts")
         if not self.speculative_num_steps:
             return
         if self.tp_info.size != 1:

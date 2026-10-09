@@ -38,7 +38,8 @@ class HybridSWAKVCache(BaseKVCachePool):
         device: torch.device,
         num_swa_tokens: int | None = None,
     ) -> None:
-        specs = {group.name: group for group in groups if group.num_layers > 0}
+        # A drafter whose layers are all windowed still brings an empty full group.
+        specs = {group.name: group for group in groups if group.num_layers > 0 or group.name == "full"}
         if set(specs) != {"full", "swa"}:
             raise ValueError(f"HybridSWAKVCache requires full and swa groups, got {sorted(specs)}")
 
@@ -138,9 +139,9 @@ class HybridSWAKVCache(BaseKVCachePool):
 
     def _init_swa_paged_state(self) -> None:
         """(Re)build the global-paged SWA allocator state: the dense full->swa slot mapping
-        (slot 0 = 'no live SWA slot' sentinel) and the swa free-list. Called from __init__ and
-        from rebuild() so the mapping + free-list always match the freshly (re)allocated swa
-        buffer (idle-only on rebuild)."""
+        (slot 0 = 'no live SWA slot' sentinel) and the ring of free swa slots. Called from
+        __init__ and from rebuild() so both always match the freshly (re)allocated swa buffer
+        (idle-only on rebuild)."""
         n = self._full_num_tokens
         ps = self._page_size
         dev = self._device
@@ -152,40 +153,54 @@ class HybridSWAKVCache(BaseKVCachePool):
                 torch.tensor([-1], dtype=torch.int64, device=dev),
             ]
         )
-        # swa slots 1.._swa_num_tokens-1 are allocatable; slot 0 is the reserved sentinel.
-        self._swa_free = torch.arange(1, self._swa_num_tokens, dtype=torch.int32, device=dev)
+        # swa slots 1.._swa_num_tokens-1 are allocatable; slot 0 is the reserved sentinel. The
+        # free slots are the ``_swa_count`` ring entries from ``_swa_head``: the host knows how
+        # many it takes and returns, so no call reads the device.
+        self._swa_free = torch.arange(1, self._swa_num_tokens, dtype=torch.int64, device=dev)
+        self._swa_head = 0
+        self._swa_count = self._swa_free.numel()
+
+    def _ring(self, start: int, n: int) -> list[torch.Tensor]:
+        """The ring entries [start, start + n), as at most two contiguous slices."""
+        start %= self._swa_free.numel()
+        first = self._swa_free[start : start + n]
+        return [first] if first.numel() == n else [first, self._swa_free[: n - first.numel()]]
 
     def alloc_swa(self, full_indices: torch.Tensor) -> None:
-        """Allocate one swa slot per full slot and record full->swa in the mapping. The caller
-        must check ``swa_available_size()`` first. Granularity-agnostic: at page_size>1 the
-        caller hands whole pages (allocate_paged's _page_to_token expansion) and the finish
-        path returns the padding slots with the page (see CacheManager._swa_padded_tail)."""
-        assert self._swa_paged, "alloc_swa requires the global-paged SWA mode"
+        """Bind one free swa slot to each full slot. The caller must check
+        ``swa_available_size()`` first. Granularity-agnostic: at page_size>1 the caller hands
+        whole pages (allocate_paged's _page_to_token expansion)."""
         n = int(full_indices.numel())
         if n == 0:
             return
-        if n > self._swa_free.numel():
-            raise RuntimeError(f"SWA pool exhausted: need {n}, have {int(self._swa_free.numel())}")
-        swa = self._swa_free[:n]
-        self._swa_free = self._swa_free[n:]
-        self.full_to_swa_index_mapping[full_indices.to(torch.int64)] = swa.to(torch.int64)
+        if n > self._swa_count:
+            raise RuntimeError(f"SWA pool exhausted: need {n}, have {self._swa_count}")
+        slots = self._ring(self._swa_head, n)
+        self.full_to_swa_index_mapping.index_copy_(
+            0, full_indices.to(torch.int64), slots[0] if len(slots) == 1 else torch.cat(slots))
+        self._swa_head = (self._swa_head + n) % self._swa_free.numel()
+        self._swa_count -= n
 
     def free_swa(self, full_indices: torch.Tensor) -> None:
-        """Return the swa slots backing ``full_indices`` to the free-list and reset their
-        mapping entries to the 0 sentinel. Never touches the full pool; idempotent over the
-        sentinel (already-freed entries are filtered by ``> 0``). == sglang free_swa."""
-        assert self._swa_paged, "free_swa requires the global-paged SWA mode"
-        if full_indices.numel() == 0:
+        """Return the swa slots bound to ``full_indices`` and reset their mapping entries to the
+        0 sentinel. Every index must hold a live binding the caller owns. Never touches the
+        full pool."""
+        n = int(full_indices.numel())
+        if n == 0:
             return
         fi = full_indices.to(torch.int64)
-        swa = self.full_to_swa_index_mapping[fi]
-        swa = swa[swa > 0]
-        if swa.numel():
-            self._swa_free = torch.cat([self._swa_free, swa.to(torch.int32)])
-        self.full_to_swa_index_mapping[fi] = 0
+        offset = 0
+        for part in self._ring(self._swa_head + self._swa_count, n):
+            torch.index_select(self.full_to_swa_index_mapping, 0, fi[offset : offset + part.numel()],
+                               out=part)
+            offset += part.numel()
+        # index_fill_ takes the 0 as a kernel argument; ``mapping[fi] = 0`` would first copy a
+        # host scalar to the device and wait for it.
+        self.full_to_swa_index_mapping.index_fill_(0, fi, 0)
+        self._swa_count += n
 
     def swa_available_size(self) -> int:
-        return int(self._swa_free.numel())
+        return self._swa_count
 
     def paged_views(self) -> list[torch.Tensor]:
         """Per-layer views ``[pages, 2, page_size, heads, head_dim]`` of the paged KV, for

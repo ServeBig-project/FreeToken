@@ -14,15 +14,17 @@ import torch
 from freetoken.kvcache.prefix_store import (
     Component, CopyTask, HostCopy, HostSpan, HostStore, PrefixTransfer, units_of,
 )
+from freetoken.utils import align_ceil
 
 if TYPE_CHECKING:
     from .cache import CacheManager
 
 
-def build_components(kv_pool, state_pool, draft_kv, *, window: bool, state: bool,
+def build_components(kv_pool, state_pool, draft_kv, *, window_pool, window: bool, state: bool,
                      required: bool) -> dict:
     """The cache's storage components by role. ``required`` (host tier on) turns a pool without
-    the needed layout views into a startup error naming the missing storage capability."""
+    the needed layout views into a startup error naming the missing storage capability.
+    ``window_pool`` holds the window KV: the target pool, or the drafter's context."""
     def comp(pool, method, name, kind):
         if hasattr(pool, method):
             return Component(name, kind, getattr(pool, method))
@@ -32,11 +34,12 @@ def build_components(kv_pool, state_pool, draft_kv, *, window: bool, state: bool
         return None
 
     paged = [comp(kv_pool, "paged_views", "paged_kv", "paged")]
-    if draft_kv is not None:
+    if draft_kv is not None and draft_kv.paged_views():
         paged.append(comp(draft_kv, "paged_views", "draft_kv", "paged"))
     out = {"paged": [c for c in paged if c is not None], "window": None, "state": None}
     if window:
-        out["window"] = comp(kv_pool, "window_views", "window_kv", "window")
+        name = "draft_window" if window_pool is draft_kv else "window_kv"
+        out["window"] = comp(window_pool, "window_views", name, "window")
     if state:
         out["state"] = comp(state_pool, "state_views", "recurrent_state", "boundary_state")
     return out
@@ -50,6 +53,23 @@ class HostTier:
         self.comps = components
         self.host_bytes = {c.name: 0 for c in self._all_comps()}
         self.restore_wait_ms = 0.0
+        # Window slots copies may hold beyond what running requests need: one window in all,
+        # which the window pool reserves.
+        self.window_limit = (align_ceil(manager.sliding_window_size, manager.page_size)
+                             if components["window"] else 0)
+        self.window_inflight = 0
+
+    def _take_window(self, plan) -> int | None:
+        """Window slots this plan holds, if the copy budget has room for them."""
+        tokens = plan.window_tokens
+        if self.window_inflight + tokens > self.window_limit:
+            return None
+        self.window_inflight += tokens
+        return tokens
+
+    def _done(self, tokens: int, finish) -> None:
+        self.window_inflight -= tokens
+        finish()
 
     def _all_comps(self) -> List[Component]:
         return [c for c in (*self.comps["paged"], self.comps["window"], self.comps["state"]) if c]
@@ -73,6 +93,10 @@ class HostTier:
             if need > free and need > free + tree.host_freeable_bytes():
                 tree.abandon(plan)  # cannot fit even after evicting: keep older host data
                 continue
+            window_tokens = self._take_window(plan)
+            if window_tokens is None:
+                tree.abandon(plan)  # restores come first: skip this optional copy
+                continue
             kv = [self._copies(self.comps["paged"], units) for _, units in plan.kv]
             win = [self._copies([self.comps["window"]], units) for _, units in plan.window]
             st = self._copies([self.comps["state"]], 1) if plan.state else []
@@ -80,6 +104,7 @@ class HostTier:
                 for copies in (*kv, *win, st):
                     for c in copies or ():
                         c.release()
+                self.window_inflight -= window_tokens
                 tree.abandon(plan)
                 continue
             tasks, keep = [], []
@@ -97,8 +122,8 @@ class HostTier:
                 tasks.append(CopyTask(st[0].comp, idx, HostSpan(st[0], 0, 1)))
             self.transfer.submit(
                 "d2h", tasks,
-                lambda plan=plan, kv=kv, win=win, st=st: tree.finish_backup(
-                    plan, kv, win, st if plan.state else None),
+                lambda plan=plan, kv=kv, win=win, st=st, w=window_tokens: self._done(
+                    w, lambda: tree.finish_backup(plan, kv, win, st if plan.state else None)),
                 keep)
 
     def _copies(self, comps, units) -> list | None:
@@ -140,6 +165,10 @@ class HostTier:
                 plan.state and m.mamba_available_size < 1):
             tree.abandon(plan)
             return False
+        window_tokens = self._take_window(plan)
+        if window_tokens is None:
+            tree.abandon(plan)
+            return True  # wait for the copies in flight to return their window budget
         locs = m._page_to_token(m._allocate(tokens // ps)) if tokens else m.empty
         values, off = [], 0
         for n, _ in plan.kv:
@@ -164,8 +193,8 @@ class HostTier:
             idx = torch.tensor([slot], dtype=torch.int64, device=m.device)
             keep.append(idx)
             tasks.append(CopyTask(self.comps["state"], idx, node.host_state[0]))
-        self.transfer.submit("h2d", tasks,
-                             lambda: tree.finish_restore(plan, values, slot), keep)
+        self.transfer.submit("h2d", tasks, lambda: self._done(
+            window_tokens, lambda: tree.finish_restore(plan, values, slot)), keep)
         return True
 
     # ---------------------------------------------------------------- lifecycle

@@ -2,7 +2,7 @@
 
 CPU-only. Covers the pieces that must match sglang's SWATokenToKVPoolAllocator:
 the dense full->swa mapping with the slot-0 sentinel, alloc_swa + mapping-based
-translate, free_swa idempotence over the sentinel (no double-free), exhaustion,
+translate, free_swa of owned bindings with FIFO reuse, exhaustion,
 and the rebuild reset (mapping + free-list re-sized atomically with the buffer).
 """
 from __future__ import annotations
@@ -82,23 +82,29 @@ def test_alloc_swa_writes_mapping_and_translate_reads_it(monkeypatch):
     assert pool.swa_available_size() + int(_allocated_mask(pool).sum()) == 7
 
 
-def test_free_swa_is_idempotent_over_sentinel(monkeypatch):
+def test_free_swa_returns_slots_and_reuses_them_fifo(monkeypatch):
     _patch_tp(monkeypatch)
     pool = _paged_pool(num_full=16, num_swa=8)
 
     full = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
     pool.alloc_swa(full)
     assert pool.swa_available_size() == 3
+    returned = set(pool.translate_loc_from_full_to_swa(full[:2]).tolist())
 
     pool.free_swa(torch.tensor([0, 1], dtype=torch.int32))
     assert pool.swa_available_size() == 5  # 2 returned
     assert int(pool.full_to_swa_index_mapping[0]) == 0
     assert int(pool.full_to_swa_index_mapping[1]) == 0
-
-    # freeing the same (now-sentinel) slots again must be a no-op: filter > 0, no double-free.
-    pool.free_swa(torch.tensor([0, 1], dtype=torch.int32))
-    assert pool.swa_available_size() == 5
     assert pool.swa_available_size() + int(_allocated_mask(pool).sum()) == 7
+
+    # freed slots go to the tail of the ring: the 3 never-used slots come out first.
+    fresh = torch.tensor([4, 5, 6], dtype=torch.int32)
+    pool.alloc_swa(fresh)
+    assert not set(pool.translate_loc_from_full_to_swa(fresh).tolist()) & returned
+    again = torch.tensor([7, 8], dtype=torch.int32)
+    pool.alloc_swa(again)
+    assert set(pool.translate_loc_from_full_to_swa(again).tolist()) == returned
+    assert pool.swa_available_size() == 0
 
 
 def test_free_then_realloc_reuses_slots_no_leak(monkeypatch):

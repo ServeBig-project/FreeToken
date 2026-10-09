@@ -255,6 +255,8 @@ class FrontendManager:
                 continue
             if isinstance(msg, CacheStatusReply):
                 self.stats.prefix_cache = msg.prefix_cache
+                if msg.speculative is not None:
+                    self.stats.speculative.update(msg.speculative)
                 continue
             for msg in _unwrap_msg(msg):
                 # Global accounting follows actual admitted/sampled work even after the HTTP
@@ -677,10 +679,18 @@ def _cache_limits(geo: dict, unit_bytes: dict, pool_budget: int, floors: dict) -
         # ReplaySSM records and conv windows are priced with every GDN state rebuild.
         gdn = geo.get("gdn_replayssm") or {}
         gdn_fixed = int(gdn.get("reserved_bytes", 0)) - int(gdn.get("checkpoint_bytes", 0))
+        # The drafter's weights are already out of the budget; its fixed buffers come off it,
+        # and its context grows with the KV, the windowed part only up to its capacity limit.
         draft = geo.get("dflash") or {}
         draft_context = int(draft.get("context_bytes", 0))
-        budget = max(0, budget - int(draft.get("reserved_bytes", 0)) + draft_context)
-        draft_per_token = draft_context // max(1, (int(geo["num_pages"]) + 1) * page_size)
+        budget = max(0, budget - int(draft.get("metadata_bytes", 0))
+                     - int(draft.get("workspace_bytes", 0)))
+        kv_unit = kv_per_token + int(draft.get("full_token_bytes", 0))
+        window_unit = int(draft.get("window_token_bytes", 0))
+        window_limit = int(draft.get("window_capacity_limit", 0))
+        kv_max = ideal(kv_unit + window_unit)
+        if window_unit and kv_max > window_limit:
+            kv_max = ideal(kv_unit, window_limit * window_unit)
 
         swa_per_token = int(unit_bytes.get("swa_per_token", 0) or 0)
         kv_min = int(floors.get("kv_tokens", page_size) or 0)
@@ -699,7 +709,7 @@ def _cache_limits(geo: dict, unit_bytes: dict, pool_budget: int, floors: dict) -
         if total_experts > 0:
             moe_max = min(moe_max, total_experts)
         return {
-            "kv_tokens": {"min": kv_min, "max": ideal(kv_per_token + draft_per_token)},
+            "kv_tokens": {"min": kv_min, "max": kv_max},
             "moe_experts": {"min": moe_min, "max": moe_max},
             "mamba_slots": {"min": mamba_min, "max": ideal(mamba_per_slot, gdn_fixed + draft_context)},
             "swa_tokens": {"min": swa_min, "max": ideal(swa_per_token, draft_context)},
@@ -832,6 +842,10 @@ def cache_geometry(state: Any) -> dict:
         getattr(state, "free_vram_bytes", 0) or 0
     )
     floors = getattr(state, "cache_floors", None) or {}
+    # The drafter geometry is a load-time snapshot; free window slots come from the live ledger.
+    window = (state.stats.prefix_cache or {}).get("window_slots")
+    if window and "window_free_slots" in (geo["dflash"] or {}):
+        geo["dflash"] = {**geo["dflash"], "window_free_slots": window["free"]}
     geo["limits"] = _cache_limits(geo, unit_bytes, pool_budget, floors)
     return geo
 

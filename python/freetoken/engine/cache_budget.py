@@ -6,7 +6,7 @@ measured quantities, so it is unit-testable without a device.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from freetoken.utils import div_ceil
 
@@ -45,6 +45,17 @@ def required_bytes(
     return moe_cache_size * per_expert_bytes + num_pages * cache_per_page
 
 
+def max_pages(need: Callable[[int], int], budget: int) -> int:
+    """Largest page count whose monotone byte cost ``need`` fits ``budget`` (0 if none)."""
+    low, high = 0, 1
+    while need(high) <= budget:
+        low, high = high, 2 * high
+    while high - low > 1:
+        mid = (low + high) // 2
+        low, high = (mid, high) if need(mid) <= budget else (low, mid)
+    return low
+
+
 def plan_cache_budget(
     budget_bytes: int,
     per_expert_bytes: int,
@@ -55,6 +66,7 @@ def plan_cache_budget(
     kv_reserve_pages: int,
     max_slots: int,
     prefill_overlap_min_layers: int = 2,
+    page_extra_bytes: Callable[[int], int] = lambda pages: 0,
 ) -> tuple[int, int, bool]:
     """Split ``budget_bytes`` MoE-first into (moe_cache_size, num_pages, prefill_overlap).
 
@@ -63,7 +75,8 @@ def plan_cache_budget(
     Experts greedily fill the budget after reserving ``kv_reserve_pages`` for KV,
     clamped to ``[floor, min(total_experts, max_slots)]``.  Ordinary streaming
     overlap needs two expert layers; joint's canonical pool needs one.  KV pages
-    take whatever remains.
+    take whatever remains. ``page_extra_bytes(pages)`` prices storage that grows with the
+    pages without being linear in them (a drafter's capped window context).
     """
     assert per_expert_bytes > 0, "per_expert_bytes must be positive"
     assert cache_per_page > 0, "cache_per_page must be positive (owned-KV models unsupported here)"
@@ -75,7 +88,8 @@ def plan_cache_budget(
     lo = overlap_slots if overlap else num_experts
     assert hi >= lo, f"slot cap {hi} below the minimum {lo} slots"
 
-    kv_reserve_bytes = kv_reserve_pages * cache_per_page
+    kv_bytes = lambda pages: pages * cache_per_page + page_extra_bytes(pages)
+    kv_reserve_bytes = kv_bytes(kv_reserve_pages)
     # MoE-priority: reserve KV first, then experts greedily take the remaining budget.
     raw = (budget_bytes - kv_reserve_bytes) // per_expert_bytes
     moe_cache_size = max(lo, min(raw, hi))
@@ -83,11 +97,11 @@ def plan_cache_budget(
     overlap = overlap and moe_cache_size >= overlap_slots
 
     remaining = budget_bytes - moe_cache_size * per_expert_bytes
-    num_pages = max(remaining // cache_per_page, kv_reserve_pages)
+    num_pages = max(max_pages(kv_bytes, remaining), kv_reserve_pages)
     # A tiny budget can floor num_pages at kv_reserve_pages even when ``remaining`` is below
     # the reserve (or negative), yielding a plan that exceeds budget_bytes. Reject here so
     # --moe-cache-auto fails in arithmetic instead of OOMing in a later CUDA allocation.
-    total = moe_cache_size * per_expert_bytes + num_pages * cache_per_page
+    total = moe_cache_size * per_expert_bytes + kv_bytes(num_pages)
     assert total <= budget_bytes, (
         f"cache budget too small: minimum plan (moe={moe_cache_size} slots, "
         f"kv={num_pages} pages) needs {total} B > budget {budget_bytes} B "
@@ -112,6 +126,7 @@ def resolve_moe_cache_auto(
     page_size: int,
     quant_format: str,
     prefill_overlap_min_layers: int = 2,
+    page_extra_bytes: Callable[[int], int] = lambda pages: 0,
 ) -> tuple[int, int, bool]:
     """Resolve --moe-cache-auto into (moe_cache_size, num_pages, prefill_overlap).
 
@@ -132,4 +147,5 @@ def resolve_moe_cache_auto(
         kv_reserve_pages=kv_reserve_pages,
         max_slots=max_slots,
         prefill_overlap_min_layers=prefill_overlap_min_layers,
+        page_extra_bytes=page_extra_bytes,
     )

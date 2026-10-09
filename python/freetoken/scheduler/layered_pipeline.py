@@ -125,6 +125,7 @@ class LayeredPipelineExecutor:
             allowed_uids=admission.uids,
             max_reqs=len(admission.members),
             incremental_window_prefill=True,
+            wave=True,
         )
         if prefill_batch is None:
             self._staged_admission = None
@@ -421,6 +422,9 @@ class LayeredPipelineExecutor:
         for request_index, req in enumerate(wave.prefill_input.batch.prefill_reqs):
             member = wave.admission.members[req.uid]
             if member.aborted or req.aborted:
+                # The wave computed its prompt KV (and drafter context): commit it like a
+                # finished forward, so the release covers the whole allocated range.
+                req.cached_len = req.device_len
                 aborted_owners.append(req)
             elif isinstance(req, ChunkedReq):
                 req.commit_prefill_kv()

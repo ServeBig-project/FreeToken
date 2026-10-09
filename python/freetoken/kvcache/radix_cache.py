@@ -7,7 +7,8 @@ way. Two optional components ride on the same nodes:
 * window: sliding-window KV reached through the pool's full->window mapping. ``window_freed``
   marks a node whose GPU window KV is gone (its full KV survives). A position is resumable for
   the window only with ``window`` live tokens behind it, or a path with no freed node back to
-  root. ``window_ref`` locks just the trailing window, bounded by ``window_uuid`` (sglang).
+  root. ``window_ref`` locks just the trailing window; a request's handle records the nodes it
+  locked so it can let go of the oldest ones as its own position moves on.
 * state: a recurrent state slot belonging to the node's END position, with its own lock count.
   Splitting never creates a state; it stays on the node that still ends at its position.
 
@@ -23,11 +24,12 @@ from __future__ import annotations
 
 import heapq
 import itertools
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, NamedTuple, Tuple
 
 import torch
-from freetoken.utils import align_down
+from freetoken.utils import align_ceil, align_down
 
 KEY_FN = Callable[[torch.Tensor], Any]
 
@@ -47,7 +49,6 @@ class TreeNode:
         self.ref = 0
         self.window_freed = False
         self.window_ref = 0
-        self.window_uuid: int | None = None
         self.state: int | None = None
         self.state_ref = 0
         self.purpose: str | None = None  # why the state is kept (prefix_policy)
@@ -88,7 +89,8 @@ class CacheHandle:
     matched_len: int = 0             # tokens shared with the tree, past what is resumable
     restore: TreeNode | None = None  # deeper resume point whose missing data is on the host
     restore_len: int = 0
-    window_uuid: int | None = None   # set by lock: where the window lock stops
+    # set by lock: the (node, units, start position) window locks it holds, oldest first
+    window_ranges: deque | None = None
     state_locked: bool = False
 
     def get_matched_indices(self) -> torch.Tensor:
@@ -114,6 +116,7 @@ class CopyPlan:
     # every node this plan marked busy, with its units then (a split later moves part of a
     # node's range to new parents, which inherit the mark)
     marked: List[Tuple[TreeNode, int]] = field(default_factory=list)
+    window_tokens: int = 0  # window slots the copy holds: the live ones it locks, plus targets
 
 
 def _key_fn(page_size: int) -> KEY_FN:
@@ -139,7 +142,6 @@ class RadixCache:
         self.protected = dict.fromkeys(("kv", "window", "state"), 0)
         self.host_states = 0
         self._clk = 0
-        self._uuid = 0
         self._released = Evicted([], [], [])  # GPU data dropped outside an eviction call
 
     # ---------------------------------------------------------------- match / insert
@@ -202,7 +204,7 @@ class RadixCache:
 
     def insert(self, ids: torch.Tensor, kv: torch.Tensor, *, group: str = "",
                state: int | None = None, purpose: str | None = None, update_after: int = 0,
-               window_freed_before: int = 0) -> Tuple[int, torch.Tensor, bool, TreeNode]:
+               window_freed_before: int = 0) -> Tuple[int, Evicted, bool, TreeNode]:
         """Insert the committed page-aligned prefix of ``ids`` with locations ``kv``.
 
         ``update_after`` is the request's reused-prefix length: matched nodes past it carry the
@@ -213,12 +215,13 @@ class RadixCache:
         inserted window-freed. ``state`` is donated to the end node when that node has none.
         Publishing stops early at a node a copy is still filling with the GPU data the caller
         would give up: the caller keeps its own pages from there. Returns (matched length
-        before insertion -- where it stopped, if it stopped early --, locations the caller
-        frees from every pool, whether ``state`` was taken, the end node or None if it
+        before insertion -- where it stopped, if it stopped early --, the caller's duplicate
+        locations to free: all of them from the paged pools, those whose window the caller still
+        held from the window pool, whether ``state`` was taken, the end node or None if it
         stopped early)."""
         n = align_down(len(ids), self.page_size)
         ids, kv = ids[:n], kv[:n]
-        freed: List[torch.Tensor] = []
+        freed = Evicted([], [], [])
         node, total = self._root(group), 0
         while total < n:
             child = node.children.get(self.key_fn(ids[total:]))
@@ -234,7 +237,7 @@ class RadixCache:
                 self.window is not None and child.window_freed
                 and window_freed_before < total + m)
             if update_after < total + m and (child.ref > 0 or child.busy) and lacks:
-                return total, (torch.cat(freed) if freed else self.empty), False, None
+                return total, self._evicted(freed), False, None
             partial = m < child.length
             if partial:
                 child = self._split(child, m)
@@ -243,7 +246,7 @@ class RadixCache:
                 if child.value is None or child.window_freed:
                     child = self._adopt(child, seg, total, window_freed_before, freed)
                 else:
-                    freed.append(seg.clone())
+                    self._duplicate(seg, total, window_freed_before, freed)
             total += m
             node = child
             if partial:
@@ -271,10 +274,17 @@ class RadixCache:
                 self.stats["gpu_checkpoint_peak"], self.state_count)
         elif state is not None and node.state is not None:
             self.stats["checkpoint_deduplicated"] += 1
-        return total, (torch.cat(freed) if freed else self.empty), taken, node
+        return total, self._evicted(freed), taken, node
+
+    def _duplicate(self, seg: torch.Tensor, total: int, freed_before: int, freed: Evicted) -> None:
+        """The caller's copy of [total, total + len(seg)) goes back; its window only from where
+        the caller had not freed it yet."""
+        freed.kv.append(seg.clone())
+        if self.window is not None:
+            freed.window.append(seg[max(0, freed_before - total):].clone())
 
     def _adopt(self, child: TreeNode, seg: torch.Tensor, total: int, freed_before: int,
-               freed: List[torch.Tensor]) -> TreeNode:
+               freed: Evicted) -> TreeNode:
         """Give ``child`` the request's GPU copy of what it lacks on the GPU (its window, or
         everything when only the host has it), where the request still holds it."""
         assert child.window_ref == 0, "a window-freed node cannot hold a window lock"
@@ -284,16 +294,16 @@ class RadixCache:
                 child.value is not None and freed_before >= end):
             # A reader still uses the node's current data, a copy uses it, or the request
             # freed this window too: keep the node, drop the request's copy.
-            freed.append(seg.clone())
+            self._duplicate(seg, total, freed_before, freed)
             return child
         if not live and freed_before < end:
             # The request's freed frontier falls inside: the head keeps what it has.
             start = freed_before - total
             self._split(child, start)
-            freed.append(seg[:start].clone())
+            freed.kv.append(seg[:start].clone())
             seg, live = seg[start:], True
         if child.value is not None:
-            freed.append(child.value)
+            freed.kv.append(child.value)  # its window was already gone
         else:
             self._account("kv", child.length, locked=False)
         child.value = seg.clone()
@@ -314,31 +324,69 @@ class RadixCache:
         return child
 
     # ---------------------------------------------------------------- locking
-    def lock(self, handle: CacheHandle) -> None:
-        """Protect the handle's path KV, its trailing window and its state."""
+    def lock(self, handle: CacheHandle, *, window: bool = True) -> None:
+        """Protect the handle's path KV, its state and (``window``) the window ending at it."""
         node = handle.node
         if node.state is not None:
             if node.state_ref == 0:
                 self._move("state", 1, to_protected=True)
             node.state_ref += 1
             handle.state_locked = True
-        window_locked, cur = 0, node
+        cur = node
         while not cur.is_root():
             if cur.ref == 0:
                 self._move("kv", self._gpu_len(cur), to_protected=True)
             cur.ref += 1
-            if (self.window is not None and window_locked < self.window
-                    and not cur.window_freed):
-                if cur.window_ref == 0:
-                    self._move("window", cur.length, to_protected=True)
-                cur.window_ref += 1
-                window_locked += cur.length
-                if window_locked >= self.window:
-                    if cur.window_uuid is None:
-                        self._uuid += 1
-                        cur.window_uuid = self._uuid
-                    handle.window_uuid = cur.window_uuid
             cur = cur.parent
+        if window and self.window is not None:
+            handle.window_ranges = self._lock_window(node, handle.cached_len)
+
+    def _lock_window(self, node: TreeNode, end: int) -> deque:
+        """Lock the live window nodes that end at ``node`` (position ``end``), cut where the
+        window begins so nothing older is held."""
+        out = deque()
+        for node in self._window_nodes(node):
+            if not node.window_freed:
+                self._hold_window(node)
+                out.appendleft((node, node.length // self.page_size, end - node.length))
+            end -= node.length
+        return out
+
+    def _hold_window(self, node: TreeNode) -> None:
+        if node.window_ref == 0:
+            self._move("window", node.length, to_protected=True)
+        node.window_ref += 1
+
+    def advance_window(self, handle: CacheHandle, keep_from: int) -> None:
+        """Release the handle's window locks before position ``keep_from``: its request has
+        moved past them. Other holders keep their own locks."""
+        ranges = handle.window_ranges
+        while ranges:
+            node, units, start = self._oldest(ranges)
+            end = start + units * self.page_size
+            if end <= keep_from:
+                ranges.popleft()
+                self._unlock_window(node)
+                continue
+            cut = align_down(keep_from - start, self.page_size)
+            if cut > 0:
+                self._unlock_window(self._split(node, cut))
+                ranges[0] = (node, units - cut // self.page_size, start + cut)
+            return
+
+    def _oldest(self, ranges: deque) -> Tuple[TreeNode, int, int]:
+        """The oldest locked range; a node split since locking expands into its pieces."""
+        node, units, start = ranges[0]
+        if node.length != units * self.page_size:
+            ranges.popleft()
+            for piece, first, count in self._pieces(node, units):
+                ranges.appendleft((piece, count, start + first * self.page_size))
+        return ranges[0]
+
+    def _unlock_window(self, node: TreeNode) -> None:
+        node.window_ref -= 1
+        if node.window_ref == 0:
+            self._move("window", node.length, to_protected=False)
 
     def unlock(self, handle: CacheHandle) -> None:
         node = handle.node
@@ -348,18 +396,16 @@ class RadixCache:
                 self._move("state", 1, to_protected=False)
             self._drop_if_doomed(node)
             handle.state_locked = False
-        dec_window, cur = self.window is not None, node
+        ranges, handle.window_ranges = handle.window_ranges, None
+        while ranges:
+            self._unlock_window(self._oldest(ranges)[0])
+            ranges.popleft()
+        cur = node
         while not cur.is_root():
             cur.ref -= 1
             assert cur.ref >= 0
             if cur.ref == 0:
                 self._move("kv", self._gpu_len(cur), to_protected=False)
-            if dec_window and not cur.window_freed and cur.window_ref > 0:
-                cur.window_ref -= 1
-                if cur.window_ref == 0:
-                    self._move("window", cur.length, to_protected=False)
-                if handle.window_uuid is not None and cur.window_uuid == handle.window_uuid:
-                    dec_window = False
             cur = cur.parent
 
     # ---------------------------------------------------------------- GPU eviction
@@ -404,12 +450,12 @@ class RadixCache:
     def evict_states(self, num: int) -> Evicted:
         """Free GPU state slots from unlocked states, inner nodes included."""
         return self._evict_component(
-            num, "state", lambda n: n.state is not None and n.state_ref == 0,
+            num, "state", lambda n: n.state is not None and n.state_ref == 0 and not n.busy,
             lambda n: 1, self._drop_gpu_state)
 
     def _evict_component(self, amount: int, kind: str, eligible, size, drop) -> Evicted:
         out = Evicted([], [], [])
-        cands = [n for n in self._nodes() if eligible(n) and not n.busy]
+        cands = [n for n in self._nodes() if eligible(n)]
         freed = 0
         for node in sorted(cands, key=lambda n: self.policy.eviction_key(n, kind)):
             if freed >= amount:
@@ -450,15 +496,17 @@ class RadixCache:
     def plan_restore(self, node: TreeNode) -> CopyPlan | None:
         """Lock ``node``'s path and list what comes back from the host to make it ready; None
         while another copy works on any of it."""
-        path = self._path(node)
-        kv = [(n, n.length // self.page_size) for n in path if n.value is None]
-        window = [(n, n.length // self.page_size) for n in self._window_nodes(node)
-                  if n.value is None or n.window_freed]
+        trailing = [(n, n.length // self.page_size) for n in self._window_nodes(node)]
+        window = [(n, units) for n, units in trailing if n.value is None or n.window_freed]
+        kv = [(n, n.length // self.page_size) for n in self._path(node) if n.value is None]
         state = self.has_state and node.state is None
         nodes = list(dict.fromkeys([n for n, _ in kv + window] + ([node] if state else [])))
         if any(n.busy for n in nodes):
             return None
-        return self._plan(node, kv, window, state, nodes)
+        # A restore keeps the window part already on the GPU until the rest arrives: the resume
+        # point needs it whichever components come back.
+        held = [(n, units) for n, units in trailing if n.value is not None and not n.window_freed]
+        return self._plan(node, kv, window, state, nodes, held)
 
     def finish_restore(self, plan: CopyPlan, kv: List[torch.Tensor], state: int | None) -> None:
         """Publish restored locations onto whatever nodes now cover each planned range."""
@@ -480,17 +528,17 @@ class RadixCache:
 
     def plan_backup(self, node: TreeNode) -> CopyPlan | None:
         """Lock ``node``'s path and list its GPU data that has no host copy yet."""
-        kv = [(n, n.length // self.page_size) for n in self._path(node)
-              if n.value is not None and n.host is None and not n.busy]
         window = [(n, n.length // self.page_size) for n in self._window_nodes(node)
                   if n.value is not None and not n.window_freed and n.host_window is None
                   and not n.busy]
+        kv = [(n, n.length // self.page_size) for n in self._path(node)
+              if n.value is not None and n.host is None and not n.busy]
         state = (self.has_state and node.state is not None and node.host_state is None
                  and not node.busy)
         nodes = list(dict.fromkeys([n for n, _ in kv + window] + ([node] if state else [])))
         if not nodes:
             return None
-        return self._plan(node, kv, window, state, nodes)
+        return self._plan(node, kv, window, state, nodes, window)
 
     def finish_backup(self, plan: CopyPlan, kv: list, window: list, state: list | None) -> None:
         """Attach the finished host copies; a node split meanwhile shares its copy's spans."""
@@ -511,7 +559,7 @@ class RadixCache:
         """Idle GPU re-allocation: forget every GPU copy (its locations are about to become
         invalid) and keep only what the host still holds."""
         for node in sorted(self._nodes(), key=lambda n: -len(self._path(n))):  # leaves first
-            node.value, node.window_freed, node.window_ref, node.window_uuid = None, True, 0, None
+            node.value, node.window_freed, node.window_ref = None, True, 0
             if node.state is not None:
                 node.state = None
                 if node.host_state is None:
@@ -524,13 +572,20 @@ class RadixCache:
     def abandon(self, plan: CopyPlan) -> None:
         self._end_plan(plan)
 
-    def _plan(self, node, kv, window, state, nodes) -> CopyPlan:
-        handle = CacheHandle(0, node, self.empty)
-        self.lock(handle)
+    def _plan(self, node, kv, window, state, nodes, held) -> CopyPlan:
+        """``held``: the live window nodes the copy locks (a backup's sources, the GPU part of
+        a restored window); KV and state copies hold none."""
+        marked = [(n, n.length // self.page_size) for n in nodes]
         for n in nodes:
             n.busy += 1
-        return CopyPlan(node, kv, window, state, handle,
-                        [(n, n.length // self.page_size) for n in nodes])
+        handle = CacheHandle(0, node, self.empty)
+        self.lock(handle, window=False)
+        handle.window_ranges = deque((n, units, 0) for n, units in reversed(held))
+        for n, _, _ in handle.window_ranges:
+            self._hold_window(n)
+        targets = sum(units for n, units in window if n.value is None or n.window_freed)
+        tokens = (sum(units for _, units in held) + targets) * self.page_size
+        return CopyPlan(node, kv, window, state, handle, marked, tokens)
 
     def _end_plan(self, plan: CopyPlan) -> None:
         """Take back only this plan's marks; other plans may still use the same nodes."""
@@ -603,25 +658,6 @@ class RadixCache:
         out, self._released = self._released, Evicted([], [], [])
         return self._evicted(out)
 
-    def trim_head_window(self, ids: torch.Tensor, keep_from: int, group: str = "") -> torch.Tensor:
-        """Free the GPU window of the path strictly below ``keep_from`` (page-aligned), keeping
-        full KV: only the trailing window before a resume point needs to stay live. Locked,
-        freed and leaf nodes are left alone. Returns the locations whose window slots to free."""
-        if keep_from <= 0:
-            return self.empty
-        self.match(ids[:keep_from], group)  # splits a node boundary at keep_from
-        out = Evicted([], [], [])
-        node, pos = self._root(group), 0
-        while pos < keep_from:
-            child = node.children.get(self.key_fn(ids[pos:]))
-            if child is None or pos + child.length > keep_from:
-                break
-            if (child.value is not None and not child.window_freed and child.window_ref == 0
-                    and not child.is_leaf() and not child.busy):
-                self._drop_window(child, out)
-            node, pos = child, pos + child.length
-        return self._evicted(out).window
-
     # ---------------------------------------------------------------- accounting / checks
     def check_integrity(self) -> None:
         for n in self._nodes():
@@ -670,9 +706,12 @@ class RadixCache:
         return out[::-1]
 
     def _window_nodes(self, node: TreeNode) -> List[TreeNode]:
-        """The nodes holding the window that ends at ``node``."""
+        """The nodes holding the window that ends at ``node``, the oldest cut where it begins."""
         out, covered = [], 0
         while self.window is not None and not node.is_root() and covered < self.window:
+            need = align_ceil(self.window - covered, self.page_size)
+            if node.length > need:
+                self._split(node, node.length - need)
             out.append(node)
             covered += node.length
             node = node.parent
@@ -689,7 +728,6 @@ class RadixCache:
         head = TreeNode(node.key[:pos], value, node.tic)
         head.ref, head.busy = node.ref, node.busy
         head.window_freed, head.window_ref = node.window_freed, node.window_ref
-        head.window_uuid, node.window_uuid = node.window_uuid, None
         units = pos // self.page_size
         for attr in ("host", "host_window"):
             spans = getattr(node, attr)

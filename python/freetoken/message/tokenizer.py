@@ -115,8 +115,10 @@ class CacheRebuildResultMsg(BaseTokenizerMsg):
 @dataclass
 class CacheStatusMsg(BaseTokenizerMsg):
     # scheduler -> detokenizer worker -> api server: the prefix_cache status at an idle point,
-    # where no reply would otherwise carry it (passthrough to CacheStatusReply).
+    # where no reply would otherwise carry it (passthrough to CacheStatusReply), with the
+    # speculative counters that settled after the last reply.
     prefix_cache: dict
+    speculative: dict | None = None
 
 
 @dataclass

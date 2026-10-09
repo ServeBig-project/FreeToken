@@ -221,7 +221,8 @@ def compute_dflash_geometry(engine: "Engine") -> Dict[str, Any]:
     draft = getattr(engine, "dflash", None)
     if draft is not None:
         return draft.geometry()
-    return dict(active=False, weight_bytes=0, context_bytes=0, metadata_bytes=0, reserved_bytes=0)
+    return dict(active=False, weight_bytes=0, context_bytes=0, full_context_bytes=0,
+                window_context_bytes=0, metadata_bytes=0, workspace_bytes=0, reserved_bytes=0)
 
 
 def compute_cache_status_meta(engine: "Engine") -> Dict[str, Any]:

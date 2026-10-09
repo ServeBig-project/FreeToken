@@ -330,19 +330,19 @@ def gdn_state_budget(config) -> int:
     return config.gdn_state_budget_bytes or _default_pool_slots(config) * per_slot
 
 
-def _linear_pool_num_slots(config, *, draft_bytes: int = 0) -> int:
+def _linear_pool_num_slots(config) -> int:
     """Full-state slots that fit the GDN state budget next to the fixed ReplaySSM buffers."""
-    if config.gdn_state_budget_bytes is None and replay_records(config) is None and not draft_bytes:
+    if config.gdn_state_budget_bytes is None and replay_records(config) is None:
         return _default_pool_slots(config)
     per_slot = linear_state_bytes_per_req(
         config.model_config.linear_attention_group(), config.tp_info.size, config.dtype)
     budget = gdn_state_budget(config)
-    fixed = replay_buffer_bytes(config) + draft_bytes
+    fixed = replay_buffer_bytes(config)
     slots = (budget - fixed) // per_slot
     if slots < _linear_pool_min_slots(config):
         raise ValueError(
             f"GDN state budget {budget} bytes holds {max(slots, 0)} full states after "
-            f"{fixed} bytes of replay/draft storage; at least {_linear_pool_min_slots(config)} "
+            f"{fixed} bytes of replay storage; at least {_linear_pool_min_slots(config)} "
             f"states of {per_slot} bytes are needed, raise --gdn-state-budget-bytes"
         )
     return slots
