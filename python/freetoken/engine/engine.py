@@ -629,10 +629,12 @@ class Engine:
 
         # One request alone, at its minimum legal progress (an AR step; SD rounds shrink to
         # what fits): its tokens and the next, the dummy page, the padding state and its own,
-        # its record row (rows are handed out from 0), the window sentinel and its window.
+        # the prompt-end checkpoint its prefix-cache handle keeps locked, its record row (rows
+        # are handed out from 0), the window sentinel and its window.
+        checkpoint = int(config.cache_type != "naive")
         alone = lambda length: layout.blocks(
             pages=up(length + 1, ps) + 1, windows=1 + min(length + 1, window),
-            states=2, rows=1) <= total
+            states=2 + checkpoint, rows=1) <= total
         asked = prior.get("requested_context_tokens", config.max_seq_len_override)
         model_max = prior.get("model_context_tokens", config.max_seq_len)
         context = largest(alone, model_max if asked is None else asked)
