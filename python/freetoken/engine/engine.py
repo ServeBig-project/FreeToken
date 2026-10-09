@@ -562,9 +562,9 @@ class Engine:
         limits = self.runtime_limits = self._runtime_limits(config, budget, execution, {})
         object.__setattr__(config, "max_seq_len_override", limits["context_tokens"])
         object.__setattr__(config, "max_running_req", limits["max_running_requests"])
-        # Graphs are captured for batches the scheduler can form, and no more than the default.
-        object.__setattr__(config, "cuda_graph_max_bs", min(
-            config.cuda_graph_max_bs or _GRAPH_ROWS, limits["max_running_requests"]))
+        if config.cuda_graph_bs is None:  # no larger batch than the scheduler can form
+            object.__setattr__(config, "cuda_graph_max_bs",
+                               _graph_rows(config, limits["max_running_requests"]))
 
     def _init_runtime(self, config: EngineConfig, available: int) -> None:
         """--runtime-cache-gib: one set of physical blocks behind the target KV, GDN states and
@@ -632,7 +632,7 @@ class Engine:
         # what fits): its tokens and the next, the dummy page, the padding state and its own,
         # the prompt-end checkpoint its prefix-cache handle keeps locked, its record row (rows
         # are handed out from 0), the window sentinel and its window.
-        checkpoint = int(config.cache_type != "naive")
+        checkpoint = int(getattr(config, "cache_type", "naive") != "naive")  # a prefix cache
         alone = lambda length: layout.blocks(
             pages=up(length + 1, ps) + 1, windows=1 + min(length + 1, window),
             states=2 + checkpoint, rows=1) <= total
@@ -649,7 +649,8 @@ class Engine:
         row_bytes = (8 * width + (draft.index_bytes(width) if draft is not None else 0)
                      + 2 * 4 * (steps + 1) * vocab * (steps > 0))
         # Each graph-captured batch row: fp32 logits and the attention backend's page-table row.
-        executing = lambda c: (c + 1) * row_bytes + min(c, _GRAPH_ROWS) * (4 * vocab + 4 * width)
+        executing = lambda c: ((c + 1) * row_bytes
+                               + _graph_rows(config, c) * (4 * vocab + 4 * width))
         resource = largest(lambda c: layout.blocks(
             pages=c + 1, windows=1 + c * window, states=c + 1, rows=c) <= total
             and executing(c) <= execution, _MAX_AUTO_RUNNING)
@@ -770,8 +771,10 @@ class Engine:
             tp_cpu_group = torch.distributed.group.WORLD
             assert tp_cpu_group is not None
             # A shared runtime derives the concurrency after the weights load: size for its bound.
-            forward_len = (config.max_extend_tokens + _MAX_AUTO_RUNNING
-                           if config.max_running_req is None else config.max_forward_len)
+            extend = getattr(config, "max_extend_tokens", None)  # a scheduler's config
+            forward_len = (extend + _MAX_AUTO_RUNNING
+                           if config.max_running_req is None and extend is not None
+                           else config.max_forward_len)
             max_bytes = forward_len * config.model_config.hidden_size * self.dtype.itemsize
             enable_pynccl_distributed(config.tp_info, tp_cpu_group, max_bytes)
         else:
@@ -1943,6 +1946,15 @@ def _resolve_cpu_layers(config: EngineConfig, num_moe_layers: int) -> frozenset[
 # separately (its dense value is 'fused', but 'auto' resolves there without a warning).
 _MAX_AUTO_RUNNING = 4096  # upper bound of a derived --max-running-requests
 _GRAPH_ROWS = 160  # the default largest captured decode batch (engine/graph.py)
+
+
+def _graph_rows(config, running: int) -> int:
+    """The largest decode batch graphs are captured for with ``running`` requests: an explicit
+    batch list as given, else the explicit or default cap, never above ``running``."""
+    if config.cuda_graph_bs is not None:
+        return max(config.cuda_graph_bs, default=0)
+    cap = _GRAPH_ROWS if config.cuda_graph_max_bs is None else config.cuda_graph_max_bs
+    return min(cap, running)
 
 _DENSE_MOE_SETTINGS = {
     "moe_cache_size": 0,
