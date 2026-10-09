@@ -90,8 +90,8 @@ _NOWAG_BANK_NAMES = (
 )
 
 
-def _nowag_assignment_words(width: int) -> int:
-    return ((width + 5) // 6 * 12 + 31) // 32
+def _nowag_assignment_words(width: int, d: int) -> int:
+    return ((width + d - 1) // d * 12 + 31) // 32
 
 
 def compiled_extension_supports(
@@ -247,6 +247,7 @@ class CpuMoeExecutor:
         ptrs, (self.H, self.I) = self._resolve_banks(cache, fmt)
         ptrs.setdefault("nowag_bank_table_ptr", 0)
         ptrs.setdefault("nowag_codebook_ptr", 0)
+        ptrs.setdefault("nowag_group_size", 0)
 
         # Decide the flag handshake up front (env + device + a functional stream-memop
         # probe): its coordinator needs a core of its own, which the auto thread sizing
@@ -463,7 +464,7 @@ class CpuMoeExecutor:
         banks: dict,
         codebook: torch.Tensor | None,
     ) -> tuple[dict, tuple[int, int]]:
-        """Resolve the D6/B12 word-major NoWAG banks without expanding weights.
+        """Resolve the D4/D6 B12 word-major NoWAG banks without expanding weights.
 
         A compact ``[layer, bank]`` pointer descriptor is the only extra metadata;
         the C++ kernel reads the nine original pinned banks and the shared BF16
@@ -471,9 +472,10 @@ class CpuMoeExecutor:
         """
         if codebook is None:
             raise RuntimeError("NoWAG CPU MoE cache has no host codebook")
-        if codebook.dtype != torch.bfloat16 or tuple(codebook.shape) != (4096, 6):
+        d = int(codebook.shape[1]) if codebook.ndim == 2 else 0
+        if codebook.dtype != torch.bfloat16 or tuple(codebook.shape) != (4096, d) or d not in (4, 6):
             raise ValueError(
-                "NoWAG CPU MoE requires a shared BF16 [4096, 6] D6/B12 codebook"
+                "NoWAG CPU MoE requires a shared BF16 [4096, D] codebook with D in (4, 6)"
             )
         gate_in = banks["gate_input_norm"]
         gate_out = banks["gate_output_norm"]
@@ -481,13 +483,13 @@ class CpuMoeExecutor:
         I = int(gate_out[0].shape[1])
 
         expected = {
-            "gate_assignments": (self.num_experts, _nowag_assignment_words(H), I),
+            "gate_assignments": (self.num_experts, _nowag_assignment_words(H, d), I),
             "gate_input_norm": (self.num_experts, H),
             "gate_output_norm": (self.num_experts, I),
-            "up_assignments": (self.num_experts, _nowag_assignment_words(H), I),
+            "up_assignments": (self.num_experts, _nowag_assignment_words(H, d), I),
             "up_input_norm": (self.num_experts, H),
             "up_output_norm": (self.num_experts, I),
-            "down_assignments": (self.num_experts, _nowag_assignment_words(I), H),
+            "down_assignments": (self.num_experts, _nowag_assignment_words(I, d), H),
             "down_input_norm": (self.num_experts, I),
             "down_output_norm": (self.num_experts, H),
         }
@@ -522,6 +524,7 @@ class CpuMoeExecutor:
             down_bias_ptr=0,
             nowag_bank_table_ptr=descriptor.data_ptr(),
             nowag_codebook_ptr=codebook.data_ptr(),
+            nowag_group_size=d,
         )
         return ptrs, (H, I)
 

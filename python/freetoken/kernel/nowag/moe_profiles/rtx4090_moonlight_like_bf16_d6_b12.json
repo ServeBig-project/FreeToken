@@ -1,0 +1,149 @@
+{
+  "schema_version": 3,
+  "name": "rtx4090-moonlight-like-bf16-d6-b12",
+  "hardware": {
+    "backend": "cuda",
+    "device_name": "NVIDIA GeForce RTX 4090",
+    "compute_capability": [
+      8,
+      9
+    ]
+  },
+  "shape": {
+    "num_experts": 64,
+    "hidden_size": 2048,
+    "intermediate_size": 1408,
+    "physical_intermediate_size": 1408,
+    "pad_down_to_k48": false,
+    "down_input_group_start_lane": 0,
+    "assignment_layout": "word_major",
+    "structural_down": true,
+    "top_k": 6,
+    "codebook_size": 4096,
+    "dtype": "bfloat16",
+    "group_size": 6,
+    "assignment_bits": 12,
+    "activation_kind": "silu_mul",
+    "gate_up_input_rounding": "none",
+    "swiglu_limit": null,
+    "down_input_rounding": "none",
+    "down_norm_placement": "gate_up_epilogue"
+  },
+  "token_buckets": [
+    {
+      "min_tokens": 64,
+      "max_tokens": 128,
+      "gate_up": {
+        "block_m": 64,
+        "block_n": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "down": {
+        "block_m": 64,
+        "block_n": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "evidence": {
+        "measured_at_m": 128,
+        "geomean_normalized_to_per_case_best": 1.0,
+        "worst_normalized_to_per_case_best": 1.0
+      }
+    },
+    {
+      "min_tokens": 129,
+      "max_tokens": 256,
+      "gate_up": {
+        "block_m": 64,
+        "block_n": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "down": {
+        "block_m": 64,
+        "block_n": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "evidence": {
+        "measured_at_m": 256,
+        "geomean_normalized_to_per_case_best": 1.0,
+        "worst_normalized_to_per_case_best": 1.0
+      }
+    },
+    {
+      "min_tokens": 257,
+      "max_tokens": 512,
+      "gate_up": {
+        "block_m": 64,
+        "block_n": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "down": {
+        "block_m": 64,
+        "block_n": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "evidence": {
+        "measured_at_m": 512,
+        "geomean_normalized_to_per_case_best": 1.0,
+        "worst_normalized_to_per_case_best": 1.0
+      }
+    },
+    {
+      "min_tokens": 513,
+      "max_tokens": 1024,
+      "gate_up": {
+        "block_m": 128,
+        "block_n": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "down": {
+        "block_m": 128,
+        "block_n": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "evidence": {
+        "measured_at_m": 1024,
+        "geomean_normalized_to_per_case_best": 1.0,
+        "worst_normalized_to_per_case_best": 1.0
+      }
+    },
+    {
+      "min_tokens": 1025,
+      "max_tokens": 2048,
+      "gate_up": {
+        "block_m": 64,
+        "block_n": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "down": {
+        "block_m": 64,
+        "block_n": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "evidence": {
+        "measured_at_m": 2048,
+        "geomean_normalized_to_per_case_best": 1.0014683427462479,
+        "worst_normalized_to_per_case_best": 1.0029388415229163
+      }
+    }
+  ],
+  "provenance": {
+    "generator": "experiments/rtx4090/autotune_moe_exact_k48.py",
+    "selection_objective": "minimize geomean of (GateUp+Down) latency normalized to each seed/routing case best; tie-break by worst normalized latency",
+    "timed_scope": "Gate/Up includes its SiLU/down-norm epilogue; Down excludes alignment and moe_sum; preparation is outside timing",
+    "kernel_constraints": {
+      "down_block_m_divisible_by_gate_block_m": true,
+      "num_warps": "block_n / 16",
+      "num_stages": 2
+    }
+  }
+}

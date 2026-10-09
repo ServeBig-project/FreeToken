@@ -1,0 +1,83 @@
+{
+  "schema_version": 3,
+  "name": "rtx4090-moonlight-tp2-bf16-d6-b12",
+  "hardware": {
+    "backend": "cuda",
+    "device_name": "NVIDIA GeForce RTX 4090",
+    "compute_capability": [8, 9]
+  },
+  "shape": {
+    "num_experts": 64,
+    "hidden_size": 2048,
+    "intermediate_size": 704,
+    "physical_intermediate_size": 720,
+    "pad_down_to_k48": true,
+    "down_input_group_start_lane": 2,
+    "assignment_layout": "word_major",
+    "structural_down": true,
+    "top_k": 6,
+    "codebook_size": 4096,
+    "dtype": "bfloat16",
+    "group_size": 6,
+    "assignment_bits": 12,
+    "activation_kind": "silu_mul",
+    "gate_up_input_rounding": "none",
+    "swiglu_limit": null,
+    "down_input_rounding": "none",
+    "down_norm_placement": "gate_up_epilogue"
+  },
+  "token_buckets": [
+    {
+      "min_tokens": 1,
+      "max_tokens": 128,
+      "gate_up": {
+        "block_m": 16,
+        "block_n": 64,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "down": {
+        "block_m": 16,
+        "block_n": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "evidence": {
+        "measured_tokens": [
+          1,
+          32,
+          128
+        ],
+        "routing": "balanced",
+        "graph_boundary": "complete MoE call",
+        "source": "experiments/rtx4090/results/moe_i704_tt_launch_plan_abba_3seed_gpu2.json"
+      }
+    },
+    {
+      "min_tokens": 256,
+      "max_tokens": 512,
+      "gate_up": {
+        "block_m": 64,
+        "block_n": 64,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "down": {
+        "block_m": 64,
+        "block_n": 128,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "evidence": {
+        "measured_tokens": [256, 512],
+        "routing": "balanced",
+        "graph_boundary": "complete MoE call"
+      }
+    }
+  ],
+  "provenance": {
+    "source": "experiments/rtx4090/results/moe_graph_crossover_3seed_rtx4090.json",
+    "selection_objective": "lowest complete-MoE CUDA Graph replay latency",
+    "note": "The TP2 physical intermediate is padded from logical K704 to K720 at model load."
+  }
+}

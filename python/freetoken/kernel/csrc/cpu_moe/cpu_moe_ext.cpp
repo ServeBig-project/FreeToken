@@ -1065,23 +1065,22 @@ void fp8_roundtrip_bf16(const bf16_t* src, bf16_t* dst, int K) {
 }
 
 // ---------------------------------- NoWAG ----------------------------------
-// D6/B12 assignments stay in runtime [word, output] order. Eight ids span three
-// words, so AVX2 decodes eight output rows at once and gathers the shared BF16
-// codebook without materializing dense experts.
-constexpr int NOWAG_GROUP_SIZE = 6;
+// D4/B12 and D6/B12 assignments stay in runtime [word, output] order. Eight
+// 12-bit ids span three words, so AVX2 decodes eight output rows at once and
+// gathers the shared BF16 codebook (D lanes per entry) without materializing
+// dense experts.
 constexpr int NOWAG_ASSIGNMENT_BITS = 12;
 constexpr int NOWAG_IDS_PER_BLOCK = 8;
 constexpr int NOWAG_WORDS_PER_BLOCK = 3;
-constexpr int NOWAG_CODEBOOK_PAIRS = NOWAG_GROUP_SIZE / 2;
 constexpr int NOWAG_ACCUMULATORS = 4;
 constexpr uint32_t NOWAG_ID_MASK = (1u << NOWAG_ASSIGNMENT_BITS) - 1;
 
-inline int nowag_num_groups(int K) {
-  return (K + NOWAG_GROUP_SIZE - 1) / NOWAG_GROUP_SIZE;
+inline int nowag_num_groups(int K, int D) {
+  return (K + D - 1) / D;
 }
 
-inline int nowag_assignment_words(int K) {
-  return (nowag_num_groups(K) * NOWAG_ASSIGNMENT_BITS + 31) / 32;
+inline int nowag_assignment_words(int K, int D) {
+  return (nowag_num_groups(K, D) * NOWAG_ASSIGNMENT_BITS + 31) / 32;
 }
 
 using nowag_gemv_fn = void (*)(float*, const uint32_t*, const bf16_t*,
@@ -1099,17 +1098,18 @@ inline uint32_t nowag_decode_id(const uint32_t* assignments, int W, int N,
   return static_cast<uint32_t>((packed >> shift) & NOWAG_ID_MASK);
 }
 
+template <int D>
 void nowag_gemv_scalar(float* out, const uint32_t* assignments,
                        const bf16_t* x, const bf16_t* codebook, int K,
                        int N, int W, int n0, int n1) {
-  const int groups = nowag_num_groups(K);
+  const int groups = nowag_num_groups(K, D);
   for (int n = n0; n < n1; ++n) {
     float acc[NOWAG_ACCUMULATORS] = {};
     for (int g = 0; g < groups; ++g) {
       const bf16_t* cb = codebook + (size_t)nowag_decode_id(
-          assignments, W, N, g, n) * NOWAG_GROUP_SIZE;
-      const int k0 = g * NOWAG_GROUP_SIZE;
-      const int lanes = std::min(NOWAG_GROUP_SIZE, K - k0);
+          assignments, W, N, g, n) * D;
+      const int k0 = g * D;
+      const int lanes = std::min(D, K - k0);
       for (int d = 0; d < lanes; ++d)
         acc[(k0 + d) & (NOWAG_ACCUMULATORS - 1)] +=
             bf16_to_f32(x[k0 + d]) * bf16_to_f32(cb[d]);
@@ -1129,12 +1129,13 @@ struct NowagAvxAccumulators {
   __m256 values[NOWAG_ACCUMULATORS];
 };
 
+template <int D>
 __attribute__((target("avx2,fma")))
 static inline void nowag_accumulate_codeword(
     NowagAvxAccumulators& acc, __m256i ids, const bf16_t* x,
     const bf16_t* codebook, int lanes, int input_offset) {
   const __m256i base = _mm256_mullo_epi32(
-      ids, _mm256_set1_epi32(NOWAG_CODEBOOK_PAIRS));
+      ids, _mm256_set1_epi32(D / 2));
   const __m256i high_mask = _mm256_set1_epi32((int)0xFFFF0000u);
   for (int d = 0; d < lanes; d += 2) {
     const __m256i indices = _mm256_add_epi32(
@@ -1173,6 +1174,7 @@ static inline __m256i nowag_decode_ids_avx2(const uint32_t* assignments,
   return _mm256_and_si256(ids, _mm256_set1_epi32(NOWAG_ID_MASK));
 }
 
+template <int D>
 __attribute__((target("avx2,fma")))
 static inline void nowag_accumulate_eight_groups(
     NowagAvxAccumulators& acc, const uint32_t* assignments, const bf16_t* x,
@@ -1186,45 +1188,46 @@ static inline void nowag_accumulate_eight_groups(
       assignments + (size_t)(word + 2) * N + output));
   const __m256i mask = _mm256_set1_epi32(NOWAG_ID_MASK);
   __m256i ids = _mm256_and_si256(w0, mask);
-  nowag_accumulate_codeword(
-      acc, ids, x, codebook, NOWAG_GROUP_SIZE, group * NOWAG_GROUP_SIZE);
+  nowag_accumulate_codeword<D>(
+      acc, ids, x, codebook, D, group * D);
   ids = _mm256_and_si256(_mm256_srli_epi32(w0, 12), mask);
-  nowag_accumulate_codeword(
-      acc, ids, x + NOWAG_GROUP_SIZE, codebook, NOWAG_GROUP_SIZE,
-      (group + 1) * NOWAG_GROUP_SIZE);
+  nowag_accumulate_codeword<D>(
+      acc, ids, x + D, codebook, D,
+      (group + 1) * D);
   ids = _mm256_and_si256(_mm256_or_si256(
       _mm256_srli_epi32(w0, 24), _mm256_slli_epi32(w1, 8)), mask);
-  nowag_accumulate_codeword(
-      acc, ids, x + 2 * NOWAG_GROUP_SIZE, codebook, NOWAG_GROUP_SIZE,
-      (group + 2) * NOWAG_GROUP_SIZE);
+  nowag_accumulate_codeword<D>(
+      acc, ids, x + 2 * D, codebook, D,
+      (group + 2) * D);
   ids = _mm256_and_si256(_mm256_srli_epi32(w1, 4), mask);
-  nowag_accumulate_codeword(
-      acc, ids, x + 3 * NOWAG_GROUP_SIZE, codebook, NOWAG_GROUP_SIZE,
-      (group + 3) * NOWAG_GROUP_SIZE);
+  nowag_accumulate_codeword<D>(
+      acc, ids, x + 3 * D, codebook, D,
+      (group + 3) * D);
   ids = _mm256_and_si256(_mm256_srli_epi32(w1, 16), mask);
-  nowag_accumulate_codeword(
-      acc, ids, x + 4 * NOWAG_GROUP_SIZE, codebook, NOWAG_GROUP_SIZE,
-      (group + 4) * NOWAG_GROUP_SIZE);
+  nowag_accumulate_codeword<D>(
+      acc, ids, x + 4 * D, codebook, D,
+      (group + 4) * D);
   ids = _mm256_and_si256(_mm256_or_si256(
       _mm256_srli_epi32(w1, 28), _mm256_slli_epi32(w2, 4)), mask);
-  nowag_accumulate_codeword(
-      acc, ids, x + 5 * NOWAG_GROUP_SIZE, codebook, NOWAG_GROUP_SIZE,
-      (group + 5) * NOWAG_GROUP_SIZE);
+  nowag_accumulate_codeword<D>(
+      acc, ids, x + 5 * D, codebook, D,
+      (group + 5) * D);
   ids = _mm256_and_si256(_mm256_srli_epi32(w2, 8), mask);
-  nowag_accumulate_codeword(
-      acc, ids, x + 6 * NOWAG_GROUP_SIZE, codebook, NOWAG_GROUP_SIZE,
-      (group + 6) * NOWAG_GROUP_SIZE);
+  nowag_accumulate_codeword<D>(
+      acc, ids, x + 6 * D, codebook, D,
+      (group + 6) * D);
   ids = _mm256_and_si256(_mm256_srli_epi32(w2, 20), mask);
-  nowag_accumulate_codeword(
-      acc, ids, x + 7 * NOWAG_GROUP_SIZE, codebook, NOWAG_GROUP_SIZE,
-      (group + 7) * NOWAG_GROUP_SIZE);
+  nowag_accumulate_codeword<D>(
+      acc, ids, x + 7 * D, codebook, D,
+      (group + 7) * D);
 }
 
+template <int D>
 __attribute__((target("avx2,fma")))
 void nowag_gemv_avx2(float* out, const uint32_t* assignments,
                      const bf16_t* x, const bf16_t* codebook, int K,
                      int N, int W, int n0, int n1) {
-  const int groups = nowag_num_groups(K);
+  const int groups = nowag_num_groups(K, D);
   int n = n0;
   for (; n + NOWAG_IDS_PER_BLOCK <= n1; n += NOWAG_IDS_PER_BLOCK) {
     NowagAvxAccumulators acc;
@@ -1232,24 +1235,24 @@ void nowag_gemv_avx2(float* out, const uint32_t* assignments,
       acc.values[i] = _mm256_setzero_ps();
     int g = 0;
     for (; g + NOWAG_IDS_PER_BLOCK <= groups &&
-           (g + NOWAG_IDS_PER_BLOCK) * NOWAG_GROUP_SIZE <= K;
+           (g + NOWAG_IDS_PER_BLOCK) * D <= K;
          g += NOWAG_IDS_PER_BLOCK)
-      nowag_accumulate_eight_groups(
-          acc, assignments, x + (size_t)g * NOWAG_GROUP_SIZE,
+      nowag_accumulate_eight_groups<D>(
+          acc, assignments, x + (size_t)g * D,
           codebook, N, g, n);
     for (; g < groups; ++g) {
       const __m256i ids = nowag_decode_ids_avx2(assignments, N, g, n);
-      nowag_accumulate_codeword(
-          acc, ids, x + (size_t)g * NOWAG_GROUP_SIZE, codebook,
-          std::min(NOWAG_GROUP_SIZE, K - g * NOWAG_GROUP_SIZE),
-          g * NOWAG_GROUP_SIZE);
+      nowag_accumulate_codeword<D>(
+          acc, ids, x + (size_t)g * D, codebook,
+          std::min(D, K - g * D),
+          g * D);
     }
     const __m256 sum01 = _mm256_add_ps(acc.values[0], acc.values[1]);
     const __m256 sum23 = _mm256_add_ps(acc.values[2], acc.values[3]);
     _mm256_storeu_ps(out + (n - n0), _mm256_add_ps(sum01, sum23));
   }
   if (n < n1)
-    nowag_gemv_scalar(
+    nowag_gemv_scalar<D>(
         out + (n - n0), assignments, x, codebook, K, N, W, n, n1);
 }
 
@@ -1279,13 +1282,20 @@ void nowag_scale_bf16_avx2(const bf16_t* x, const bf16_t* scale,
 }
 #endif
 
-nowag_gemv_fn select_nowag_gemv() {
+template <int D>
+nowag_gemv_fn select_nowag_gemv_d() {
   const IsaTier t = pick_isa();
 #if CPU_MOE_X86
-  if (t >= ISA_AVX2) return nowag_gemv_avx2;
+  if (t >= ISA_AVX2) return nowag_gemv_avx2<D>;
 #endif
   (void)t;
-  return nowag_gemv_scalar;
+  return nowag_gemv_scalar<D>;
+}
+
+nowag_gemv_fn select_nowag_gemv(int D) {
+  if (D == 4) return select_nowag_gemv_d<4>();
+  if (D == 6) return select_nowag_gemv_d<6>();
+  throw std::runtime_error("NoWAG CPU MoE supports D4/B12 and D6/B12 codebooks");
 }
 
 nowag_scale_fn select_nowag_scale() {
@@ -1519,7 +1529,7 @@ struct CpuMoeExecutor {
   const bf16_t* nowag_codebook;
   NowagMath nowag_math;
   int nowag_gu_words = 0, nowag_dn_words = 0;
-  nowag_gemv_fn nowag_gemv;
+  nowag_gemv_fn nowag_gemv = nullptr;
   nowag_scale_fn nowag_scale;
   float swiglu_alpha;
   float swiglu_limit;          // +inf == no clamp
@@ -1634,7 +1644,7 @@ struct CpuMoeExecutor {
                  uintptr_t nowag_codebook_ptr, double swiglu_alpha_,
                  double swiglu_limit_, bool nowag_round_input_,
                  bool nowag_round_middle_, bool nowag_preapply_down_norm_,
-                 std::vector<int> core_ids_)
+                 int nowag_group_size, std::vector<int> core_ids_)
       : num_threads(num_threads_ > 0 ? num_threads_ : 1),
         num_layers(num_layers_),
         num_experts(num_experts_),
@@ -1666,7 +1676,6 @@ struct CpuMoeExecutor {
     dsdot = select_dsdot();
     mxgemv = select_mxgemv();
     q4dot = select_q4dot();
-    nowag_gemv = select_nowag_gemv();
     nowag_scale = select_nowag_scale();
     if (weight_format == WF_Q4_0) {
       if (H % 32 != 0 || I % 32 != 0)
@@ -1677,8 +1686,9 @@ struct CpuMoeExecutor {
     if (weight_format == WF_NOWAG) {
       if (!nowag_bank_table || !nowag_codebook)
         throw std::runtime_error("NoWAG CPU MoE requires bank pointers and a codebook");
-      nowag_gu_words = nowag_assignment_words(H);
-      nowag_dn_words = nowag_assignment_words(I);
+      nowag_gemv = select_nowag_gemv(nowag_group_size);
+      nowag_gu_words = nowag_assignment_words(H, nowag_group_size);
+      nowag_dn_words = nowag_assignment_words(I, nowag_group_size);
     }
     isa = c.name;
     // nvfp4 (AVX-VNNI only): W4A8 int8 decode when the CPU supports it. q4_0 is always
@@ -2578,7 +2588,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::class_<CpuMoeExecutor>(m, "CpuMoeExecutor")
       .def(py::init<int, int, int, int, int, int, int, int, int, int, uintptr_t, uintptr_t,
                     uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t,
-                    uintptr_t, uintptr_t, double, double, bool, bool, bool,
+                    uintptr_t, uintptr_t, double, double, bool, bool, bool, int,
                     std::vector<int>>(),
            py::arg("num_threads"), py::arg("num_layers"), py::arg("num_experts"),
            py::arg("top_k"), py::arg("hidden_size"), py::arg("inter_size"),
@@ -2591,7 +2601,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("nowag_codebook_ptr"), py::arg("swiglu_alpha"),
            py::arg("swiglu_limit"), py::arg("nowag_round_input"),
            py::arg("nowag_round_middle"), py::arg("nowag_preapply_down_norm"),
-           py::arg("core_ids"))
+           py::arg("nowag_group_size"), py::arg("core_ids"))
       .def("create_task", &CpuMoeExecutor::create_task, py::arg("layer_id"),
            py::arg("num_tokens"), py::arg("x_ptr"), py::arg("ids_ptr"), py::arg("w_ptr"),
            py::arg("y_ptr"))

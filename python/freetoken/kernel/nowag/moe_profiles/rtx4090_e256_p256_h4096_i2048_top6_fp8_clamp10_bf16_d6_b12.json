@@ -1,0 +1,92 @@
+{
+  "schema_version": 6,
+  "name": "rtx4090-e256-p256-h4096-i2048-top6-fp8-clamp10-bf16-d6-b12",
+  "hardware": {
+    "backend": "cuda",
+    "device_name": "NVIDIA GeForce RTX 4090",
+    "compute_capability": [8, 9]
+  },
+  "shape": {
+    "num_experts": 256,
+    "physical_expert_rows": 256,
+    "hidden_size": 4096,
+    "intermediate_size": 2048,
+    "physical_intermediate_size": 2048,
+    "pad_down_to_k48": false,
+    "down_input_group_start_lane": 0,
+    "assignment_layout": "word_major",
+    "structural_down": true,
+    "top_k": 6,
+    "codebook_size": 4096,
+    "dtype": "bfloat16",
+    "group_size": 6,
+    "assignment_bits": 12,
+    "activation_kind": "silu_mul",
+    "gate_up_input_rounding": "dynamic_e4m3_per_token_group128_ue8m0",
+    "swiglu_limit": 10.0,
+    "down_input_rounding": "dynamic_e4m3_per_token_group128_ue8m0",
+    "down_norm_placement": "down_prologue"
+  },
+  "token_buckets": [
+    {
+      "min_tokens": 32,
+      "max_tokens": 32,
+      "gate_up": {"block_m": 64, "block_n": 128, "num_warps": 8, "num_stages": 2},
+      "down": {"block_m": 64, "block_n": 128, "num_warps": 8, "num_stages": 2}
+    },
+    {
+      "min_tokens": 44,
+      "max_tokens": 48,
+      "adaptive_m_tiles": true,
+      "adaptive_residual_policy": "bm16",
+      "gate_up": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2, "tasks_per_cta": 2},
+      "down": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2, "tasks_per_cta": 1}
+    },
+    {
+      "min_tokens": 49,
+      "max_tokens": 63,
+      "adaptive_m_tiles": true,
+      "adaptive_residual_policy": "tail64",
+      "gate_up": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2, "tasks_per_cta": 2},
+      "down": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2, "tasks_per_cta": 1}
+    },
+    {
+      "min_tokens": 64,
+      "max_tokens": 512,
+      "adaptive_m_tiles": true,
+      "adaptive_residual_policy": "bm16",
+      "gate_up": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2, "tasks_per_cta": 2},
+      "down": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2, "tasks_per_cta": 1}
+    },
+    {
+      "min_tokens": 1024,
+      "max_tokens": 1024,
+      "gate_up": {"block_m": 64, "block_n": 128, "num_warps": 8, "num_stages": 2},
+      "down": {"block_m": 64, "block_n": 128, "num_warps": 8, "num_stages": 2}
+    }
+  ],
+  "provenance": {
+    "fixed_plan_source": "/data1/lmcache_kv/nowag_kernel_tuning/freetoken_integration_20260824/dsv4_modelE256_bankrows256_prefill_fullscan3_capacityfix.json",
+    "adaptive_task_batch": {
+      "formal_synthetic": "/data1/lmcache_kv/nowag_kernel_tuning/phase6_tasks_per_cta_blackbox/formal_dsv4_synthetic_result.json",
+      "synthetic_tokens": [58, 64, 93, 128, 512],
+      "synthetic_routing": ["balanced", "hotspot"],
+      "real_capture_manifest": "/data1/lmcache_kv/nowag_kernel_tuning/phase7_dsv4_real_capture_blackbox/capture_manifest.json",
+      "real_replay": "/data1/lmcache_kv/nowag_kernel_tuning/phase7_dsv4_real_capture_blackbox/real_replay_result.json",
+      "real_head_to_head": "/data1/lmcache_kv/nowag_kernel_tuning/phase7_dsv4_real_capture_blackbox/real_head_to_head_result.json",
+      "real_tokens": [58, 93, 128],
+      "full_call_timeline": "/data1/lmcache_kv/nowag_kernel_tuning/phase10_dsv4_full_call_timeline_blackbox/full_call_timeline_result.json",
+      "strategy": "For the validated production interval M=44..512, use adaptive Gate/Up tasks_per_cta=2 and Down tasks_per_cta=1."
+    },
+    "tail64_residual": {
+      "synthetic": "/data1/lmcache_kv/nowag_kernel_tuning/phase15_dsv4_tail64_narrow_blackbox/tail64_synthetic_result.json",
+      "real_capture_manifest": "/data1/lmcache_kv/nowag_kernel_tuning/phase15_dsv4_tail64_narrow_blackbox/real_capture_manifest.json",
+      "real_replay": "/data1/lmcache_kv/nowag_kernel_tuning/phase15_dsv4_tail64_narrow_blackbox/tail64_real_narrow_result.json",
+      "real_tokens": [49, 58, 63],
+      "real_geometric_mean_speedup_over_bm16": 1.1522,
+      "balanced_routing": "No fallback and no regression: no tail64 tasks were generated, and all M=49/58/63 cells stayed within 0.10% of the bm16 adaptive policy.",
+      "strategy": "Use tail64 only for the measured M=49..63 interval; do not extrapolate the policy outside this interval."
+    },
+    "rule": "M=32 and M=1024 retain the previous fixed plan. M=44..48 and M=64..512 use adaptive g2_d1 with bm16 residuals. M=49..63 uses adaptive g2_d1 with tail64 residuals. Other token counts fall back, and no adaptive evidence is extrapolated above M=512."
+  }
+}

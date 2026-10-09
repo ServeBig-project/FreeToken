@@ -14,6 +14,22 @@ from freetoken.moe.expert_format import (
     ExpertMethod,
 )
 
+from freetoken.kernel import moe_sum_reduce_triton
+from freetoken.kernel.nowag import cuda_ops
+from freetoken.kernel.nowag.moe_ops import nowag_fused_moe
+from freetoken.kernel.triton.dsv4.fp8_linear import (
+    act_quant_fp8_inplace,
+    act_quant_fp8_roundtrip,
+)
+# Larger route sets use the in-tree Triton aligner, which has no native limit on
+# the number of physical expert rows.
+from freetoken.kernel.triton.moe_align import (
+    moe_align_block_size,
+    moe_align_block_size_adaptive,
+    moe_align_block_size_adaptive_tail64,
+    uses_large_moe_align,
+)
+
 from .weights import RUNTIME_ASSIGNMENT_LAYOUT, NowagState
 
 # Where the down input normalizer is applied: folded into the Gate/Up epilogue, or
@@ -39,6 +55,26 @@ def check_nowag_math(math: ExpertMath) -> None:
             )
 
 
+def _align_routes(
+    topk_ids: torch.Tensor,
+    block_size: int,
+    physical_expert_rows: int,
+    *,
+    alignment_storage: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if alignment_storage is None and topk_ids.numel() <= 256:
+        return cuda_ops.moe_sparse_route_align(
+            topk_ids=topk_ids, block_size=block_size, num_experts=physical_expert_rows
+        )
+    return moe_align_block_size(
+        topk_ids, block_size, physical_expert_rows, alignment_storage=alignment_storage
+    )
+
+
+def _round_down_input(middle: torch.Tensor) -> torch.Tensor:
+    return act_quant_fp8_inplace(middle, 128)
+
+
 def bind_nowag_method(
     math: ExpertMath,
     layout: ExpertLayout,
@@ -53,6 +89,8 @@ def bind_nowag_method(
     kernel_backend = os.environ.get("FREETOKEN_NOWAG_BACKEND", "auto")
     if kernel_backend not in ("triton", "auto"):
         raise ValueError("FREETOKEN_NOWAG_BACKEND must be 'triton' or 'auto'")
+    if device.type == "cuda":
+        cuda_ops._extension()  # compile before warmup and graph capture, not mid-forward
     run = partial(_run, math, layout, state, kernel_backend)
     return ExpertMethod(run=run, workspace_spec=lambda rows, top_k, *, bank_rows: {})
 
@@ -74,67 +112,13 @@ def _run(
     sort_rows: int | None = None,
     expert_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    try:
-        from nowag_vllm import cuda_ops as nowag_cuda_ops
-        from nowag_vllm.moe_ops import nowag_fused_moe
-    except ImportError as exc:
-        raise RuntimeError("NoWAG serving requires the local nowag_vllm package") from exc
-
-    from freetoken.kernel import moe_sum_reduce_triton
-    # Larger route sets retain the in-tree Triton aligner, which has no native
-    # sgl_kernel limit on the number of physical expert rows.
-    from freetoken.kernel.triton.moe_align import (
-        moe_align_block_size as moe_align_block_size_triton,
-        moe_align_block_size_adaptive,
-        moe_align_block_size_adaptive_tail64,
-        uses_large_moe_align,
-    )
-
-    def align_nowag_routes(
-        topk_ids: torch.Tensor,
-        block_size: int,
-        physical_expert_rows: int,
-        *,
-        alignment_storage: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if (
-            alignment_storage is None
-            and topk_ids.numel() <= 256
-            and nowag_cuda_ops.has_moe_sparse_route_align()
-        ):
-            return nowag_cuda_ops.moe_sparse_route_align(
-                topk_ids=topk_ids,
-                block_size=block_size,
-                num_experts=physical_expert_rows,
-            )
-        return moe_align_block_size_triton(
-            topk_ids,
-            block_size,
-            physical_expert_rows,
-            alignment_storage=alignment_storage,
-        )
-
+    # The rounded input is staged in ``out`` until the final sum overwrites it.
+    if (math.gate_up_input_rounding is not None and out is not None
+            and out.untyped_storage().data_ptr() == x.untyped_storage().data_ptr()):
+        raise ValueError("NoWAG out must not share storage with x")
     gate_up_input_transform = None
-    middle_transform = None
     if math.gate_up_input_rounding is not None:
-        from freetoken.kernel.triton.dsv4.fp8_linear import act_quant_fp8_roundtrip
-
-        # The rounded input is staged in ``out`` until the final sum overwrites it.
-        if out is not None and out.untyped_storage().data_ptr() == x.untyped_storage().data_ptr():
-            raise ValueError("NoWAG out must not share storage with x")
-
-        def round_gate_up_input(hidden: torch.Tensor) -> torch.Tensor:
-            return act_quant_fp8_roundtrip(hidden, 128, output=out)
-
-        gate_up_input_transform = round_gate_up_input
-    if math.down_input_rounding is not None:
-        from freetoken.kernel.triton.dsv4.fp8_linear import act_quant_fp8_inplace
-
-        def round_down_input(middle: torch.Tensor) -> torch.Tensor:
-            return act_quant_fp8_inplace(middle, 128)
-
-        middle_transform = round_down_input
-
+        gate_up_input_transform = partial(act_quant_fp8_roundtrip, block=128, output=out)
     codebook = shared["codebook"].unsqueeze(0)
     return nowag_fused_moe(
         hidden_states=x,
@@ -171,8 +155,8 @@ def _run(
             _DOWN_PROLOGUE_NORM if math.down_input_rounding else _GATE_UP_EPILOGUE_NORM
         ),
         gate_up_input_transform=gate_up_input_transform,
-        middle_transform=middle_transform,
-        align_routes=align_nowag_routes,
+        middle_transform=_round_down_input if math.down_input_rounding is not None else None,
+        align_routes=_align_routes,
         align_routes_adaptive=(
             moe_align_block_size_adaptive
             if uses_large_moe_align(slots.numel())

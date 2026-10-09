@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Profile NoWAG Triton and Exact-K48 through FreeToken's MoE entry point."""
+"""Profile NoWAG Triton and Exact-K48 through FreeToken's NoWAG MoE kernel entry."""
 
 from __future__ import annotations
 
@@ -16,12 +16,20 @@ from pathlib import Path
 from typing import Callable
 
 import torch
+from functools import partial
 
-from freetoken.moe.fused_nowag import routed_experts_nowag
-from freetoken.moe.nowag import get_nowag_model_rule
-from nowag_vllm.execution_profile import select_cuda_moe_backend
-from nowag_vllm.moe_ops import required_structural_middle_rows
-from nowag_vllm.moe_tuning import (
+from freetoken.kernel import moe_sum_reduce_triton
+from freetoken.kernel.nowag.execution_profile import select_cuda_moe_backend
+from freetoken.kernel.nowag.moe_ops import nowag_fused_moe, required_structural_middle_rows
+from freetoken.kernel.triton.dsv4.fp8_linear import act_quant_fp8_roundtrip
+from freetoken.kernel.triton.moe_align import (
+    moe_align_block_size_adaptive,
+    moe_align_block_size_adaptive_tail64,
+    uses_large_moe_align,
+)
+from freetoken.moe.expert_format import E4M3_GROUP128_UE8M0
+from freetoken.moe.nowag.method import _align_routes, _round_down_input
+from freetoken.kernel.nowag.moe_tuning import (
     MoeCudaLaunchPlan,
     MoeCudaStageConfig,
     cuda_hardware_identity,
@@ -240,10 +248,10 @@ def main() -> None:
     assignment_bits = 12
     codebook_size = 4096
     model_experts = args.experts
-    model_type = (
-        "deepseek_v4" if args.activation_mode == "dsv4" else "qwen3_5_moe"
-    )
-    activation_rule = get_nowag_model_rule(model_type)
+    dsv4 = args.activation_mode == "dsv4"
+    # DSV4 rounds both expert inputs to E4M3, so its down normalizer follows that
+    # rounding; plain SiLU experts fold it into the Gate/Up epilogue.
+    rounding = E4M3_GROUP128_UE8M0 if dsv4 else "none"
     hidden_size = args.hidden_size
     intermediate_size = args.intermediate_size
     top_k = args.top_k
@@ -278,12 +286,10 @@ def main() -> None:
     max_down_bm = max(plan.down.block_m for plan in plans.values())
     activation_identity = {
         "activation_kind": "silu_mul",
-        "gate_up_input_rounding": activation_rule.gate_up_input_rounding,
-        "swiglu_limit": (
-            args.swiglu_limit if args.activation_mode == "dsv4" else None
-        ),
-        "down_input_rounding": activation_rule.down_input_rounding,
-        "down_norm_placement": activation_rule.down_norm_placement,
+        "gate_up_input_rounding": rounding,
+        "swiglu_limit": args.swiglu_limit if dsv4 else None,
+        "down_input_rounding": rounding,
+        "down_norm_placement": "down_prologue" if dsv4 else "gate_up_epilogue",
     }
     shape_identity = moe_shape_identity(
         num_experts=model_experts,
@@ -339,32 +345,55 @@ def main() -> None:
                 route_output = torch.empty(
                     route_count, hidden_size, dtype=dtype, device=device
                 )
+                large = uses_large_moe_align(route_count)
                 common = dict(
-                    x=hidden_states,
-                    slots=topk_ids,
-                    topk_weights=topk_weights,
-                    codebook=codebook,
-                    gate_assignments=gate_assignments,
+                    hidden_states=hidden_states,
+                    gate_codebook=codebook.unsqueeze(0),
+                    gate_packed_assignments=gate_assignments,
                     gate_input_norm=gate_input_norm,
                     gate_output_norm=gate_output_norm,
-                    up_assignments=up_assignments,
+                    gate_in_features=hidden_size,
+                    up_codebook=codebook.unsqueeze(0),
+                    up_packed_assignments=up_assignments,
                     up_input_norm=up_input_norm,
                     up_output_norm=up_output_norm,
-                    down_assignments=down_assignments,
+                    up_in_features=hidden_size,
+                    down_codebook=codebook.unsqueeze(0),
+                    down_packed_assignments=down_assignments,
                     down_input_norm=down_input_norm,
                     down_output_norm=down_output_norm,
-                    model_type=model_type,
+                    down_in_features=intermediate_size,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
                     model_num_experts=model_experts,
-                    swiglu_limit=(
-                        args.swiglu_limit if args.activation_mode == "dsv4" else None
-                    ),
+                    group_size=group_size,
+                    assignment_bits=assignment_bits,
+                    assignment_layout="word_major",
+                    validate_route_ids=False,
+                    structural_down=True,
                     output=output,
                     middle_workspace=middle,
                     route_output_workspace=route_output,
+                    swiglu_limit=activation_identity["swiglu_limit"],
+                    gate_up_input_rounding=rounding,
+                    down_input_rounding=rounding,
+                    down_norm_placement=activation_identity["down_norm_placement"],
+                    gate_up_input_transform=(
+                        partial(act_quant_fp8_roundtrip, block=128, output=output)
+                        if dsv4 else None
+                    ),
+                    middle_transform=_round_down_input if dsv4 else None,
+                    align_routes=_align_routes,
+                    align_routes_adaptive=moe_align_block_size_adaptive if large else None,
+                    align_routes_adaptive_tail64=(
+                        moe_align_block_size_adaptive_tail64 if large else None
+                    ),
+                    caller_owned_alignment_storage=True,
+                    sum_routes=moe_sum_reduce_triton,
                 )
 
                 def triton_run():
-                    return routed_experts_nowag(
+                    return nowag_fused_moe(
                         **common,
                         gate_up_backend="triton",
                         down_backend="triton",
@@ -435,7 +464,7 @@ def main() -> None:
                     }
 
                     def auto_run():
-                        return routed_experts_nowag(**common)
+                        return nowag_fused_moe(**common)
 
                     try:
                         actual = auto_run().clone()
@@ -450,7 +479,7 @@ def main() -> None:
                 for name, plan in plans.items():
 
                     def exact_run(plan=plan):
-                        return routed_experts_nowag(
+                        return nowag_fused_moe(
                             **common,
                             gate_up_backend="cuda_exact_k48",
                             down_backend="cuda_exact_k48",
@@ -511,7 +540,7 @@ def main() -> None:
             "compute_capability": list(torch.cuda.get_device_capability(device)),
             "total_memory_bytes": properties.total_memory,
         },
-        "entry": "freetoken.moe.fused_nowag.routed_experts_nowag",
+        "entry": "freetoken.kernel.nowag.moe_ops.nowag_fused_moe",
         "routing_primitives": [
             "freetoken.kernel.triton.moe_align.moe_align_block_size",
             "freetoken.kernel.moe_sum_reduce_triton",
@@ -527,7 +556,7 @@ def main() -> None:
             "assignment_bits": assignment_bits,
             "assignment_layout": "word_major",
             "activation_mode": args.activation_mode,
-            "activation_math": asdict(activation_rule),
+            "activation_math": activation_identity,
         },
         "settings": {
             "seeds": args.seeds,
