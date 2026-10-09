@@ -34,6 +34,7 @@ DFLASH = os.environ.get("RP_DFLASH", "/data2/servebig-envs/dflash_models/models-
                         "snapshots/f181eece646affea2c38b2765f1aaa01a9734ccd")
 RESULTS = os.environ.get("RP_RESULTS", os.path.join(HERE, "_results"))
 STARTUP_TIMEOUT = float(os.environ.get("RP_STARTUP_TIMEOUT", "900"))
+CPUS = os.environ.get("RP_CPUS", "8-15,24-31")  # the cpuset the acceptance configuration assigns
 PORTS = range(31920, 31960, 2)  # the server also takes port + 1
 COMMON = ["--model-path", MODEL, "--moe-backend", "offload", "--moe-cache-size", "2048",
           "--attention-backend", "fi"]
@@ -112,7 +113,7 @@ class Server:
         if self.gpu:
             wait_gpu_free()
         env = dict(os.environ, PYTHONPATH=self.impl, CUDA_VISIBLE_DEVICES=GPU if self.gpu else "")
-        cmd = [PY, "-m", "freetoken", *self.args]
+        cmd = ["taskset", "-c", CPUS, PY, "-m", "freetoken", *self.args]
         self.log = open(self.log_path, "w")
         self.log.write("CMD: PYTHONPATH=%s %s\n" % (self.impl, " ".join(cmd)))
         self.log.flush()
