@@ -1,6 +1,6 @@
 """Pure-torch Gated DeltaNet reference (text-only, no cache).
 
-Correctness oracle for the kernel-backed GDN op (``gdn.Qwen3_5GatedDeltaNet``).
+Correctness oracle for the kernel-backed GDN op (``layers.gated_delta.GatedDeltaNet``).
 The recurrence and forward are transcribed from
 ``transformers.models.qwen3_5_moe.modeling_qwen3_5_moe`` (``torch_recurrent_gated_delta_rule``
 and ``Qwen3_5MoeGatedDeltaNet.forward`` no-cache path) and were validated against the

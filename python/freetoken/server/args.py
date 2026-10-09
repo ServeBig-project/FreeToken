@@ -150,6 +150,8 @@ def parse_args(
         if (
             "qwen3_5" in marker
             or "qwen3.5" in marker
+            or "qwen4_exp" in marker
+            or "qwen4exp" in marker
             or ("qwen3" in marker and "coder" in marker)
         ):
             return "qwen3_coder"
@@ -188,7 +190,7 @@ def parse_args(
             tag in marker for tag in ("v4", "deepseek_v4", "v3.2", "v32")
         ):
             return "deepseekv32"
-        if "qwen3" in marker or "qwen3.5" in marker or "qwen3_5" in marker:
+        if "qwen3" in marker or "qwen4_exp" in marker or "qwen4exp" in marker:
             return "qwen3"
         if "glm" in marker:
             return "glm"
@@ -625,6 +627,20 @@ def parse_args(
             "The MoE backend to use. 'auto' resolves a MoE model to the offload family "
             "(offload, or hybrid when a `ft bench bw` profile recommends it); resident "
             "'fused' experts must be requested explicitly."
+        ),
+    )
+
+    from freetoken.quant.dense import DENSE_OPTIONS
+
+    parser.add_argument(
+        "--dense-quant",
+        dest="dense_quantization",
+        default=ServerArgs.dense_quantization,
+        choices=DENSE_OPTIONS,
+        help=(
+            "Dense (non-expert) projection precision. auto follows the checkpoint (an FTW's "
+            "recorded precision, else the source); bf16 keeps BF16; fp8 stores FP8 E4M3 with a "
+            "per-output-row scale and runs W8A16. Independent of the expert format."
         ),
     )
 

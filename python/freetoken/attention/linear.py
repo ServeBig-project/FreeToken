@@ -36,6 +36,9 @@ class FLAPathMetadata:
     track_conv_src: torch.Tensor | None = None   # [nt, kernel-1] int64 conv-input token positions
     track_start_dst: torch.Tensor | None = None  # [ns] int64 snapshot slots
     track_start_src: torch.Tensor | None = None  # [ns] int64 live slots before prefill
+    # [nt] int64 forward-local row of each track boundary: states with their own left
+    # context (qwen4_exp PLE) derive their snapshot windows from it.
+    track_boundary_row: torch.Tensor | None = None
 
     # --- ReplaySSM: [n] int32 record row per request (-1 = padding); None runs the
     # recurrent-state kernels. Positions come from the batch and checkpoint positions from the
@@ -110,9 +113,7 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
         )
         fresh = [gdn_slot(r) for r in reqs if r.cached_len == 0]
         fresh_host = torch.tensor(fresh, dtype=torch.int64, **pin) if fresh else None
-        track_dst, track_h_row, track_conv_src, track_start_dst, track_start_src = _build_track_metadata(
-            reqs, cu_host, device, pin
-        )
+        track = _build_track_metadata(reqs, cu_host, device, pin)
         return FLAPathMetadata(
             cu_seqlens=cu_host.to(device, non_blocking=True),
             cache_indices=idx_host.to(device, non_blocking=True),
@@ -120,11 +121,7 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
             fresh_state_indices=(
                 fresh_host.to(device, non_blocking=True) if fresh_host is not None else None
             ),
-            track_dst=track_dst,
-            track_h_row=track_h_row,
-            track_conv_src=track_conv_src,
-            track_start_dst=track_start_dst,
-            track_start_src=track_start_src,
+            **track,
         )
 
     if batch.is_decode_only:
@@ -190,15 +187,17 @@ def _build_track_metadata(reqs, cu_host, device, pin):
     start (``h``) and the initial state at the start, so a capture takes the deepest of those
     at or before its target and records where it landed (``pos``).
     """
+    names = ("track_dst", "track_h_row", "track_conv_src", "track_start_dst",
+             "track_start_src", "track_boundary_row")
     if not any(c.slot is not None for r in reqs for c in r.state_captures):
-        return None, None, None, None, None
+        return dict.fromkeys(names)
     from freetoken.core import get_global_ctx
     from freetoken.kernel.fla.chunk import CHUNK_SIZE
     from freetoken.kernel.fla.index import prepare_chunk_offsets
 
     km1 = get_global_ctx().linear_state_pool.conv_states.shape[-1]  # conv_kernel_dim - 1
     boh = prepare_chunk_offsets(cu_host, CHUNK_SIZE).tolist()
-    dst, h_row, conv_src = [], [], []
+    dst, h_row, conv_src, boundary = [], [], [], []
     start_dst, start_src = [], []
     for i, r in enumerate(reqs):
         for capture in r.state_captures:
@@ -216,8 +215,9 @@ def _build_track_metadata(reqs, cu_host, device, pin):
                 dst.append(capture.slot)
                 h_row.append(boh[i] + c)
                 conv_src.append([off + c * CHUNK_SIZE - km1 + j for j in range(km1)])
+                boundary.append(off + c * CHUNK_SIZE)
     to = lambda xs: torch.tensor(xs, dtype=torch.int64, **pin).to(device, non_blocking=True) if xs else None
-    return tuple(to(xs) for xs in (dst, h_row, conv_src, start_dst, start_src))
+    return dict(zip(names, (to(xs) for xs in (dst, h_row, conv_src, start_dst, start_src, boundary))))
 
 
 __all__ = ["FLAMetadata", "FLAPathMetadata", "build_fla_metadata"]

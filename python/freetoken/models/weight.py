@@ -12,6 +12,7 @@ module; otherwise the defaults below (built purely from the parsed config) apply
 from __future__ import annotations
 
 import glob
+import inspect
 import json
 import mmap
 import os
@@ -225,6 +226,7 @@ def load_weight(
     device: torch.device,
     *,
     include_moe_experts: bool = True,
+    dense_precision: str = "bf16",
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     # FTW checkpoint: dense weights are stored post-iter_weights, so we replay them
     # model-agnostically instead of re-running the per-model reader. Which tensors exist is
@@ -248,11 +250,19 @@ def load_weight(
 
     _config, spec = _spec_for_model_path(model_path)
     iter_weights = _load_attr(spec.module, spec.iter_weights)
+    # Only readers built on the public dense plan take the precision; the others keep the
+    # precision their checkpoint declares, so an explicit choice has nothing to act on.
+    extra = {}
+    if "dense_precision" in inspect.signature(iter_weights).parameters:
+        extra["dense_precision"] = dense_precision
+    elif dense_precision != "bf16":
+        raise ValueError(f"{spec.module} does not support --dense-quant {dense_precision}")
     yield from iter_weights(
         model_path,
         device,
         include_moe_experts=include_moe_experts,
         include_non_moe=True,
+        **extra,
     )
 
 

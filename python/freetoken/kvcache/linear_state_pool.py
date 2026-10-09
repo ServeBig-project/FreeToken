@@ -5,7 +5,7 @@ import math
 import torch
 from freetoken.distributed import get_tp_info
 from freetoken.env import ENV
-from freetoken.models.config import LinearGatedDeltaGroupConfig
+from freetoken.models.config import LinearGatedDeltaGroupConfig, SlotStateSpec
 from freetoken.utils import div_even
 
 _SSM_DTYPES = {
@@ -46,6 +46,10 @@ class LinearStatePool:
     Hybrid caching allocates live states and snapshots from one free list. Naive
     caching reserves ``fixed_slots`` entries for table-indexed live states; only
     entries beyond those and the padding sink may be allocated as scratch.
+
+    A model declares extra per-request tensors on the same slots through
+    ``ModelConfig.slot_states`` (``SlotStateSpec``); they clear, copy, snapshot and rebuild
+    with the GDN state and are read back through ``slot_state(name, layer_id)``.
     """
 
     def __init__(
@@ -57,6 +61,7 @@ class LinearStatePool:
         tp_size: int | None = None,
         fixed_slots: int = 0,
         records: tuple[int, int, int, int] | None = None,
+        slot_states: tuple[SlotStateSpec, ...] = (),
     ) -> None:
         if tp_size is None:
             tp_size = get_tp_info().size
@@ -82,6 +87,11 @@ class LinearStatePool:
             device=device,
         )
         self._local_index = {layer_id: i for i, layer_id in enumerate(group.layer_ids)}
+        self._slot_specs = tuple(slot_states)
+        self._state_layer_index = {
+            spec.name: {lid: i for i, lid in enumerate(spec.layer_ids)} for spec in slot_states
+        }
+        self.slot_states = self._alloc_slot_states(num_slots)
 
         # Naive live slots belong to TableManager, so they must never enter this allocator.
         self.padding_slot = fixed_slots
@@ -92,6 +102,22 @@ class LinearStatePool:
             from .gdn_replay import GdnReplay
 
             self.replay = GdnReplay(self, _replay_shapes(group, tp_size, dtype, records), device)
+
+    def _alloc_slot_states(self, num_slots: int) -> dict[str, torch.Tensor]:
+        return {
+            spec.name: torch.full(
+                (max(1, len(spec.layer_ids)), num_slots, *spec.shape),
+                spec.fill_value,
+                dtype=spec.dtype if spec.dtype is not None else self._conv_dtype,
+                device=self._device,
+            )
+            for spec in self._slot_specs
+        }
+
+    def slot_state(self, name: str, layer_id: int | None = None) -> torch.Tensor:
+        """One declared sibling state, ``[num_slots, *shape]``; ``layer_id`` picks its layer row."""
+        layers = self._state_layer_index[name]
+        return self.slot_states[name][0 if layer_id is None else layers[layer_id]]
 
     def capture_position(self, start: int, target: int) -> int:
         """Deepest position at or before ``target`` whose state a prefill extend starting at
@@ -184,6 +210,7 @@ class LinearStatePool:
         device = self._device
         self.conv_states = None
         self.recurrent_states = None
+        self.slot_states = {}
         if device.type == "cuda":
             torch.cuda.synchronize(device)
             torch.cuda.empty_cache()
@@ -195,6 +222,7 @@ class LinearStatePool:
             dtype=rec_dtype,
             device=device,
         )
+        self.slot_states = self._alloc_slot_states(num_slots)
         self._num_slots = num_slots
         self._free_slots = list(range(self.padding_slot + 1, num_slots))
 
@@ -212,16 +240,23 @@ class LinearStatePool:
             slots = torch.as_tensor(slots, dtype=torch.long, device=self._device)
         self.conv_states[:, slots] = 0
         self.recurrent_states[:, slots] = 0
+        for spec in self._slot_specs:
+            self.slot_states[spec.name][:, slots] = spec.fill_value
 
     def copy_from(self, src: int, dst: int) -> None:
         """Copy a whole-sequence snapshot (conv + recurrent, all layers) from slot ``src`` to
         ``dst``. Used for COW-on-restore (donated snapshot -> fresh live slot)."""
         self.conv_states[:, dst].copy_(self.conv_states[:, src])
         self.recurrent_states[:, dst].copy_(self.recurrent_states[:, src])
+        for t in self.slot_states.values():
+            t[:, dst].copy_(t[:, src])
 
     def state_views(self) -> list[torch.Tensor]:
-        """Per-layer ``[slots, ...]`` views of the conv and recurrent state."""
-        return [*self.conv_states.unbind(0), *self.recurrent_states.unbind(0)]
+        """Per-layer ``[slots, ...]`` views of the conv, recurrent and declared slot states."""
+        views = [*self.conv_states.unbind(0), *self.recurrent_states.unbind(0)]
+        for t in self.slot_states.values():
+            views.extend(t.unbind(0))
+        return views
 
     def is_linear_layer(self, layer_id: int) -> bool:
         return layer_id in self._local_index
@@ -239,6 +274,8 @@ class LinearStatePool:
         """Zero a slot across all linear layers (new request takes this table_idx)."""
         self.conv_states[:, table_idx].zero_()
         self.recurrent_states[:, table_idx].zero_()
+        for spec in self._slot_specs:
+            self.slot_states[spec.name][:, table_idx] = spec.fill_value
 
     @property
     def num_linear_layers(self) -> int:
@@ -258,6 +295,8 @@ class LinearStatePool:
             self.conv_states[:, 0].numel() * self.conv_states.element_size()
             + self.recurrent_states[:, 0].numel() * self.recurrent_states.element_size()
         )
+        for t in self.slot_states.values():
+            per += t[:, 0].numel() * t.element_size()
         return int(per)
 
 
@@ -265,15 +304,21 @@ def linear_state_bytes_per_req(
     group: LinearGatedDeltaGroupConfig,
     tp_size: int,
     dtype: torch.dtype,
+    slot_states: tuple[SlotStateSpec, ...] = (),
 ) -> int:
-    """Linear-state bytes for one request across all linear layers (TP-local)."""
+    """Linear-state bytes for one request across all linear layers (TP-local), plus the
+    declared slot states."""
     n_layers, local_conv_dim, local_v_heads, _ = _linear_local_dims(group, tp_size)
 
     conv_elems = local_conv_dim * (group.conv_kernel_dim - 1)
     rec_elems = local_v_heads * group.key_head_dim * group.value_head_dim
     conv_bytes = conv_elems * dtype.itemsize  # conv state in model dtype
     rec_bytes = rec_elems * ssm_state_dtype().itemsize  # recurrent state (default fp32)
-    return int(n_layers * (conv_bytes + rec_bytes))
+    total = n_layers * (conv_bytes + rec_bytes)
+    for spec in slot_states:
+        item = (spec.dtype if spec.dtype is not None else dtype).itemsize
+        total += max(1, len(spec.layer_ids)) * math.prod(spec.shape) * item
+    return int(total)
 
 
 __all__ = ["LinearStatePool", "linear_state_bytes_per_req"]
@@ -287,8 +332,13 @@ def state_pool_bytes(config, num_slots: int | None = None) -> int:
     if linear_group is None:
         return 0
     slots = num_slots if num_slots is not None else _linear_pool_num_slots(config)
-    per_slot = linear_state_bytes_per_req(linear_group, config.tp_info.size, config.dtype)
-    return per_slot * slots + replay_buffer_bytes(config)
+    return _bytes_per_req(config) * slots + replay_buffer_bytes(config)
+
+
+def _bytes_per_req(config) -> int:
+    return linear_state_bytes_per_req(
+        config.model_config.linear_attention_group(), config.tp_info.size, config.dtype,
+        getattr(config.model_config, "slot_states", ()))  # duck-typed test configs omit it
 
 
 def replay_records(config) -> tuple[int, int, int, int] | None:
@@ -325,17 +375,14 @@ def _default_pool_slots(config) -> int:
 
 def gdn_state_budget(config) -> int:
     """Startup GDN state bytes: the explicit budget, else the replay-off pool's bytes."""
-    per_slot = linear_state_bytes_per_req(
-        config.model_config.linear_attention_group(), config.tp_info.size, config.dtype)
-    return config.gdn_state_budget_bytes or _default_pool_slots(config) * per_slot
+    return config.gdn_state_budget_bytes or _default_pool_slots(config) * _bytes_per_req(config)
 
 
 def _linear_pool_num_slots(config) -> int:
     """Full-state slots that fit the GDN state budget next to the fixed ReplaySSM buffers."""
     if config.gdn_state_budget_bytes is None and replay_records(config) is None:
         return _default_pool_slots(config)
-    per_slot = linear_state_bytes_per_req(
-        config.model_config.linear_attention_group(), config.tp_info.size, config.dtype)
+    per_slot = _bytes_per_req(config)
     budget = gdn_state_budget(config)
     fixed = replay_buffer_bytes(config)
     slots = (budget - fixed) // per_slot

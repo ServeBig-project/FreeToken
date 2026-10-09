@@ -28,7 +28,8 @@ def spec_kv_bytes_per_token(spec, config) -> int:
         * config.dtype.itemsize
         * spec.num_layers
     )
-    return per_token + spec.index_head_dim * spec.num_index_layers * 2
+    # QSA (index_ratio > 1) stores one index key per token group.
+    return per_token + spec.index_head_dim * spec.num_index_layers * 2 // spec.index_ratio
 
 
 class BaseKVCachePool(ABC):

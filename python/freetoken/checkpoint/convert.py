@@ -168,6 +168,7 @@ def convert_checkpoint(
     moe_backend: str = "offload",
     shard_limit: int = DEFAULT_SHARD_LIMIT,
     device: str | None = None,
+    dense_quantization: str = "auto",
 ) -> dict:
     """Write ``model_path`` as an FTW checkpoint at ``out_dir``. Returns the index dict.
 
@@ -177,6 +178,7 @@ def convert_checkpoint(
     from freetoken.engine.config import EngineConfig
     from freetoken.models.weight import load_weight
     from freetoken.moe.expert_banks import load_expert_banks
+    from freetoken.quant.dense import FTW_META_KEY, resolve_dense_precision
     from .ftw import is_ftw_checkpoint
 
     if is_ftw_checkpoint(model_path):
@@ -197,6 +199,7 @@ def convert_checkpoint(
     cfg = EngineConfig(model_path=model_path, tp_info=DistributedInfo(tp.rank, tp.size),
                        dtype=dtype, moe_backend=moe_backend)
     mc = cfg.model_config
+    dense_precision = resolve_dense_precision(dense_quantization, model_path)
     offload = moe_backend == "offload" and getattr(mc, "is_moe", False)
     include_moe_experts = not offload
 
@@ -209,7 +212,8 @@ def convert_checkpoint(
     _progress("dense", 0, 0)  # phase start; per-tensor cumulative bytes follow (total unknown)
     dense_bytes = 0
     for name, tensor in count_bar(load_weight(model_path, torch.device("cpu"),
-                                              include_moe_experts=include_moe_experts),
+                                              include_moe_experts=include_moe_experts,
+                                              dense_precision=dense_precision),
                                   "Converting dense weights"):
         writer.add_tensor(name, tensor, kind="weight")
         n_weight += 1
@@ -291,6 +295,8 @@ def convert_checkpoint(
         # read back at load (ftw.load_ftw_banks). dtype/moe_backend were dropped: each
         # tensor already carries its own dtype, and nothing reads a model-level backend.
         "quant_format": quant_format,
+        # The dense precision actually written (freetoken.quant.dense); auto reads it back.
+        FTW_META_KEY: dense_precision,
         # The reader takes num_layers from the model config (copied into this
         # checkpoint); recording it here too gives load_ftw_banks a cross-check that
         # the banks match the config they ship with. None for non-offload checkpoints.

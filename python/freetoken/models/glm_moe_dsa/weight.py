@@ -32,21 +32,13 @@ from freetoken.models.glm4_moe.weight import (
     load_nvfp4_expert_sources_parallel,
 )
 from freetoken.models.loader import drop_page_cache
+from freetoken.quant.dense import quant_fp8_per_row
 from freetoken.utils import cached_load_hf_config, download_hf_weight
 from tqdm import tqdm
 
 from .config import parse_config
 
 # fp8-e4m3 dynamic range for the per-row W8A16 quantization of the big MLA projections.
-_FP8_MAX = 448.0
-
-
-def _quant_fp8_per_row(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-output-row fp8-e4m3 quantization: ``w ~= weight_fp8 * scale[:, None]``."""
-    wf = w.float()
-    scale = (wf.abs().amax(dim=1) / _FP8_MAX).clamp(min=1e-12)
-    q = (wf / scale[:, None]).clamp(-_FP8_MAX, _FP8_MAX).to(torch.float8_e4m3fn)
-    return q, scale.to(torch.float32)
 
 
 class _ShardReader:
@@ -122,7 +114,7 @@ def iter_weights(
             for proj in ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj", "o_proj"):
                 w = reader.get(f"{a}.{proj}.weight")
                 if proj in fp8_projs:
-                    q, scale = _quant_fp8_per_row(w)
+                    q, scale = quant_fp8_per_row(w)
                     yield f"{a}.{proj}.weight", q
                     yield f"{a}.{proj}.weight_scale", scale
                 else:
@@ -148,7 +140,7 @@ def iter_weights(
             def _mlp_weight(key: str):
                 w = reader.get(f"{key}.weight")
                 if mlp_fp8:
-                    q, scale = _quant_fp8_per_row(w)
+                    q, scale = quant_fp8_per_row(w)
                     yield f"{key}.weight", q
                     yield f"{key}.weight_scale", scale
                 else:
@@ -170,7 +162,7 @@ def iter_weights(
         yield "model.norm.weight", reader.get("model.norm.weight")
         head = reader.get("lm_head.weight")
         if head_fp8 and not config.tie_word_embeddings:
-            q, scale = _quant_fp8_per_row(head)
+            q, scale = quant_fp8_per_row(head)
             yield "lm_head.weight", q
             yield "lm_head.weight_scale", scale
         else:

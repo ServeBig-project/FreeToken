@@ -132,6 +132,8 @@ def _resolve_auto_attention_backend(
         candidates.append(("dsa", True))
     if AttnType.BSA in required:
         candidates.append(("m3_sparse", True))
+    if AttnType.QSA in required:
+        candidates.append(("qsa_sparse", True))
     if AttnType.SWA in required:
         candidates.append(("triton", True))
     if AttnType.FULL in required:
@@ -180,7 +182,10 @@ def _validate_attention_backend_choice(config, override, required: frozenset[Att
         if missing:
             valid = [
                 name
-                for name in ("fa", "fi", "trtllm", "triton", "dsa", "dsv4_sparse", "m3_sparse")
+                for name in (
+                    "fa", "fi", "trtllm", "triton", "dsa", "dsv4_sparse", "m3_sparse",
+                    "qsa_sparse",
+                )
                 if required <= attention_backend_info(name).supported_types
             ]
             missing_names = "/".join(sorted(t.value for t in missing))
@@ -375,6 +380,10 @@ class Engine:
         self._post_weights_free = post_weights_free
         self.moe_offload_cache = None
         self.cpu_moe_executor = None
+        # Host-resident tables (qwen4_exp's pinned PLE table): after the weights so a load
+        # failure is not masked, before the expert banks so their host-memory planning sees it.
+        if hasattr(self.model, "load_host_tables"):
+            self.model.load_host_tables(config)
         if is_offload_moe_backend(config.moe_backend):
             self._init_offload_moe_cache(config)
         if hasattr(self.model, "prepare_for_runtime"):
@@ -434,6 +443,7 @@ class Engine:
                 device=self.device,
                 tp_size=config.tp_info.size,
                 records=replay_records(config),
+                slot_states=config.model_config.slot_states,
             )
             self.ctx.linear_state_pool = self.linear_state_pool
         else:
@@ -595,6 +605,7 @@ class Engine:
                 config.model_path,
                 self.device,
                 include_moe_experts=not is_offload_moe_backend(config.moe_backend),
+                dense_precision=config.model_config.dense_precision,
             ),
             device=self.device,
         )
@@ -1767,8 +1778,12 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
     # comma part must serve every required type, with packages/arch available.
     required_attn_types = _required_attn_types(model_config)
     _dtype = getattr(config, "dtype", None)  # duck-typed test configs omit it
-    if AttnType.BSA in required_attn_types and _dtype is not None and _dtype.itemsize != 2:
-        # Reject at config time: the BSA pool's own assert only fires after the
+    if (
+        required_attn_types & {AttnType.BSA, AttnType.QSA}
+        and _dtype is not None
+        and _dtype.itemsize != 2
+    ):
+        # Reject at config time: the BSA/QSA pool's own assert only fires after the
         # model is resident (and not at all under `python -O`).
         raise ValueError(
             f"--dtype {config.dtype}: block-sparse attention serves 16-bit "
@@ -2058,6 +2073,14 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
     if is_moe:
         object.__setattr__(model_config, "moe_backend", config.moe_backend)
     object.__setattr__(model_config, "nvfp4_backend", config.nvfp4_backend)
+    from freetoken.quant.dense import resolve_dense_precision
+
+    object.__setattr__(
+        model_config, "dense_precision",
+        resolve_dense_precision(
+            getattr(config, "dense_quantization", "auto"), getattr(config, "model_path", None)
+        ),
+    )
 
     if config.speculative_num_steps == 0:
         override("speculative_draft_model_path", None)
@@ -2072,6 +2095,11 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
         config.__post_init__()  # re-check the SD constraints against the resolved components
         if shortfall := _sd_state_shortfall(config):
             raise ValueError(shortfall)
+        if AttnType.QSA in required_attn_types:
+            raise ValueError(
+                "speculative decoding is not implemented for QSA sparse attention "
+                f"({model_config.model_type}); pass --speculative-num-steps 0"
+            )
 
     if config.speculative_num_steps and config.cuda_graph_max_bs != 0 and config.cuda_graph_bs != []:
         # Never fall back silently: eager SD is far slower and would mislead comparisons.

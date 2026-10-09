@@ -260,6 +260,55 @@ def read_file_into(buf: memoryview | mmap.mmap, path: str, *, workers: int = 8,
     return size
 
 
+def _preadv_all(fd: int, dst: memoryview, offset: int, need: int) -> None:
+    """preadv into ``dst`` until ``need`` bytes landed; O_DIRECT may return a short count."""
+    done = 0
+    while done < need:
+        if done % _BLK:  # a continuation read has to stay block-aligned on both sides
+            raise OSError(f"unaligned short O_DIRECT read: {done} of {need} bytes at {offset}")
+        got = os.preadv(fd, [dst[done:]], offset + done)
+        if got <= 0:
+            raise OSError(f"short O_DIRECT read: {done} of {need} bytes at {offset}")
+        done += got
+
+
+def read_range_into(buf: memoryview | mmap.mmap, path: str, *, file_offset: int, nbytes: int,
+                    dest_offset: int = 0, workers: int = 8, chunk: int = _DEFAULT_CHUNK) -> int:
+    """Chunked multi-threaded O_DIRECT read of ``path[file_offset : file_offset + nbytes]`` into
+    ``buf`` at ``dest_offset`` (one tensor inside a safetensors shard). O_DIRECT needs the file
+    offset and the destination address block-aligned together; chunks that line up DMA straight
+    into ``buf``, the rest go through a page-aligned bounce (source window rounded out to whole
+    blocks), which also covers the unaligned head and tail. Returns ``nbytes``."""
+    mv = (buf if isinstance(buf, memoryview) else memoryview(buf)).cast("B")
+    if dest_offset + nbytes > len(mv):
+        raise ValueError(f"destination holds {len(mv)} bytes, need {dest_offset + nbytes}")
+    base = ctypes.addressof(ctypes.c_char.from_buffer(mv))
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+    scratch = threading.local()
+
+    def rd(i: int) -> None:
+        n = min(chunk, nbytes - i)
+        src, dst = file_offset + i, dest_offset + i
+        if src % _BLK == 0 and (base + dst) % _BLK == 0 and n % _BLK == 0:
+            _preadv_all(fd, mv[dst:dst + n], src, n)
+            return
+        head = src % _BLK
+        span = ((head + n + _BLK - 1) // _BLK) * _BLK
+        bounce = getattr(scratch, "buf", None)
+        if bounce is None or len(bounce) < span:
+            bounce = scratch.buf = mmap.mmap(-1, span)  # anonymous mmaps are page-aligned
+        bmv = memoryview(bounce)
+        _preadv_all(fd, bmv[:span], src - head, head + n)
+        mv[dst:dst + n] = bmv[head:head + n]
+
+    try:
+        with ThreadPoolExecutor(workers) as ex:
+            list(ex.map(rd, range(0, nbytes, chunk)))
+    finally:
+        os.close(fd)
+    return nbytes
+
+
 __all__ = [
     "HostBank",
     "HostResidency",
@@ -269,4 +318,5 @@ __all__ = [
     "alloc_layer_banks",
     "pin_banks",
     "read_file_into",
+    "read_range_into",
 ]

@@ -218,7 +218,7 @@ def parse_config(hf_config: Any) -> ModelConfig:
         key_head_dim=text.linear_key_head_dim,
         value_head_dim=text.linear_value_head_dim,
         conv_kernel_dim=text.linear_conv_kernel_dim,
-        output_gate=True,
+        output_gate="silu",
     )
     # Order groups by their first layer id for deterministic iteration.
     groups = tuple(
