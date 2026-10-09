@@ -255,8 +255,6 @@ def server_command(
         str(args.expert.resolve()),
         "--batching-policy",
         mode,
-        "--speculative-num-steps",  # these A/B arms compare AR schedulers
-        "0",
     ]
     if config["num_tokens"] is not None:
         command.extend(("--num-tokens", str(config["num_tokens"])))

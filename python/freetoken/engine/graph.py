@@ -89,6 +89,7 @@ def _determine_cuda_graph_bs(
     cuda_graph_bs: List[int] | None,
     cuda_graph_max_bs: int | None,
     free_memory: int,
+    max_running_req: int | None,
 ) -> tuple[List[int], int]:
     """Target-decode graph sizes and the configured size limit they are drawn from."""
     if cuda_graph_bs is not None:
@@ -104,7 +105,10 @@ def _determine_cuda_graph_bs(
     if cuda_graph_max_bs < 1:
         return [], 0
 
-    candidates = [1, 2, 4] + list(range(8, cuda_graph_max_bs + 1, 8))
+    # Every small running size gets a graph: a layered decode stage replays only an exact
+    # size, and tail batches between 1, 2, 4 and 8 are common there. Above 8, every 8th.
+    dense = min(max_running_req or 8, 8)
+    candidates = sorted({*range(1, dense + 1), *range(8, cuda_graph_max_bs + 1, 8)})
     return [bs for bs in candidates if bs <= cuda_graph_max_bs], cuda_graph_max_bs
 
 
@@ -129,11 +133,13 @@ class GraphRunner:
         layered_execution_adapter: LayeredExecutionAdapter | None = None,
         speculative_config=None,
         graph_bs_limit: int | None = None,
+        max_running_req: int | None = None,
     ) -> None:
         cuda_graph_bs, limit = _determine_cuda_graph_bs(
             cuda_graph_bs=cuda_graph_bs,
             cuda_graph_max_bs=cuda_graph_max_bs,
             free_memory=free_memory,
+            max_running_req=max_running_req,
         )
         # A rebuild passes the startup limit; the sparse set alone cannot recover it.
         self.graph_bs_limit = graph_bs_limit if graph_bs_limit is not None else limit
