@@ -13,7 +13,6 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
-import pytest
 import torch
 from safetensors import safe_open
 
@@ -122,11 +121,12 @@ def layer_numbers(side, pos):
 
 # ------------------------------------------------------------------ candidate (contract §9)
 
-def expert_math(F, family):
-    """ExpertMath for a math family (field names from the public ExpertMath signature, §5/§9)."""
-    m = FAMILIES[family][3]
+def expert_math(F, m):
+    """ExpertMath for a reference math dict (contract §5/§9 field names and strings)."""
     if m["family"] == "silu":
         return F.ExpertMath(activation="silu")
+    if m["family"] == "gelu_tanh":
+        return F.ExpertMath(activation="gelu_tanh")
     if m["family"] == "gptoss":
         return F.ExpertMath(activation="swigluoai", activation_alpha=m["alpha"],
                             activation_limit=m["limit"])
@@ -135,7 +135,14 @@ def expert_math(F, family):
                             router_weight_on_down_input=True,
                             gate_up_input_rounding=F.E4M3_GROUP128_UE8M0,
                             down_input_rounding=F.E4M3_GROUP128_UE8M0)
-    pytest.skip(f"contract publishes no ExpertMath activation string for {m['family']}")
+    raise ValueError(m["family"])
+
+
+def with_config_limit(m, config):
+    """The clamp limit comes from the base config's swiglu_limit when it has one (§9);
+    component cases on a base without it keep the published family value."""
+    limit = config.get("text_config", config).get("swiglu_limit")
+    return dict(m, limit=float(limit)) if "limit" in m and limit else m
 
 
 _LOADED = {}
@@ -154,17 +161,20 @@ def loaded_banks(base, side):
     return _LOADED[base, side]
 
 
+_TP_SET = []
+
+
 def _load_banks(base, side):
-    from freetoken.distributed.info import DistributedInfo, set_tp_info, try_get_tp_info
+    from freetoken.distributed import set_tp_info
+    from freetoken.distributed.info import DistributedInfo
     from freetoken.engine.config import EngineConfig
     from freetoken.moe.expert_banks import load_expert_banks
-    # The §9 recipe alone raises "TP info has not been set" in load_expert_banks; set_tp_info
-    # is the public setter next to DistributedInfo. Reported to the coordinator.
-    if try_get_tp_info() is None:
-        set_tp_info(0, 1)
+    if not _TP_SET:                       # §9: once per process, before loading
+        set_tp_info(rank=0, size=1)
+        _TP_SET.append(True)
     cfg = EngineConfig(model_path=str(base), nowag_expert_path=str(side),
                        tp_info=DistributedInfo(0, 1), dtype=torch.bfloat16)
-    return load_expert_banks(str(base), cfg.model_config, device=torch.device("cpu"),
+    return load_expert_banks(str(base), cfg.model_config, device=torch.device("cuda", 0),
                              dtype=torch.bfloat16)
 
 
@@ -176,18 +186,18 @@ def to_device(value, device):
     return value
 
 
-def candidate(name, layer_pos, impl):
-    """Bind the candidate through its public entry; impl "cpu" -> backend cpu on CPU,
-    "cuda" -> backend offload on cuda:0."""
+def candidate(name, layer_pos):
+    """Bind the candidate through its public entry on cuda:0 with backend "offload"
+    (§9: run() computes on CUDA tensors; CPU expert compute is accepted via the service)."""
     import freetoken.moe.expert_format as F
     geom, mathf, d, kind, layout, base, src = CASES[name]
     base = need_path(base, f"{name} base")
     side = sidecar_dir(name)
-    math = expert_math(F, mathf)
-    device = torch.device("cpu") if impl == "cpu" else torch.device("cuda", 0)
-    backend = "cpu" if impl == "cpu" else "offload"
+    device, backend = torch.device("cuda", 0), "offload"
     hidden, inter, _, _ = FAMILIES[geom]
     config = json.loads((base / "config.json").read_text())
+    ref_math = with_config_limit(FAMILIES[mathf][3], config)
+    math = expert_math(F, ref_math)
     first_dense = config.get("text_config", config).get("first_k_dense_replace", 0)
     layer = layer_numbers(side, layer_pos)
     banks = loaded_banks(str(base), str(side))
@@ -195,8 +205,10 @@ def candidate(name, layer_pos, impl):
     layer_banks = {k: v[layer - first_dense].to(device).contiguous() for k, v in banks.sources.items()}
     method = F.bind_expert_method(math, F.ExpertLayout("nowag", hidden, inter, experts),
                                   banks.format_state, device=device, backend=backend)
-    return Bound(name, method, layer_banks, to_device(banks.shared, device), list(range(experts)),
-                 layer, device, file_weights(name, side, layer))
+    bound = Bound(name, method, layer_banks, to_device(banks.shared, device), list(range(experts)),
+                  layer, device, file_weights(name, side, layer))
+    bound.math = ref_math
+    return bound
 
 
 # ------------------------------------------------------------------ reference implementation

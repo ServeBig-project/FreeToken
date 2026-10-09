@@ -1,8 +1,9 @@
 """Public call contract of bind_expert_method(...).run / .workspace_spec (contract §5, §2.2).
 
 impl "reference" exercises every test body against the independent reference (always runs);
-"cpu"/"cuda" bind the candidate (see access.candidate; CUDA additionally needs NOWAG_GPU_OK=1
-and CUDA_VISIBLE_DEVICES set to the approved GPU).
+"cuda" binds the candidate on cuda:0 (needs NOWAG_GPU_OK=1 and CUDA_VISIBLE_DEVICES set to the
+approved GPU). There is no CPU row: contract §9 puts CPU expert compute under the service
+tests (--moe-backend cpu/hybrid, --moe-cpu-layers); without a GPU these rows are "not run".
 """
 
 import sys
@@ -16,7 +17,7 @@ import access as A  # noqa: E402
 import tolerances as TOL  # noqa: E402
 from cases import need_gpu  # noqa: E402
 
-IMPLS = ["reference", "cpu", "cuda"]
+IMPLS = ["reference", "cuda"]
 NUMERIC = ["qwen36-d6-real", "dsv4-d6-real", "qwen36-d4-random", "qwen36-d6-wordmajor",
            "gptoss-d6-random", "comp-dsv4math-qwen36", "comp-swigluoai-qwen36",
            "comp-gelutanh-qwen36"]
@@ -31,9 +32,8 @@ def bind(impl, name, layer_pos="first"):
         if impl == "reference":
             _BOUND[key] = A.reference(name, layer_pos)
         else:
-            if impl == "cuda":
-                need_gpu()
-            _BOUND[key] = A.candidate(name, layer_pos, impl)
+            need_gpu()
+            _BOUND[key] = A.candidate(name, layer_pos)
     return _BOUND[key]
 
 
@@ -244,24 +244,21 @@ def test_out_aliasing_x_is_correct_or_rejected_before_running(impl, name):
 
 UNSUPPORTED = {
     "route_on_gate_up_input": dict(activation="silu", router_weight_on_input=True),
-    "erf_gelu": dict(activation="gelu"),
     "unknown_rounding": dict(activation="silu", down_input_rounding="int8_per_tensor"),
 }
 
 
-@pytest.mark.parametrize("impl", ["cpu", "cuda"])
 @pytest.mark.parametrize("variant", sorted(UNSUPPORTED))
-def test_unsupported_math_rejected_at_bind(impl, variant):
+def test_unsupported_math_rejected_at_bind(variant):
     """Contract §9: NoWAG does not support these; refuse at bind, before any run."""
-    if impl == "cuda":
-        need_gpu()
+    need_gpu()
     import freetoken.moe.expert_format as F
-    b = bind(impl, "qwen36-d6-real")
+    b = bind("cuda", "qwen36-d6-real")
     banks = A.loaded_banks(str(b.base), str(b.side))
     with pytest.raises(Exception):
         F.bind_expert_method(F.ExpertMath(**UNSUPPORTED[variant]),
                              F.ExpertLayout("nowag", b.hidden, b.inter, len(b.bank_experts)),
-                             banks.format_state, device=b.device, backend=impl if impl == "cpu" else "offload")
+                             banks.format_state, device=b.device, backend="offload")
 
 
 # ------------------------------------------------------------------ CUDA graph replay

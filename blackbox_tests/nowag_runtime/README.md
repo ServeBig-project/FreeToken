@@ -7,7 +7,7 @@ artifacts. No production code, design notes, diffs or internal tests were read.
 | File | Group (contract §7) | Needs |
 | --- | --- | --- |
 | `test_reference.py` | independent reference self-checks, frozen bounds | CPU |
-| `test_bind_contract.py` | CPU format/math + `bind_expert_method` call contract; GPU op + graph replay | CPU; `cuda` rows need GPU |
+| `test_bind_contract.py` | `bind_expert_method` call contract, format/math, GPU op + graph replay | reference rows CPU; candidate (`cuda`) rows need GPU (§9: no CPU `run`; CPU expert compute is covered by `test_service.py`) |
 | `test_public_errors.py` | §6 startup errors, rename | GPU (TP2 row: two GPUs) |
 | `test_ftw.py` | FTW round trip, isolation, rename, missing data, bias, TP2 | GPU + `NOWAG_SCRATCH` |
 | `test_cache_status.py` | `/v1/cache/status` `geometry.experts` | GPU (TP2 row: two GPUs) |

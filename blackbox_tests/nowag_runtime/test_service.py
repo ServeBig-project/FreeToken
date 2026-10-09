@@ -66,6 +66,15 @@ def test_execution_modes(backend):
         assert r["expert_host_bytes"] < 0.5 * side["bf16"]
 
 
+@pytest.mark.parametrize("cpu_layers", ["8", "0.5"])
+def test_offload_with_cpu_layers(cpu_layers):
+    """CPU expert compute for part of the layers (§9: accepted via the service only)."""
+    gpu = need_gpu()
+    with Server(f"svc_cpu_layers_{cpu_layers}", qwen("--moe-cpu-layers", cpu_layers), gpu) as s:
+        cross_path(offload_reference(), run_prompts(s), f"--moe-cpu-layers {cpu_layers}")
+        mixed_load(s)
+
+
 @pytest.mark.parametrize("cache", CACHE_SIZES)
 def test_cache_capacity(cache):
     gpu = need_gpu()
