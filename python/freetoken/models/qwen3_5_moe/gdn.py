@@ -55,7 +55,7 @@ class Qwen3_5GatedDeltaNet(BaseOP):
 
     def __init__(
         self, hidden_size, num_k_heads, num_v_heads, head_k_dim, head_v_dim,
-        conv_kernel_size, rms_norm_eps, layer_id, expert_quant: str = "none",
+        conv_kernel_size, rms_norm_eps, layer_id,
         attn_quant: str = "none",
     ):
         self.layer_id = layer_id
@@ -77,7 +77,7 @@ class Qwen3_5GatedDeltaNet(BaseOP):
         # qkv|z carry a weight scale (block-fp8 weight_scale_inv, or per-tensor FP8
         # weight_scale); b|a stay bf16. Both quant modes therefore split the four-way
         # fusion into an fp8 qkvz GEMM + a bf16 ba GEMM (matches sglang/vLLM).
-        self._block_fp8 = expert_quant == "fp8_block"
+        self._block_fp8 = attn_quant == "fp8_block"
         self._pertensor_fp8 = attn_quant == "fp8_pertensor"
         self._fp8 = self._block_fp8 or self._pertensor_fp8
 
@@ -105,7 +105,7 @@ class Qwen3_5GatedDeltaNet(BaseOP):
         # NVFP4 (W4A16) / bf16. in_proj_* stay bf16 in every mode (above), so a compressed-tensors
         # NVFP4 checkpoint (attn_quant=="nvfp4") only makes out_proj native FP4.
         self.out_proj = make_replicated_quant(
-            expert_quant, attn_quant, self.value_dim, hidden_size, has_bias=False
+            attn_quant, self.value_dim, hidden_size, has_bias=False
         )
 
     def _gate_params(self, a: torch.Tensor, b: torch.Tensor):
