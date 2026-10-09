@@ -430,6 +430,10 @@ class PrefillManager:
                     log_cached_tokens += req.cache_handle.cached_len
                 elif pending_req.paused is not None:
                     self.cache_manager.paused_stats["recomputed_tokens"] += req.extend_len
+                if pending_req.paused_since is not None and not is_continuation:
+                    self.cache_manager.paused_stats["paused_ms"] += (
+                        time.monotonic() - pending_req.paused_since) * 1e3
+                    pending_req.paused_since = None
             else:
                 if not reqs and pending_req.chunked_req is None and self.empty:
                     self.blocked_head = pending_req  # could not start in an empty runtime
