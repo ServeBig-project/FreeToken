@@ -67,10 +67,6 @@ class SelfDrafter:
                     self.residency_stops += sum(length > 0 for length in lengths)
                 return [0] * batch.size
             lengths = [min(length, limit) for length in lengths]
-        self.loads_before = (
-            expert_cache.lru_stats[:, Stat.MISS].sum()
-            if self.draft_loads is not None and expert_cache is not None else None
-        )
         return lengths
 
     def propose(
@@ -81,6 +77,11 @@ class SelfDrafter:
         lengths: list[int],
     ) -> DraftResult:
         engine, sampler = self.engine, self.engine.sampler
+        # Read here, not at plan time: a layered round plans while earlier groups still run.
+        self.loads_before = (
+            engine.moe_offload_cache.lru_stats[:, Stat.MISS].sum()
+            if self.draft_loads is not None and engine.moe_offload_cache is not None else None
+        )
         steps = max(lengths)
         draft_probs = torch.zeros(
             batch.size, steps + 1, sampler.vocab_size, dtype=torch.float32, device=engine.device

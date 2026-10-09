@@ -64,6 +64,9 @@ def _setup():
         config=SimpleNamespace(page_size=1),
         engine=SimpleNamespace(
             graph_runner=SimpleNamespace(stats_snapshot=lambda: {}), linear_state_pool=pool,
+            resource_status=lambda: {
+                "speculative_graph_reserved_bytes": 0, "cpu_executor_pinned_io_bytes": 0,
+            },
         ),
         speculative=None,  # speculative decoding off (the default)
         status_reporter=SimpleNamespace(report_batch=lambda *_, **__: None),

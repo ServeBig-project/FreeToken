@@ -15,13 +15,15 @@ def _get_pid_suffix() -> str:
 @dataclass(frozen=True)
 class SchedulerConfig(EngineConfig):
     max_extend_tokens: int = 8192
+    # auto: layered-pipeline when the model's components support it, else legacy.
     batching_policy: Literal[
+        "auto",
         "legacy",
         "mixed",
         "layered",
         "joint",
         "layered-pipeline",
-    ] = "legacy"
+    ] = "auto"
     prefill_layer_group_size: int = 2
     prefill_wave_max_chunks: int = 1
     prefill_execution: Literal["serial", "concurrent"] = "serial"

@@ -86,7 +86,7 @@ flushes, flushed_records, snapshot_exports
 
 token计数按真实逻辑位置计一次，不按GDN层数／head数或Graph填充重复计数；AR项只计target decode，不混入prefill。flushes和snapshot_exports按请求级操作计数。已有SD长度直方图、接受数、Graph回放形状继续复用。
 
-已实现：`active`取自静态几何；其余计数随每批生成结果回报更新，是上一次回报时的值；`flushes`／`flushed_records`由GPU计数，再滞后一次回报。`flushes`／`flushed_records`为因记录环将满而合并进请求自身状态槽的次数与记录条数；`snapshot_exports`为给公共前缀缓存导出完整状态的次数（工具调用位置快照与请求结束捐献）。token计数覆盖legacy、mixed与layered策略下经整模型forward执行的解码；joint／layered-pipeline驻留波次中的解码不计入。`flush_gpu_ms`／`export_gpu_ms`为已完成的SD轮前合并／导出kernel前后两个CUDA事件之间的GPU时间（不做同步，未完成的计入下一次回报；stream空闲时包含kernel启动间隙）；target AR的合并在其解码kernel内完成，计入该forward的时间。开启`--speculative-adaptive-cost`或`--speculative-verify-prefetch`时，`speculative.cost_gpu_ms.state`为每轮在模型forward之外的状态工作（起草前准备，包括其中的合并，以及提交）的GPU时间，与`flush_gpu_ms`有重叠，不能相加；`ar`／`draft`／`verify`仍只计模型forward。
+已实现：`active`取自静态几何；其余计数随每批生成结果回报更新，是上一次回报时的值；`flushes`／`flushed_records`由GPU计数，再滞后一次回报。`flushes`／`flushed_records`为因记录环将满而合并进请求自身状态槽的次数与记录条数；`snapshot_exports`为给公共前缀缓存导出完整状态的次数（工具调用位置快照与请求结束捐献）。token计数覆盖所有batching策略下的解码与验证，包括joint／layered-pipeline驻留波次中的decode行及波次内验证。`flush_gpu_ms`／`export_gpu_ms`为已完成的SD轮前合并／导出kernel前后两个CUDA事件之间的GPU时间（不做同步，未完成的计入下一次回报；stream空闲时包含kernel启动间隙）；target AR的合并在其解码kernel内完成，计入该forward的时间。开启`--speculative-adaptive-cost`或`--speculative-verify-prefetch`时，`speculative.cost_gpu_ms.state`为每轮在模型forward之外的状态工作（起草前准备，包括其中的合并，以及提交）的GPU时间，与`flush_gpu_ms`有重叠，不能相加；`ar`／`draft`／`verify`仍只计模型forward。
 
 统计允许按现有生成回报时机更新，不承诺任意时刻的强同步读数；应注明采样时机。不得仅因idle后的`mamba.used_slots`非零判泄漏，公共缓存可能持有状态，该字段也可能是上一批的快照。
 

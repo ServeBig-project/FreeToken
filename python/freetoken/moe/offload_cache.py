@@ -707,7 +707,9 @@ class OffloadMoeCache:
                     name, layer_id, source.shape, source.dtype,
                 )
             self.bank_sources[name] = list(per_layer)
-            self.bank_caches[name] = torch.empty(
+            # Zero, not empty: inactive routes read slot 0 with zero weight, and
+            # 0 * uninitialized NaN would still poison the output.
+            self.bank_caches[name] = torch.zeros(
                 (self.decode_cache_size, *head.shape[1:]),
                 dtype=head.dtype,
                 device=self.device,
@@ -855,7 +857,7 @@ class OffloadMoeCache:
         # 3. Reallocate the slot cache from the retained host sources.
         for name in self.bank_schema:
             head = self.bank_sources[name][0]
-            self.bank_caches[name] = torch.empty(
+            self.bank_caches[name] = torch.zeros(
                 (self.decode_cache_size, *head.shape[1:]), dtype=head.dtype, device=self.device
             )
         self.banks = [(self.bank_sources[n], self.bank_caches[n]) for n in self.bank_schema]
@@ -1966,6 +1968,21 @@ class OffloadMoeCache:
             torch.cuda.current_stream(self.device).wait_event(
                 self._resident_group_ready_events[buffer_id]
             )
+
+    @property
+    def captured_drafts_safe(self) -> bool:
+        """Whether a captured self-draft may replay now.
+
+        Captured offload drafts admit experts, which would unpin an open resident
+        group; its eager path maps the group's layers instead. Hybrid drafts only
+        look slots up.
+        """
+        return self.decode_target == "hybrid" or self._resident_group_range is None
+
+    def wait_resident_copies(self) -> None:
+        """Order direct slot reads after an open resident group's H2D copies."""
+        if self._resident_group_range is not None and self.prefill_copy_stream is not None:
+            torch.cuda.current_stream(self.device).wait_stream(self.prefill_copy_stream)
 
     def has_resident_prefill_layer(self, layer_id: int) -> bool:
         """Whether joint currently protects ``layer_id`` in the canonical pool."""

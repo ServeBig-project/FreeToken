@@ -112,6 +112,7 @@ def _run_scheduler(
                 # the parent must not touch CUDA to learn this
                 meta["gpus"] = gpus
                 meta["prefix_cache"] = scheduler.cache_manager.status()
+                meta["execution"] = scheduler.engine.execution_status()
                 ack_queue.put(("meta", meta))
             except Exception:  # noqa: BLE001 -- metadata is a nicety; readiness is not
                 pass

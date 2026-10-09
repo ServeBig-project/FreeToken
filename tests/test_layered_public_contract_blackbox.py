@@ -45,7 +45,7 @@ def _config(**overrides: Any) -> SchedulerConfig:
 def test_scheduler_config_layered_defaults_are_public_contract() -> None:
     config = _config()
 
-    assert config.batching_policy == "legacy"
+    assert config.batching_policy == "auto"
     assert config.prefill_layer_group_size == 2
     assert config.prefill_execution == "serial"
 
@@ -387,7 +387,7 @@ def test_cli_parser_exposes_layered_options_and_serial_default(
         ]
     )
 
-    assert defaults.batching_policy == "legacy"
+    assert defaults.batching_policy == "auto"
     assert defaults.prefill_layer_group_size == 2
     assert defaults.prefill_execution == "serial"
     assert explicit.batching_policy == "layered"

@@ -922,7 +922,7 @@ class Nvfp4LMHead(BaseOP):
         from freetoken.core import get_global_ctx
 
         batch = get_global_ctx().batch
-        if batch.uses_extend_path:
+        if batch.uses_extend_path and not batch.is_speculative_verify:
             indices = batch.attn_metadata.get_last_indices(batch.size)
             x = x[indices].contiguous()
         return self.forward_selected(x)

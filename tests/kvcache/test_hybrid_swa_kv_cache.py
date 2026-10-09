@@ -164,6 +164,7 @@ def test_adjust_config_resolves_swa_cache_type():
         tp_info=DistributedInfo(rank=0, size=1),
         dtype=torch.bfloat16,
         cache_type="radix",
+        batching_policy="legacy",  # not under test; avoids the auto capability probe
     )
     radix.__dict__["model_config"] = _hybrid_model_config()
     _adjust_config(radix)
@@ -176,6 +177,7 @@ def test_adjust_config_resolves_swa_cache_type():
         tp_info=DistributedInfo(rank=0, size=1),
         dtype=torch.bfloat16,
         cache_type="naive",
+        batching_policy="legacy",  # not under test; avoids the auto capability probe
     )
     naive.__dict__["model_config"] = _hybrid_model_config()
     _adjust_config(naive)

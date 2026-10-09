@@ -6,7 +6,7 @@
 
 - 原有 Qwen3-30B-A3B 与 Qwen3.6-35B-A3B 的少专家 SD 保留。
 - 新增 `--speculative-draft-model-path PATH`：使用指定 DFlash 草稿模型；不指定时沿用少专家 SD。目录名称不决定能力。
-- 首轮匹配的公开权重：`z-lab/Qwen3.6-35B-A3B-DFlash`，目标为 Qwen3.6-35B-A3B，BF16、单 GPU、legacy 调度；本轮验收使用 offload 专家后端。沿用原 SD 的限制，CPU／hybrid 专家执行在启动时明确拒绝；hybrid AR 仅作为性能对照。
+- 首轮匹配的公开权重：`z-lab/Qwen3.6-35B-A3B-DFlash`，目标为 Qwen3.6-35B-A3B，BF16 激活、单 GPU，legacy 或 layered-pipeline 调度（后者按 `--speculative-phase` 选择波次内外）；专家后端为 offload 或 hybrid，全 CPU 专家层在启动时明确拒绝。
 - `--speculative-num-steps` 始终表示最多起草的 token 数，不含验证使用的已有输入；0 关闭 SD。首轮上限仍为8。
 - 固定模式沿用指定长度，在请求剩余长度、缓存容量限制下缩短。`--speculative-adaptive-cost` 开启时，DFlash 在一轮开始前按成本选择2／4／8个草稿 token（受配置上限和实际容量约束），或使用普通生成；不逐 token 重做整块起草。
 - 原有少专家模式继续使用原来的逐步自适应。

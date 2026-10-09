@@ -16,22 +16,27 @@ attention/state components fail with a component-specific startup error; this
 migration does not add their SD support.
 
 The interface includes stochastic sampling, concurrent requests, streaming,
-request termination and cancellation. The scheduling policy is `legacy`, on a
-single GPU. Unsupported policy/execution combinations fail at startup.
+request termination and cancellation, on a single GPU, with `legacy` or
+`layered-pipeline` batching. With `layered-pipeline`, `--speculative-phase`
+chooses whether SD runs outside prefill waves (default), in both, or only beside
+them; see [CLI](cli.md).
 
-Enabled speculation supports GPU-resident experts (`--moe-backend fused`) and
-GPU expert execution with CPU weight offload (`--moe-backend offload`). `auto`
-resolves to `offload`. CPU/hybrid expert execution and `--moe-cpu-layers` are
-unsupported and fail at startup. Scheduling is synchronous while speculation is
-enabled; requests are still batched and can run concurrently. CUDA Graph
-execution is described in [speculative CUDA graphs](sd-cuda-graphs.md).
+Enabled speculation supports GPU-resident experts (`--moe-backend fused`), GPU
+expert execution with CPU weight offload (`--moe-backend offload`) and the hybrid
+CPU/GPU backend (`--moe-backend hybrid`; hybrid drafts compute cache misses on the
+CPU instead of fetching them). All-CPU expert layers (`--moe-backend cpu`,
+`--moe-cpu-layers`) are unsupported. When `--speculative-num-steps` is omitted the
+server runs 4 steps only if a draft model path, a non-default phase or an SD control
+asks for SD, and serves AR otherwise; an SD request the components or the state
+budget cannot run fails at startup.
+CUDA Graph execution is described in [speculative CUDA graphs](sd-cuda-graphs.md).
 
 ## Public interface
 
 `ft serve` adds:
 
 - `--speculative-num-steps N`: number of proposed tokens per round; integer,
-  default `0` (ordinary serving), nonnegative.
+  omitted = 4 when SD is asked for (see above), else ordinary serving; `0` = ordinary serving.
 - `--speculative-draft-experts K`: routed experts used per draft token; integer,
   default `3`. With speculation enabled, `1 <= K <= target experts per token`.
   Equality is supported as an unchanged-drafter control.
@@ -40,15 +45,16 @@ All speculative switches, their defaults and legal combinations:
 
 | Option | Default | Off / default behavior | Constraint |
 | --- | --- | --- | --- |
-| `--speculative-num-steps N` | `0` | ordinary serving | `N` is the draft ceiling; the three controls below and CUDA Graph need `1 <= N <= 8` |
+| `--speculative-num-steps N` | omitted (4 when SD is asked for) | `0`: ordinary serving | `N` is the draft ceiling; the three controls below and CUDA Graph need `1 <= N <= 8` |
 | `--speculative-draft-experts K` | `3` | — | `1 <= K <=` target experts per token; any K works with CUDA Graph |
 | `--speculative-draft-residency off\|router` | `off` | draft uses the original top-K and loads misses | `router`: only cached experts; see [adaptive serving](adaptive-loading.md) |
 | `--speculative-draft-load-missing` | off | `router` falls back to ordinary generation when a layer has fewer than K cached experts | requires `router` |
 | `--speculative-adaptive-cost` | off | every round drafts up to `N` | — |
 | `--speculative-verify-prefetch` | off | no prefetch | — |
-| `--cuda-graph-max-bs` | automatic | `0` runs speculation eagerly | SD Graph needs BF16 experts, `--moe-backend offload`, FlashInfer and page size 1; otherwise startup fails |
+| `--cuda-graph-max-bs` | automatic | `0` runs speculation eagerly | SD Graph needs BF16 activations, BF16 or NVFP4 experts, `--moe-backend offload` or `hybrid`, FlashInfer and page size 1; otherwise an explicit SD request fails at startup |
 
-The last three boolean controls require BF16 experts with `--moe-backend offload`
+The last three boolean controls, and `router` residency, require `legacy`
+batching; the boolean controls also require BF16 experts with `--moe-backend offload`
 and may be combined freely with each other, any K and either residency mode,
 except `--speculative-draft-load-missing` without `router`.
 
@@ -158,9 +164,17 @@ resource and cost decisions. The default state budget is not a guarantee that
 full concurrency can draft: protected prefixes also consume it. The existing idle
 cache rebuild can explicitly resize `num_mamba_slots`.
 
+`/v1/stats` `execution.resources` is present with SD on or off and refreshes at
+ready, after each reply and after a rebuild. `speculative_graph_reserved_bytes` is
+the GPU memory the SD graph capture newly reserved; after a cache rebuild it can be
+lower because the process already holds the previous graphs' memory (process usage
+is `vram_bytes`). `cpu_executor_pinned_io_bytes` is the CPU MoE executor's pinned
+staging, which grows when a new row count first runs.
+
 With `--cache-type naive`, fixed live-state slots and the padding sink are
-reserved. The default naive pool has no temporary-state capacity, so SD legally
-falls back to ordinary generation; an explicitly enlarged pool can run SD.
+reserved. The default naive pool has no temporary-state capacity, so an SD request
+fails at startup;
+ReplaySSM or a larger state budget can run SD.
 Rebuild and Graph capture preserve those ownership boundaries.
 
 Draft and verification CUDA Graphs are implemented for the migrated Gated
