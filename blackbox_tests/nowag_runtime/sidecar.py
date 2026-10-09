@@ -93,14 +93,6 @@ def write_head(out, template, d, cb, entries):
     (Path(out) / "manifest.json").write_text(json.dumps(keep, indent=1))
 
 
-def write(out, template, d, cb, layers):
-    """Write a native sidecar; layers: {layer: {expert: weights}} with row_major assignments."""
-    Path(out).mkdir(parents=True, exist_ok=True)
-    entries = [write_layer(out, layer, experts) for layer, experts in sorted(layers.items())]
-    write_head(out, template, d, cb, entries)
-    return Path(out)
-
-
 def geometry(real_side):
     """Model geometry and layer map of a real sidecar (used as the template for synthetic ones)."""
     m = manifest(real_side)
