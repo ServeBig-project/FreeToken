@@ -317,6 +317,15 @@ def _model_hook(model_config, name: str):
         return None
 
 
+def _restore_nowag(banks, model_config):
+    from freetoken.moe.nowag.weights import restore_ftw_banks
+
+    return restore_ftw_banks(banks, model_config)
+
+
+# Formats whose FTW banks need the format's own restore (encoding state, TP slicing).
+_FTW_RESTORE = {"nowag": _restore_nowag}
+
 # ModelConfig.expert_quant -> provider
 _PROVIDERS = {
     "none": _bf16_banks,
@@ -436,6 +445,8 @@ def load_expert_banks(
         banks = load_ftw_banks(
             model_path, num_layers=model_config.num_moe_layers, workers=workers, chunk=chunk
         )
+        if banks is not None and banks.quant_format in _FTW_RESTORE:
+            banks = _FTW_RESTORE[banks.quant_format](banks, model_config)
         if banks is not None:
             logger.info_rank0(f"expert banks: FTW fast path (FTW checkpoint {model_path})")
             return banks

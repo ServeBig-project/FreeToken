@@ -28,6 +28,80 @@ class NowagState:
 
     d: int
     assignment_bits: int
+    # This TP rank's Down input width and the lanes of its first (global) codeword
+    # that belong to the previous rank.
+    intermediate_size: int
+    down_start_lane: int = 0
+
+
+def expert_intermediate_range(model_config, rank: int, size: int) -> tuple[int, int]:
+    """This rank's slice of the expert intermediate axis: the model's own partition if it
+    declares one, else the contiguous chunks the dense loader uses."""
+    from freetoken.moe.expert_banks import _model_hook
+
+    width = int(model_config.moe_intermediate_size)
+    model_range = _model_hook(model_config, "expert_intermediate_range")
+    if model_range is not None:
+        return model_range(width, rank=rank, world_size=size)
+    per_rank = -(-width // size)
+    start = min(rank * per_rank, width)
+    return start, min(start + per_rank, width)
+
+
+@dataclass(frozen=True)
+class _Shard:
+    """This TP rank's view of the global expert encoding."""
+
+    start: int
+    end: int
+    first_group: int
+    last_group: int
+    rank: int
+
+    @classmethod
+    def of(cls, model_config, d: int) -> "_Shard":
+        from freetoken.distributed import get_tp_info
+
+        tp = get_tp_info()
+        start, end = expert_intermediate_range(model_config, tp.rank, tp.size)
+        return cls(start, end, start // d, -(-end // d), tp.rank)
+
+    def state(self, d: int, bits: int) -> NowagState:
+        return NowagState(d, bits, self.end - self.start, self.start - self.first_group * d)
+
+    def apply(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
+        """Gate/Up keep their output rows, Down its input lanes (global codeword groups)."""
+        if name == "down_assignments":
+            return _regroup(tensor, self.first_group, self.last_group)
+        if name in _INTERMEDIATE_LAST:
+            return tensor[..., self.start:self.end]
+        return tensor
+
+
+# Banks whose last axis is the expert intermediate axis.
+_INTERMEDIATE_LAST = (
+    "gate_assignments", "up_assignments", "gate_output_norm", "up_output_norm",
+    "down_input_norm", "gate_bias", "up_bias",
+)
+
+
+def _regroup(words: torch.Tensor, first: int, last: int) -> torch.Tensor:
+    """Re-pack the 12-bit ids of global codeword groups ``[first, last)`` of word-major
+    ``[..., W, N]`` assignments from bit 0, keeping the global grouping."""
+    w = words.to(torch.int64) & 0xFFFFFFFF
+    w = torch.cat((w, torch.zeros_like(w[..., :1, :])), dim=-2)
+    out = torch.zeros(
+        (*w.shape[:-2], -(-(last - first) * 12 // 32) + 1, w.shape[-1]), dtype=torch.int64
+    )
+    for k, group in enumerate(range(first, last)):
+        word, shift = divmod(group * 12, 32)
+        ids = ((w[..., word, :] >> shift) | (w[..., word + 1, :] << (32 - shift))) & 0xFFF
+        word, shift = divmod(k * 12, 32)
+        out[..., word, :] |= (ids << shift) & 0xFFFFFFFF
+        if shift + 12 > 32:
+            out[..., word + 1, :] |= ids >> (32 - shift)
+    out = out[..., :-1, :]
+    return torch.where(out >= 1 << 31, out - (1 << 32), out).to(torch.int32)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -160,19 +234,31 @@ def load_nowag_expert_sources(
             f"NoWAG layers must be the MoE decoder layers [{first}, {first + layers})"
         )
 
+    shard = _Shard.of(model_config, group_size)
+    local = shard.end - shard.start
     gate_words = _words(hidden, group_size, assignment_bits)
     down_words = _words(intermediate, group_size, assignment_bits)
+    local_down_words = -(-(shard.last_group - shard.first_group) * assignment_bits // 32)
     specs = {
-        "gate_assignments": ((experts, gate_words, intermediate), torch.int32),
+        "gate_assignments": ((experts, gate_words, local), torch.int32),
         "gate_input_norm": ((experts, hidden), dtype),
-        "gate_output_norm": ((experts, intermediate), dtype),
-        "up_assignments": ((experts, gate_words, intermediate), torch.int32),
+        "gate_output_norm": ((experts, local), dtype),
+        "up_assignments": ((experts, gate_words, local), torch.int32),
         "up_input_norm": ((experts, hidden), dtype),
-        "up_output_norm": ((experts, intermediate), dtype),
-        "down_assignments": ((experts, down_words, hidden), torch.int32),
-        "down_input_norm": ((experts, intermediate), dtype),
+        "up_output_norm": ((experts, local), dtype),
+        "down_assignments": ((experts, local_down_words, hidden), torch.int32),
+        "down_input_norm": ((experts, local), dtype),
         "down_output_norm": ((experts, hidden), dtype),
     }
+    full_shapes = {
+        "gate_assignments": (gate_words, intermediate),
+        "up_assignments": (gate_words, intermediate),
+        "down_assignments": (down_words, hidden),
+        "gate_output_norm": (intermediate,),
+        "up_output_norm": (intermediate,),
+        "down_input_norm": (intermediate,),
+    }
+    sliced = local != intermediate
 
     from freetoken.moe.host_banks import PinPipeline, alloc_layer_banks
 
@@ -205,11 +291,12 @@ def load_nowag_expert_sources(
                         if missing:
                             raise KeyError(f"{path}: missing {missing[0]}")
                         for kind, key in keys.items():
-                            target = sources[f"{bank}_{kind}"][layer][expert]
+                            name = f"{bank}_{kind}"
+                            target = sources[name][layer][expert]
                             loaded = handle.get_tensor(key)
-                            expected_shape = tuple(target.shape)
+                            expected_shape = full_shapes.get(name, tuple(target.shape))
                             if kind == "assignments" and source_assignment_layout == "row_major":
-                                expected_shape = (target.shape[1], target.shape[0])
+                                expected_shape = expected_shape[::-1]
                             if tuple(loaded.shape) != expected_shape:
                                 raise ValueError(
                                     f"{key}: expected {expected_shape}, "
@@ -222,9 +309,8 @@ def load_nowag_expert_sources(
                                     f"{key}: normalizer must use {dtype}, got {loaded.dtype}"
                                 )
                             if kind == "assignments" and source_assignment_layout == "row_major":
-                                target.copy_(loaded.transpose(0, 1))
-                            else:
-                                target.copy_(loaded)
+                                loaded = loaded.transpose(0, 1)
+                            target.copy_(shard.apply(name, loaded) if sliced else loaded)
             layer_banks = {name: per[layer] for name, per in host_banks.items()}
             if layer_sink is not None:
                 layer_sink(layer, layer_banks)
@@ -253,4 +339,24 @@ def load_nowag_expert_sources(
             f"NoWAG codebook must be {list(expected_codebook_shape)}, "
             f"got {tuple(codebook.shape)}"
         )
-    return sources, {"codebook": codebook}, NowagState(group_size, assignment_bits)
+    return sources, {"codebook": codebook}, shard.state(group_size, assignment_bits)
+
+
+def restore_ftw_banks(banks, model_config):
+    """NoWAG banks read from an FTW checkpoint, which stores the global encoding: decode
+    the stored state and keep this TP rank's slice (the down bias stays on rank 0)."""
+    from dataclasses import replace
+
+    from freetoken.kernel.pinned import copy_to_pinned_tensor
+
+    stored = NowagState(**banks.format_state)
+    shard = _Shard.of(model_config, stored.d)
+    state = shard.state(stored.d, stored.assignment_bits)
+    if state.intermediate_size == stored.intermediate_size:
+        return replace(banks, format_state=state)
+    sources = {
+        name: [copy_to_pinned_tensor(shard.apply(name, t).contiguous()) for t in per_layer]
+        for name, per_layer in banks.sources.items()
+        if name != "down_bias" or shard.rank == 0
+    }
+    return replace(banks, sources=sources, format_state=state)

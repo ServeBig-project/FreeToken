@@ -556,6 +556,13 @@ def load_ftw_banks(
                 futures += [ex.submit(_read_layer, job) for job in layer_jobs]
                 for f in futures:
                     f.result()
+            # Format-wide tensors (the NoWAG codebook): one entry each, not per layer.
+            shared = {}
+            for e in reader.entries("experts_shared"):
+                bank = HostBank(tuple(e["shape"]), _dtype_of(e["dtype"]))
+                reader.read_into(bank.memoryview(), e, workers=workers, chunk=chunk)
+                pins.submit(bank)
+                shared[e["name"]] = bank.tensor
     finally:
         bar.close()
         reader.close()
@@ -577,11 +584,20 @@ def load_ftw_banks(
     # alphas are the small per-expert scale vectors, distinguished by their reserved names
     # (not a separate kind); everything else under experts_bank is a weight source.
     alpha_kw = {n: alpha_hb[n].tensor for n in alpha_hb}
-    return ExpertBanks(reader.meta("quant_format"), sources, **alpha_kw)
+    return ExpertBanks(reader.meta("quant_format"), sources, **alpha_kw, shared=shared,
+                       format_state=reader.meta("expert_format_state"))
+
+
+def ftw_quant_format(path: str) -> str | None:
+    """The expert format an FTW checkpoint stores, or None for any other directory."""
+    if not is_ftw_checkpoint(path):
+        return None
+    with open(os.path.join(path, INDEX_NAME)) as f:
+        return json.load(f).get("quant_format")
 
 
 __all__ = [
     "INDEX_NAME", "FORMAT_TAG", "FORMAT_VERSION", "ALIGN", "DEFAULT_SHARD_LIMIT",
     "is_ftw_checkpoint", "FTWWriter", "FTWReader",
-    "iter_ftw_weights", "load_ftw_banks", "layer_bank_entry_name",
+    "iter_ftw_weights", "load_ftw_banks", "layer_bank_entry_name", "ftw_quant_format",
 ]

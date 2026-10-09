@@ -613,17 +613,30 @@ __all__ = [
 ]
 
 
+def expert_intermediate_range(intermediate_size: int, *, rank: int, world_size: int) -> tuple[int, int]:
+    """This rank's slice of the expert intermediate axis (32-lane MXFP4 blocks)."""
+    start, end, _ = local_mxfp4_intermediate_range(
+        intermediate_size, rank=rank, world_size=world_size
+    )
+    return start, max(start, end)
+
+
 def load_expert_biases(model_path: str, model_config, *, dtype: torch.dtype) -> dict[str, list[torch.Tensor]]:
-    """Pinned ``gate_bias``/``up_bias`` ``[E, I]`` and ``down_bias`` ``[E, H]`` per layer for
-    expert formats that store only the projection weights (NoWAG). The checkpoint
-    interleaves the gate and up columns of ``gate_up_proj_bias``."""
+    """Pinned ``gate_bias``/``up_bias`` ``[E, I_rank]`` and ``down_bias`` ``[E, H]`` per layer
+    for expert formats that store only the projection weights (NoWAG). The checkpoint
+    interleaves the gate and up columns of ``gate_up_proj_bias``; only TP rank 0 carries
+    the down bias, so the all-reduce adds it once."""
     from freetoken.moe.host_banks import alloc_layer_banks, pin_banks
 
-    E, I, H, L = (model_config.num_experts, model_config.moe_intermediate_size,
-                  model_config.hidden_size, model_config.num_layers)
-    banks = alloc_layer_banks(
-        {"gate_bias": ((E, I), dtype), "up_bias": ((E, I), dtype), "down_bias": ((E, H), dtype)}, L
+    tp = get_tp_info()
+    start, end = expert_intermediate_range(
+        model_config.moe_intermediate_size, rank=tp.rank, world_size=tp.size
     )
+    E, H, L = model_config.num_experts, model_config.hidden_size, model_config.num_layers
+    specs = {"gate_bias": ((E, end - start), dtype), "up_bias": ((E, end - start), dtype)}
+    if tp.rank == 0:
+        specs["down_bias"] = ((E, H), dtype)
+    banks = alloc_layer_banks(specs, L)
     seen: set[tuple[int, str]] = set()
     for file in iter_root_safetensor_files_from_index(model_path):
         with safetensors.safe_open(file, framework="pt", device="cpu") as f:
@@ -634,10 +647,11 @@ def load_expert_biases(model_path: str, model_config, *, dtype: torch.dtype) -> 
                 layer_id, source = info
                 raw = f.get_tensor(name)
                 if source == "down_proj_bias":
-                    banks["down_bias"][layer_id].tensor.copy_(raw)
+                    if "down_bias" in banks:
+                        banks["down_bias"][layer_id].tensor.copy_(raw)
                 else:
-                    banks["gate_bias"][layer_id].tensor.copy_(raw[:, ::2])
-                    banks["up_bias"][layer_id].tensor.copy_(raw[:, 1::2])
+                    banks["gate_bias"][layer_id].tensor.copy_(raw[:, ::2][:, start:end])
+                    banks["up_bias"][layer_id].tensor.copy_(raw[:, 1::2][:, start:end])
                 seen.add((layer_id, source))
     missing = {(l, s) for l in range(L) for s in ("gate_up_proj_bias", "down_proj_bias")} - seen
     if missing:

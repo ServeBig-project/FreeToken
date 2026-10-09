@@ -112,14 +112,14 @@ def bind_nowag_method(
              and not math.router_weight_on_down_input)
     return ExpertMethod(
         run=run,
-        workspace_spec=partial(_workspace_spec, layout),
+        workspace_spec=partial(_workspace_spec, layout, state),
         kernel_backends=("triton", "cuda_exact_k48") if exact else ("triton",),
         format_parameters={"d": state.d, "assignment_bits": state.assignment_bits},
     )
 
 
 def _workspace_spec(
-    layout: ExpertLayout, rows: int, top_k: int, *, bank_rows: int
+    layout: ExpertLayout, state: NowagState, rows: int, top_k: int, *, bank_rows: int
 ) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
     """Scratch for ``rows`` physical token rows over ``bank_rows`` addressable bank rows:
     the bound over every backend the kernel may pick for this geometry (two compute
@@ -132,7 +132,7 @@ def _workspace_spec(
             num_routes=routes,
             num_experts=bank_rows,
             alignment_block_m=MAX_STRUCTURAL_DOWN_BLOCK_M,
-            physical_intermediate_size=layout.intermediate_size,
+            physical_intermediate_size=state.intermediate_size,
             structural_down=True,
             compute_slabs=2,
             adaptive_m_tiles=True,
@@ -142,7 +142,7 @@ def _workspace_spec(
         for policy in ("bm16", "tail64")
     )
     return {
-        "middle": ((middle_rows, layout.intermediate_size), torch.bfloat16),
+        "middle": ((middle_rows, state.intermediate_size), torch.bfloat16),
         "route_output": ((routes, layout.hidden_size), torch.bfloat16),
     }
 
@@ -196,6 +196,7 @@ def _run(
         down_input_norm=banks["down_input_norm"],
         down_output_norm=banks["down_output_norm"],
         down_in_features=banks["gate_output_norm"].shape[1],
+        down_input_group_start_lane=state.down_start_lane,
         topk_weights=topk_weights,
         topk_ids=slots,
         model_num_experts=layout.num_experts,

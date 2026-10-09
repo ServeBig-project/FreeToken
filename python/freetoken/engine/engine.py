@@ -1935,11 +1935,15 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
             "and let every layer decode on the GPU offload path instead."
         )
 
+    # The CPU NoWAG GEMV reads whole codewords; a TP shard can start mid-codeword.
+    nowag_cpu_ok = expert_quant != "nowag" or config.tp_info.size == 1
     if expert_quant == "nowag" and (
         config.moe_backend in ("cpu", "hybrid") or config.moe_cpu_layers
     ):
         from freetoken.moe.cpu_executor import compiled_extension_supports
 
+        if not nowag_cpu_ok:
+            raise ValueError("NoWAG experts on the CPU (cpu/hybrid/--moe-cpu-layers) need TP=1")
         if not compiled_extension_supports(
             getattr(model_config, "hidden_act", "silu"), "nowag"
         ):
@@ -1983,6 +1987,11 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
                     f"benchbw profile recommends hybrid, but the CPU MoE executor does not "
                     f"support this model's expert activation "
                     f"{getattr(model_config, 'hidden_act', None)!r}; staying on offload"
+                )
+            elif not nowag_cpu_ok:
+                logger.info_rank0(
+                    "benchbw profile recommends hybrid, but NoWAG CPU experts need TP=1; "
+                    "staying on offload"
                 )
             elif moe_wfmt != "mxfp4" and not compiled_extension_supports(
                 _act, bench_fmt
