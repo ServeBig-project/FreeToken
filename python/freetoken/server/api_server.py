@@ -853,6 +853,10 @@ def cache_geometry(state: Any) -> dict:
     if window and "window_free_slots" in (geo["dflash"] or {}):
         geo["dflash"] = {**geo["dflash"], "window_free_slots": window["free"]}
     geo["limits"] = _cache_limits(geo, unit_bytes, pool_budget, floors)
+    runtime = (state.stats.prefix_cache or {}).get("runtime")
+    if runtime is not None:  # a shared runtime: page and slot counts are only address space
+        geo.update(runtime_cache_bytes=runtime["budget_bytes"], address_pages=num_pages,
+                   address_mamba_slots=num_mamba_slots, num_pages=0, num_mamba_slots=0)
     return geo
 
 
