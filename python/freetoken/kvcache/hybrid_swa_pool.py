@@ -9,6 +9,7 @@ from freetoken.models.config import KVCacheGroupSpec
 from freetoken.utils import align_ceil, div_even
 
 from .base import BaseKVCachePool
+from .runtime_pool import upload
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,7 @@ class _KVGroupStorage:
     k_buffer: torch.Tensor
     v_buffer: torch.Tensor
     storage_shape: tuple[int, int, int]
+    banks: list | None = None  # shared runtime banks of the buffer
 
 
 class HybridSWAKVCache(BaseKVCachePool):
@@ -37,6 +39,7 @@ class HybridSWAKVCache(BaseKVCachePool):
         dtype: torch.dtype,
         device: torch.device,
         num_swa_tokens: int | None = None,
+        runtime=None,
     ) -> None:
         # A drafter whose layers are all windowed still brings an empty full group.
         specs = {group.name: group for group in groups if group.num_layers > 0 or group.name == "full"}
@@ -56,6 +59,9 @@ class HybridSWAKVCache(BaseKVCachePool):
         self._swa_paged = True
 
         tp_size = get_tp_info().size
+        # Shared runtime: full-group pages map with the target's pages (``page_banks``); window
+        # slots are chosen on the host and mapped as they are bound (``slot_units``).
+        self.page_banks, self.slot_units = [], None
         self.full_kv_pool = self._allocate_group(
             specs["full"],
             tp_size=tp_size,
@@ -63,6 +69,7 @@ class HybridSWAKVCache(BaseKVCachePool):
             inner_size=page_size,
             dtype=dtype,
             device=device,
+            runtime=runtime,
         )
         self.swa_kv_pool = self._allocate_group(
             specs["swa"],
@@ -71,7 +78,14 @@ class HybridSWAKVCache(BaseKVCachePool):
             inner_size=1,
             dtype=dtype,
             device=device,
+            runtime=runtime,
         )
+        if runtime is not None:
+            from .runtime_pool import Units
+
+            self.page_banks = self.full_kv_pool.banks
+            self.slot_units = Units(self.swa_kv_pool.banks)
+            self.slot_units.pin([0])  # the sentinel slot, and every layer view's base
         self._storages = {
             "full": self.full_kv_pool,
             "swa": self.swa_kv_pool,
@@ -88,18 +102,23 @@ class HybridSWAKVCache(BaseKVCachePool):
         inner_size: int,
         dtype: torch.dtype,
         device: torch.device,
+        runtime=None,
     ) -> _KVGroupStorage:
         local_kv_heads = div_even(spec.num_kv_heads, tp_size, allow_replicate=True)
-        buffer = torch.empty(
-            (2, spec.num_layers, outer_size, inner_size, local_kv_heads, spec.head_dim),
-            device=device,
-            dtype=dtype,
-        )
+        shape = (2, spec.num_layers, outer_size, inner_size, local_kv_heads, spec.head_dim)
+        banks = None
+        if runtime is None or spec.num_layers == 0:
+            buffer = torch.empty(shape, device=device, dtype=dtype)
+        else:
+            from .runtime_pool import banked
+
+            buffer, banks = banked(runtime, spec.name, shape, dtype)
         return _KVGroupStorage(
             buffer=buffer,
             k_buffer=buffer[0],
             v_buffer=buffer[1],
             storage_shape=(outer_size * inner_size, local_kv_heads, spec.head_dim),
+            banks=banks or [],
         )
 
     @staticmethod
@@ -159,6 +178,11 @@ class HybridSWAKVCache(BaseKVCachePool):
         self._swa_free = torch.arange(1, self._swa_num_tokens, dtype=torch.int64, device=dev)
         self._swa_head = 0
         self._swa_count = self._swa_free.numel()
+        if self.slot_units is not None:
+            # The host's copy of the mapping and its free slots (tail first: low, then reused).
+            self._swa_host = torch.zeros(n + ps + 1, dtype=torch.int64)
+            self._swa_host[-1] = -1
+            self._swa_free_host = list(range(self._swa_num_tokens - 1, 0, -1))
 
     def _ring(self, start: int, n: int) -> list[torch.Tensor]:
         """The ring entries [start, start + n), as at most two contiguous slices."""
@@ -173,6 +197,8 @@ class HybridSWAKVCache(BaseKVCachePool):
         n = int(full_indices.numel())
         if n == 0:
             return
+        if self.slot_units is not None:
+            raise RuntimeError("a shared runtime binds window slots through a claim")
         if n > self._swa_count:
             raise RuntimeError(f"SWA pool exhausted: need {n}, have {self._swa_count}")
         slots = self._ring(self._swa_head, n)
@@ -189,6 +215,8 @@ class HybridSWAKVCache(BaseKVCachePool):
         if n == 0:
             return
         fi = full_indices.to(torch.int64)
+        if self.slot_units is not None:
+            return self._unbind_host(fi)
         offset = 0
         for part in self._ring(self._swa_head + self._swa_count, n):
             torch.index_select(self.full_to_swa_index_mapping, 0, fi[offset : offset + part.numel()],
@@ -200,7 +228,29 @@ class HybridSWAKVCache(BaseKVCachePool):
         self._swa_count += n
 
     def swa_available_size(self) -> int:
+        if self.slot_units is not None:  # free ids; their memory is taken when bound
+            return len(self._swa_free_host)
         return self._swa_count
+
+    def next_slots(self, n: int) -> torch.Tensor | None:
+        """The window slots the next binding of ``n`` locations takes (not yet held)."""
+        free = self._swa_free_host
+        return torch.tensor(free[len(free) - n:], dtype=torch.int64) if n <= len(free) else None
+
+    def bind_slots(self, full: torch.Tensor, slots: torch.Tensor) -> None:
+        """Record ``next_slots`` as bound to ``full`` once their memory is held."""
+        del self._swa_free_host[len(self._swa_free_host) - len(slots):]
+        self._swa_host[full] = slots
+        self.full_to_swa_index_mapping.index_copy_(
+            0, upload(full, self._device), upload(slots, self._device))
+
+    def _unbind_host(self, full: torch.Tensor) -> None:
+        slots = self._swa_host[full]
+        slots = slots[slots > 0]  # positions never bound, or released already
+        self._swa_host[full] = 0
+        self.full_to_swa_index_mapping.index_fill_(0, upload(full, self._device), 0)
+        self._swa_free_host.extend(slots.tolist())
+        self.slot_units.release(slots.numpy())
 
     def paged_views(self) -> list[torch.Tensor]:
         """Per-layer views ``[pages, 2, page_size, heads, head_dim]`` of the paged KV, for
@@ -214,8 +264,11 @@ class HybridSWAKVCache(BaseKVCachePool):
         return [buf[:, layer].movedim(1, 0) for layer in range(buf.shape[1])]
 
     def window_units(self, full_locs: torch.Tensor) -> torch.Tensor:
-        """Window slot of each full location (one unit per token)."""
-        return self.full_to_swa_index_mapping[full_locs.to(torch.int64)]
+        """Window slot of each full location (one unit per token), on the locations' device."""
+        mapping = self.full_to_swa_index_mapping
+        if not full_locs.is_cuda and self.slot_units is not None:
+            mapping = self._swa_host
+        return mapping[full_locs.to(torch.int64)]
 
     @property
     def swa_paged(self) -> bool:

@@ -52,7 +52,9 @@ class LinearStatePool:
 
     Hybrid caching allocates live states and snapshots from one free list. Naive
     caching reserves ``fixed_slots`` entries for table-indexed live states; only
-    entries beyond those and the padding sink may be allocated as scratch.
+    entries beyond those and the padding sink may be allocated as scratch. With a shared
+    ``runtime`` every slot is allocated, the padding sink is slot 0, and a slot's memory is
+    mapped when it is allocated.
     """
 
     def __init__(
@@ -64,36 +66,55 @@ class LinearStatePool:
         tp_size: int | None = None,
         fixed_slots: int = 0,
         records: tuple[int, int, int, int] | None = None,
+        runtime=None,
     ) -> None:
         if tp_size is None:
             tp_size = get_tp_info().size
 
         self._group = group
-        self._num_slots = num_slots
         self._device = device
         self._conv_dtype = dtype
 
         n_layers, local_conv_dim, local_v_heads, _ = _linear_local_dims(group, tp_size)
 
         # conv left-context: the last (kernel-1) timesteps of the conv input stream.
-        self.conv_states = slot_major(
-            (n_layers, num_slots, local_conv_dim, group.conv_kernel_dim - 1), dtype, device)
+        conv = ((n_layers, num_slots, local_conv_dim, group.conv_kernel_dim - 1), dtype)
         # SSM recurrent state. fp32 by default (matches HF mamba_ssm_dtype); the dtype is
         # overridable via FREETOKEN_MAMBA_SSM_DTYPE (see ssm_state_dtype).
-        self.recurrent_states = slot_major(
-            (n_layers, num_slots, local_v_heads, group.key_head_dim, group.value_head_dim),
-            ssm_state_dtype(), device)
+        rec = ((n_layers, num_slots, local_v_heads, group.key_head_dim, group.value_head_dim),
+               ssm_state_dtype())
         self._local_index = {layer_id: i for i, layer_id in enumerate(group.layer_ids)}
 
         # Naive live slots belong to TableManager, so they must never enter this allocator.
         self.padding_slot = fixed_slots
-        self._free_slots: list[int] = list(range(self.padding_slot + 1, num_slots))
-        # ReplaySSM: each live slot is a checkpoint completed by its request's update records.
         self.replay = None
-        if records is not None:
+        # ReplaySSM: each live slot is a checkpoint completed by its request's update records.
+        self._replay_shapes = (_replay_shapes(group, tp_size, dtype, records)
+                               if records is not None else None)
+        self._allocate(conv, rec, runtime)
+
+    def _allocate(self, conv, rec, runtime) -> None:
+        """States (and records) for ``conv``/``rec`` = (shape, dtype), all slots free."""
+        num_slots = conv[0][1]
+        self._num_slots = num_slots
+        self._free_slots: list[int] = list(range(self.padding_slot + 1, num_slots))
+        self.units = None
+        if runtime is None:
+            self.conv_states = slot_major(*conv, self._device)
+            self.recurrent_states = slot_major(*rec, self._device)
+        else:
+            from .runtime_pool import Units, slot_rows
+
+            self.conv_states, conv_bank = slot_rows(runtime, "gdn_conv", *conv)
+            self.recurrent_states, rec_bank = slot_rows(runtime, "gdn_state", *rec)
+            self.units = Units([rec_bank, conv_bank])
+            # The padding sink stays mapped: every layer view starts inside it.
+            self.units.pin([self.padding_slot])
+            self._free_slots.reverse()  # low slots first, so released memory is reused first
+        if self._replay_shapes is not None and (self.replay is None or runtime is not None):
             from .gdn_replay import GdnReplay
 
-            self.replay = GdnReplay(self, _replay_shapes(group, tp_size, dtype, records), device)
+            self.replay = GdnReplay(self, self._replay_shapes, self._device, runtime)
 
     def capture_position(self, start: int, target: int) -> int:
         """Deepest position at or before ``target`` whose state a prefill extend starting at
@@ -141,10 +162,10 @@ class LinearStatePool:
                 return capped
         return [0] * len(lengths)
 
-    def begin_speculation(self, reqs, views, lengths, *, draft=True):
+    def begin_speculation(self, reqs, views, lengths, *, draft=True, slots=None):
         if self.replay is not None:
             return self.replay.begin_round(reqs, lengths)
-        return LinearSpeculativeState(self, reqs, views, lengths, draft=draft)
+        return LinearSpeculativeState(self, reqs, views, lengths, draft=draft, slots=slots)
 
     def create_speculative_graphs(self, max_batch, query_width, device):
         from freetoken.attention.linear import FLASpeculativeGraphs, ReplaySpeculativeGraphs
@@ -154,16 +175,38 @@ class LinearStatePool:
         return FLASpeculativeGraphs(self, max_batch, query_width, device)
 
     @property
+    def unused_slots(self) -> int:
+        """Slot ids nobody holds (with a shared runtime, not all of them can be mapped)."""
+        return len(self._free_slots)
+
+    @property
     def num_free_slots(self) -> int:
+        """Free slot ids; with a shared runtime a slot may still lack memory (``try_alloc``)."""
         return len(self._free_slots)
 
     def alloc(self, n: int = 1) -> list[int]:
         """Pop ``n`` free slot ids (LIFO). Raises if the pool is exhausted."""
-        if n > len(self._free_slots):
-            raise RuntimeError(
-                f"LinearStatePool exhausted: need {n}, have {len(self._free_slots)}"
-            )
-        return [self._free_slots.pop() for _ in range(n)]
+        slots = self.try_alloc(n)
+        if slots is None:
+            raise RuntimeError(f"LinearStatePool exhausted: need {n}, have "
+                               f"{len(self._free_slots)} ids and their memory")
+        return slots
+
+    def try_alloc(self, n: int = 1) -> list[int] | None:
+        """``n`` slots with their memory mapped, or None (nothing taken)."""
+        slots = self.peek(n)
+        if slots is None or (self.units is not None and not self.units.acquire(slots)):
+            return None
+        self.take(slots)
+        return slots
+
+    def peek(self, n: int) -> list[int] | None:
+        """The slots the next allocation of ``n`` takes (not taken yet)."""
+        return self._free_slots[len(self._free_slots) - n:][::-1] if n <= len(self._free_slots) else None
+
+    def take(self, slots) -> None:
+        """Record ``peek``'s slots as allocated once their memory is held."""
+        del self._free_slots[len(self._free_slots) - len(slots):]
 
     def reclaim_all_slots(self) -> None:
         """Restore slots after the fixed live slots and padding. Idle-only: the caller
@@ -171,8 +214,9 @@ class LinearStatePool:
         running request holds a slot, otherwise live state would be handed out twice."""
         self._free_slots = list(range(self.padding_slot + 1, self._num_slots))
 
-    def rebuild(self, num_slots: int) -> None:
-        """Reallocate the conv + recurrent state tensors for ``num_slots`` slots IN PLACE.
+    def rebuild(self, num_slots: int, runtime=None) -> None:
+        """Reallocate the conv + recurrent state tensors for ``num_slots`` slots IN PLACE, on
+        ``runtime`` when shared (its record buffers move there too).
 
         Geometry (layers, conv dim, head dims) and dtypes are taken from the existing
         tensors; only the slot count changes. Object identity is preserved so cached
@@ -189,11 +233,9 @@ class LinearStatePool:
         if device.type == "cuda":
             torch.cuda.synchronize(device)
             torch.cuda.empty_cache()
-        self.conv_states = slot_major((n_layers, num_slots, local_conv_dim, km1), conv_dtype, device)
-        self.recurrent_states = slot_major(
-            (n_layers, num_slots, local_v_heads, key_head_dim, value_head_dim), rec_dtype, device)
-        self._num_slots = num_slots
-        self._free_slots = list(range(self.padding_slot + 1, num_slots))
+        self._allocate(((n_layers, num_slots, local_conv_dim, km1), conv_dtype),
+                       ((n_layers, num_slots, local_v_heads, key_head_dim, value_head_dim),
+                        rec_dtype), runtime)
 
     def free(self, slots) -> None:
         """Return slot ids to the free-list. Accepts an int, list, or 1-D tensor."""
@@ -202,6 +244,8 @@ class LinearStatePool:
         elif isinstance(slots, int):
             slots = [slots]
         self._free_slots.extend(int(s) for s in slots)
+        if self.units is not None:
+            self.units.release(slots)
 
     def clear_slots(self, slots) -> None:
         """Zero conv + recurrent state at ``slots`` across all linear layers (fresh sequence)."""
@@ -273,6 +317,29 @@ def linear_state_bytes_per_req(
     return int(n_layers * (conv_bytes + rec_bytes))
 
 
+def state_banks(config) -> list[tuple[int, int]]:
+    """(banks, bytes of one slot in each) of the GDN states on a shared runtime: one bank of
+    recurrent and one of conv states, each slot's layers adjacent."""
+    group = config.model_config.linear_attention_group()
+    if group is None:
+        return []
+    layers, conv_dim, v_heads, _ = _linear_local_dims(group, config.tp_info.size)
+    return [(1, layers * v_heads * group.key_head_dim * group.value_head_dim
+             * ssm_state_dtype().itemsize),
+            (1, layers * conv_dim * (group.conv_kernel_dim - 1) * config.dtype.itemsize)]
+
+
+def record_banks(config) -> list[tuple[int, int]]:
+    """(banks, bytes of one record row in each) of the ReplaySSM records on a shared runtime."""
+    records = replay_records(config)
+    if records is None:
+        return []
+    shapes = _replay_shapes(config.model_config.linear_attention_group(), config.tp_info.size,
+                            config.dtype, (1, records[1], records[2], 0))
+    return [(1, math.prod(shape) * dtype.itemsize) for name, (shape, dtype) in shapes.items()
+            if name in ("u", "k", "g", "window")]
+
+
 __all__ = ["LinearStatePool", "linear_state_bytes_per_req"]
 
 
@@ -316,7 +383,7 @@ def _default_pool_slots(config) -> int:
     mr = config.max_running_req
     if config.cache_type != "hybrid_radix":
         return mr + 1  # live + dummy/padding
-    ratio = config.linear_state_cache_ratio
+    ratio = 2.0 if config.linear_state_cache_ratio is None else config.linear_state_cache_ratio
     return 4 * mr + max(4, int(ratio * mr)) + 1
 
 
@@ -363,9 +430,11 @@ def _linear_pool_min_slots(config) -> int:
 class LinearSpeculativeState:
     """Own temporary draft/verify states until the host decides what output is retained."""
 
-    def __init__(self, pool, reqs, views, lengths, *, draft=True):
-        self.pool = pool
-        self.slots = pool.alloc(sum(length > 0 for length in lengths)) if draft else []
+    def __init__(self, pool, reqs, views, lengths, *, draft=True, slots=None):
+        """``slots``: scratch states a shared runtime claimed for the whole round."""
+        self.pool, self.claimed = pool, slots
+        count = sum(length > 0 for length in lengths) if draft else 0
+        self.slots = slots[:count] if slots is not None else pool.alloc(count)
         self.live_slots = [req.linear_slot_idx if req.linear_slot_idx is not None else req.table_idx
                            for req in reqs]
         draft_slots = iter(self.slots)
@@ -378,8 +447,12 @@ class LinearSpeculativeState:
     def prepare_verify(self, batch, lengths):
         # Draft and verify are ordered on the engine stream; returning indices does
         # not free tensor storage, and verify overwrites them only after draft finishes.
-        self.pool.free(self.slots)
-        self.slots = self.pool.alloc(self.pool.speculative_size(lengths))
+        size = self.pool.speculative_size(lengths)
+        if self.claimed is not None:
+            self.slots = self.claimed[:size]
+        else:
+            self.pool.free(self.slots)
+            self.slots = self.pool.alloc(size)
         self.states, offset = [], 0
         for live, length in zip(self.live_slots, lengths, strict=True):
             self.states.append((live, self.slots[offset:offset + length + 1]))
@@ -397,4 +470,4 @@ class LinearSpeculativeState:
             for layer in range(self.pool.num_linear_layers):
                 for tensor in (self.pool.recurrent_states[layer], self.pool.conv_states[layer]):
                     tensor.index_copy_(0, live, tensor.index_select(0, src))
-        self.pool.free(self.slots)
+        self.pool.free(self.claimed if self.claimed is not None else self.slots)
