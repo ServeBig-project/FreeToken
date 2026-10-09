@@ -8,9 +8,9 @@ import time
 
 import pytest
 
-from service_common import (GIB, Watch, assert_enum, assert_length, cached_tokens, counter_delta,
-                            enum_prompt, overlap, record, run_streams, start_streams, tok,
-                            wait_streams)
+from service_common import (GIB, Watch, assert_enum, assert_length, cached_tokens, components, counter_delta,
+                            enum_prompt, graph_replays, overlap, record, run_streams, sd_num,
+                            start_streams, tok, wait_streams)
 
 PREAMBLE = ("The following is one long list of consecutive item identifiers; every identifier is "
             "the word item followed by a number, and each number is one more than the previous one. "
@@ -209,3 +209,43 @@ def short_long_short(svc, salt):
     assert peak(c, y) > at.get(y, 0), f"{y} did not regain capacity after the long phase"
     grow = {n_: at.get(n_, 0) - peak(a, n_) for n_ in names}
     return grow
+
+
+def combo_round(svc, sd, graph, salt, out=300):
+    """One function-combination check (contract section 6): concurrent enumeration requests
+    complete intact under the budget, and the SD and Graph counters move only when that path is
+    configured, so neither is replaced by plain AR or eager execution."""
+    k = concurrency(svc, cap=4)
+    starts = [salt + 1000 * i for i in range(k)]
+    streams = [svc.c.stream(enum_prompt(s, 40), out, ignore_eos=True) for s in starts]
+    before = svc.c.stats()
+    with Watch(svc.c) as w:
+        run_streams(streams, 1200)
+    after = svc.c.stats()
+    rounds = sd_num(after, "rounds") - sd_num(before, "rounds") if sd else None
+    replays = graph_replays(after) - graph_replays(before)
+    record(f"{svc.name}:combo", k=k, sd_rounds=rounds, graph_replays=replays, watch=w.report(),
+           streams=[s.summary() for s in streams])
+    assert not w.violations, w.report()
+    _check_enum_streams(streams, [s + 40 for s in starts], out)
+    if sd:
+        assert rounds > 0, "SD configured but no verify round ran"
+    assert (replays > 0) == graph, f"Graph {'on' if graph else 'off'} but replay counter moved by {replays}"
+    svc.c.wait_idle()
+
+
+def ready_combo(svc, batching, sd, graph, draft=None):
+    """The requested combination is the effective one (section 6): batching policy, SD, Graph,
+    and the drafter history component (`draft_kv` for full storage, `draft_*` when compact)."""
+    stats, rt = svc.c.stats(), svc.rt()
+    eff = (stats.get("execution") or {}).get("effective") or {}
+    names = set(components(rt))
+    record(f"{svc.name}:ready", effective=eff, cuda_graph=stats.get("cuda_graph"), components=sorted(names),
+           runtime={k: v for k, v in rt.items() if k != "components"})
+    assert eff.get("batching_policy") == batching, eff
+    assert bool((stats.get("speculative") or {}).get("enabled")) == sd, stats.get("speculative")
+    assert bool(stats["cuda_graph"]["enabled"]) == graph, stats["cuda_graph"]
+    assert {"kv", "gdn_state", "gdn_conv"} <= names, names
+    if draft:
+        assert draft in names, names
+    assert rt["held_bytes"] <= rt["budget_bytes"], rt
