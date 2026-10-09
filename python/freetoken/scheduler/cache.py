@@ -790,7 +790,7 @@ class CacheManager:
             if last_page > first_page:
                 info.append((req, first_page, last_page))
         got = self.claim(sum(last - first for _, first, last in info),
-                         window=_ALL if self.swa_paged else None, states=states)
+                         window=_ALL if self.swa_paged else None, states=states, evict=False)
         if got is None:
             return False
         allocated, self.speculative_slots, _ = got
@@ -1271,7 +1271,8 @@ class CacheManager:
         self.free_slots = self.free_slots[needed_pages:]
         return allocated
 
-    def claim(self, pages: int = 0, *, window=None, states: int = 0, table=None):
+    def claim(self, pages: int = 0, *, window=None, states: int = 0, table=None,
+              evict: bool = True):
         """Shared runtime: one operation's units, held together or not at all -- ``pages``
         pages (as token locations), window slots for the locations ``window(tokens)`` names,
         ``states`` GDN state slots, and ``table``'s next row with its records.
@@ -1279,11 +1280,11 @@ class CacheManager:
         before any is recorded as taken. Returns (tokens, slots, row), or None."""
         begin = time.perf_counter()
         try:
-            return self._claim(pages, window, states, table)
+            return self._claim(pages, window, states, table, evict)
         finally:  # time on the scheduler thread spent taking memory, evictions included
             self.paused_stats["claim_ms"] += (time.perf_counter() - begin) * 1e3
 
-    def _claim(self, pages, window, states, table):
+    def _claim(self, pages, window, states, table, evict):
         pool, ps, out = self.linear_state_pool, self.page_size, {}
 
         def build():
@@ -1313,12 +1314,15 @@ class CacheManager:
             out.update(tokens=tokens, slots=state, row=row)
             return claim
 
-        batch = 1  # cached data evicted per retry doubles: a large claim retries log-many times
-        while (claim := build()) is None or not self.page_units.blocks.acquire(claim.plan):
-            if not self._evict_any(max(pages, 1) * ps * batch, states=batch):
+        blocks = self.page_units.blocks
+        # Cached data goes one entry at a time, and only while the claim really lacks ids or
+        # blocks: never more than the operation needs. A speculative round takes only spare
+        # memory: it never evicts cached prefixes for drafts it may not run.
+        while (claim := build()) is None or blocks.shortfall(claim.plan) or not blocks.acquire(
+                claim.plan):
+            if not evict or not self._evict_any(ps):
                 claim = None
                 break
-            batch *= 2
         if not self._agree(claim is not None):
             if claim is not None:  # another TP rank could not: release, record nothing
                 claim.release()
@@ -1338,11 +1342,11 @@ class CacheManager:
         torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MIN, group=self.tp_group)
         return bool(flag.item())
 
-    def _evict_any(self, tokens: int, states: int = 1) -> bool:
+    def _evict_any(self, tokens: int) -> bool:
         """Release one batch of unlocked cached prefix data; False when nothing is left."""
         if self.tree is None:
             return False
-        kinds = [(self.tree.evict_kv, tokens), (self.tree.evict_states, states)]
+        kinds = [(self.tree.evict_kv, tokens), (self.tree.evict_states, 1)]
         if self.swa_paged:
             kinds.append((self.tree.evict_window, tokens))
         for evict, amount in kinds:

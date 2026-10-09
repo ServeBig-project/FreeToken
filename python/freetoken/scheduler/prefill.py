@@ -182,7 +182,7 @@ class PrefillAdder:
             # session binds only the current physical tile, so admission charges one live
             # window per member instead of cutting the logical request into another wave.
             self.reserved_swa += incremental_swa
-        elif self.cache_manager.swa_paged:
+        elif self.cache_manager.swa_paged and not shared:  # a shared claim takes its windows
             # Cap this chunk by the swa the pool can back this pass. swa is allocated per token in
             # allocate_paged, and token_budget (max_extend_tokens, default 8192) won't chunk a
             # shorter prompt -- so this cap is what forces a prompt whose swa footprint exceeds the
@@ -257,8 +257,8 @@ class PrefillAdder:
         if shared:
             cm.hold_rows(req, tokens)
         self.token_budget -= chunk_size
-        self.reserved_size += (chunk_size if shared else remain_len) + self._output_reserve(
-            pending_req)
+        # A shared claim already took the chunk's pages: only the first output step is pending.
+        self.reserved_size += (0 if shared else remain_len) + self._output_reserve(pending_req)
         # NOTE: update the tokens ids only; new pages will be allocated in the scheduler
         _slice = slice(cached_len, cached_len + chunk_size)
         device_ids = self.table_manager.token_pool[table_idx, _slice]
@@ -417,7 +417,8 @@ class PrefillManager:
                     pending_req.chunked_req = req
                     chunked_list.append(pending_req)
                 reqs.append(req)
-                first = not is_continuation and pending_req.paused is None
+                redo = pending_req.paused is not None or pending_req.readmitted
+                first = not is_continuation and not redo
                 if first:
                     # Record the COMPLETE prompt length and the prefix-cache hit on the
                     # first chunk. The scheduler publishes them only after _prepare_batch
@@ -428,7 +429,7 @@ class PrefillManager:
                 log_new_tokens += req.extend_len
                 if first:
                     log_cached_tokens += req.cache_handle.cached_len
-                elif pending_req.paused is not None:
+                elif redo:
                     self.cache_manager.paused_stats["recomputed_tokens"] += req.extend_len
                 if pending_req.paused_since is not None and not is_continuation:
                     self.cache_manager.paused_stats["paused_ms"] += (
