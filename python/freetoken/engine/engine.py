@@ -648,7 +648,7 @@ class Engine:
                      + 2 * 4 * (steps + 1) * config.model_config.vocab_size * (steps > 0))
         resource = largest(lambda c: layout.blocks(
             pages=c + 1, windows=1 + c * window, states=c + 1, rows=c) <= total
-            and (c + 1) * row_bytes <= execution, 4096)
+            and (c + 1) * row_bytes <= execution, _MAX_AUTO_RUNNING)
         requested = prior.get("requested_running_requests", config.max_running_req)
         effective = resource if requested is None else min(requested, resource)
         if effective < 1 or (prior and effective < prior["max_running_requests"]):
@@ -765,9 +765,10 @@ class Engine:
             )
             tp_cpu_group = torch.distributed.group.WORLD
             assert tp_cpu_group is not None
-            max_bytes = (
-                config.max_forward_len * config.model_config.hidden_size * self.dtype.itemsize
-            )
+            # A shared runtime derives the concurrency after the weights load: size for its bound.
+            forward_len = (config.max_extend_tokens + _MAX_AUTO_RUNNING
+                           if config.max_running_req is None else config.max_forward_len)
+            max_bytes = forward_len * config.model_config.hidden_size * self.dtype.itemsize
             enable_pynccl_distributed(config.tp_info, tp_cpu_group, max_bytes)
         else:
             torch.distributed.init_process_group(
@@ -1934,6 +1935,8 @@ def _resolve_cpu_layers(config: EngineConfig, num_moe_layers: int) -> frozenset[
 
 # MoE-only knobs and the value each resolves to on a dense model. moe_backend is handled
 # separately (its dense value is 'fused', but 'auto' resolves there without a warning).
+_MAX_AUTO_RUNNING = 4096  # upper bound of a derived --max-running-requests
+
 _DENSE_MOE_SETTINGS = {
     "moe_cache_size": 0,
     "moe_cache_rate": None,
