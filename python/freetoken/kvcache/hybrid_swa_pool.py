@@ -250,6 +250,7 @@ class HybridSWAKVCache(BaseKVCachePool):
         self._swa_host[full] = 0
         self.full_to_swa_index_mapping.index_fill_(0, upload(full, self._device), 0)
         self._swa_free_host.extend(slots.tolist())
+        self._swa_free_host.sort(reverse=True)  # lowest slot next: windows pack into few blocks
         self.slot_units.release(slots.numpy())
 
     def paged_views(self) -> list[torch.Tensor]:
