@@ -37,16 +37,13 @@ def launch_error(args):
 @pytest.mark.parametrize("args, words", [
     (["--dflash-recent-acceptance"], ["dflash-recent-acceptance"]),
     (["--speculative-num-steps", "9", *DF], ["8"]),
-    (["--speculative-num-steps", "-1"], [">= 0"]),
+    (["--speculative-num-steps", "-1"], ["1..8", ">= 0"]),
     (["--speculative-num-steps", "8", *DF, "--dflash-adaptive-observe-only"], ["adaptive"]),
     (["--speculative-num-steps", "4", "--speculative-adaptive-cost", "--dflash-adaptive-observe-only"],
      ["observe-only"]),
     (["--speculative-num-steps", "8", *DF, "--dflash-attention-window", "-1"], ["window"]),
-    (["--dflash-attention-window", "256"], ["window"]),
-    (["--speculative-num-steps", "8", *DF, "--moe-backend", "cpu"], ["expert"]),
-    (["--speculative-num-steps", "8", *DF, "--moe-backend", "hybrid"], ["expert"]),
     (["--speculative-num-steps", "8", *DF, "--batching-policy", "layered"], ["legacy"]),
-    (["--speculative-num-steps", "8", *DF, "--batching-policy", "mixed"], ["legacy"]),
+    (["--speculative-num-steps", "8", *DF, "--batching-policy", "mixed"], ["legacy"]),  # others: GPU rejections
     (["--speculative-num-steps", "8", *DF, "--page-size", "16"], ["page size"]),
 ])
 def test_rejected_before_ready(args, words):

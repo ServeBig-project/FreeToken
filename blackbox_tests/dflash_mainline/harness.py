@@ -24,9 +24,10 @@ DRAFTER = ("/data2/servebig-envs/dflash_models/models--z-lab--Qwen3.6-35B-A3B-DF
            "f181eece646affea2c38b2765f1aaa01a9734ccd")
 
 
-def qwen36(path=NVFP4, moe=2048, tokens=65536, running=4, graph=4, seq=32768, gdn=2000000000):
-    return ["--model-path", path, "--moe-backend", "offload", "--moe-cache-size", str(moe),
-            "--num-tokens", str(tokens), "--max-running-requests", str(running),
+def qwen36(path=NVFP4, moe=2048, tokens=65536, running=4, graph=4, seq=32768, gdn=2000000000,
+           policy="legacy", backend="offload"):
+    return ["--model-path", path, "--moe-backend", backend, "--moe-cache-size", str(moe),
+            "--batching-policy", policy, "--num-tokens", str(tokens), "--max-running-requests", str(running),
             "--attention-backend", "fi", "--cuda-graph-max-bs", str(graph),
             "--max-seq-len-override", str(seq), "--enable-gdn-replayssm",
             "--gdn-state-budget-bytes", str(gdn)]
@@ -83,7 +84,7 @@ class Server:
     def stats(self):
         return get(self.url, "/v1/stats")["body"]
 
-    def complete(self, prompt, max_tokens=16, group=None, timeout=900, **extra):
+    def complete(self, prompt, max_tokens=16, group=None, timeout=420, **extra):
         body = {"model": "m", "prompt": prompt, "max_tokens": max_tokens, "temperature": 0, **extra}
         if group is not None:
             body["cache_group"] = group
@@ -125,6 +126,11 @@ class Server:
         result = call()
         after = self.wait_idle()
         return result, spec_delta(after, before)
+
+    @property
+    def outwave(self):
+        """True when every drafted round is outside prefill waves (legacy, or layered outwave)."""
+        return self.flag("--speculative-phase", "outwave") == "outwave"
 
     def flag(self, name, default=None):
         return self.cmd[self.cmd.index(name) + 1] if name in self.cmd else default

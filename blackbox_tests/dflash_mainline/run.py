@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from harness import LOG_DIR, SOURCE, Server, StartupError, process_gpu_mib  # noqa: E402
 
-PHASES = [m for m in ("p1", "p2", "p3", "p4") if (Path(__file__).parent / f"{m}.py").exists()]
+PHASES = [m for m in ("p1", "p2", "p3", "p4", "p5") if (Path(__file__).parent / f"{m}.py").exists()]
 
 
 class Checks:
@@ -38,14 +38,25 @@ class Checks:
         print("NOTE " + name + " " + json.dumps(detail, default=str)[:400], flush=True)
 
 
+def responsive(server):
+    try:
+        server.stats()
+        return True
+    except Exception:
+        return False
+
+
 def registry():
-    configs, plan, compares = {}, {}, []
+    configs, plan, compares, aliases = {}, {}, [], {}
     for name in PHASES:
         module = importlib.import_module(name)
         configs.update(getattr(module, "CONFIGS", {}))
+        aliases.update(getattr(module, "ALIASES", {}))
         for session, functions in getattr(module, "PLAN", {}).items():
             plan.setdefault(session, []).extend(functions)
         compares.extend(getattr(module, "COMPARE", []))
+    for alias, source in aliases.items():
+        plan.setdefault(alias, []).extend(f for f in plan.get(source, []) if f not in plan[alias])
     return configs, plan, compares
 
 
@@ -80,11 +91,12 @@ def run_session(session, only):
                     except Exception as error:  # a scenario failure must not hide the others
                         checks.check(f"{function.__name__}:error", False, error=repr(error),
                                      trace=traceback.format_exc()[-2000:])
-                    if not server.alive():
+                    if not server.alive() or not responsive(server):
                         checks.check("server_alive", False, after=function.__name__)
                         break
-                result["stats_end"] = server.stats()
-                result["status_end"] = server.status()
+                if server.alive():
+                    result["stats_end"] = server.stats()
+                    result["status_end"] = server.status()
             finally:
                 server.close()
     result["checks"] = checks.rows

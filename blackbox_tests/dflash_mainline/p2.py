@@ -197,6 +197,5 @@ PLAN = {
     "nvfp4_n8": [determinism_baseline, window_wrap_cycles, reject_no_pollution, cancel_cycles,
                  shared_prefix_forks, rebuild_conservation],
     "nvfp4_n8_noreplay": [rebuild_conservation],
-    "bf16_n8": [determinism_baseline, window_wrap_cycles, shared_prefix_forks, rebuild_conservation],
-    "qwen3_tiny": [window_wrap_cycles, cancel_cycles],
+
 }

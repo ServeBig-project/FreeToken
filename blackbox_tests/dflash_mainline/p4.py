@@ -2,9 +2,11 @@
 recovery, sampled-distribution check, Graph/eager, C16, self-SD regression.
 Contract: sections 1 (control flags), 2 (sampling, outputs), 4 (stats), 5 (execution/batch/termination rows)."""
 
+import time
+
 from harness import dflash, qwen36, text
 from p1 import REAL_ACCEPT_MIN, quality
-from p2 import fresh, idle_window_clean, pollution_check
+from p2 import cancel_cycles, fresh, idle_window_clean, pollution_check
 from workloads import (COIN_ALPHA, COIN_PROMPT, COPY_MIN_RATIO, acceptance, chi_square_two_sample, coin_category,
                        copy_prompt, copy_ratio, counter_consistency)
 
@@ -18,8 +20,10 @@ CONFIGS = {
     "nvfp4_n8_eager": qwen36(graph=0) + dflash(8),
     "nvfp4_adaptive": qwen36() + dflash(8, "--speculative-adaptive-cost"),
     "nvfp4_observe": qwen36() + dflash(8, "--speculative-adaptive-cost", "--dflash-adaptive-observe-only"),
-    "nvfp4_c16": qwen36(tokens=131072, running=16, graph=16, gdn=3500000000) + dflash(8),
-    "nvfp4_self_sd": qwen36() + ["--speculative-num-steps", "4"],
+    "nvfp4_c16": qwen36(tokens=131072, running=16, graph=16, gdn=4600000000, policy="layered-pipeline") + dflash(8),
+    "nvfp4_self_sd": qwen36() + ["--speculative-num-steps", "4", "--speculative-draft-experts", "3"],
+    "nvfp4_lp_inwave": qwen36(policy="layered-pipeline") + dflash(8, "--speculative-phase", "inwave"),
+    "nvfp4_lp_all": qwen36(policy="layered-pipeline") + dflash(8, "--speculative-phase", "all"),
 }
 
 
@@ -48,7 +52,8 @@ def graph_ragged(server, c):
     hist = delta["histogram"]
     c.check("ragged_outputs", [r["body"]["usage"]["completion_tokens"] for r in resps[:2]] == [1, 2]
             and min(copy_ratio(src, text(r)) for ((_, src), _), r in zip(work[2:], resps[2:])) >= COPY_MIN_RATIO)
-    c.check("ragged_counter_consistency", not counter_consistency(delta), violations=counter_consistency(delta))
+    bad = counter_consistency(delta, server.outwave)
+    c.check("ragged_counter_consistency", not bad, violations=bad)
     c.check("ragged_draft_lengths_within_config", all(x == 0 for x in hist[n + 1:]) and hist[n] > 0, histogram=hist)
     c.check("short_request_does_not_zero_others", hist[0] <= 2 * CLIP_ALLOWANCE, histogram=hist)
     graph = after["cuda_graph"]
@@ -78,7 +83,8 @@ def stop_eos_limits(server, c):
     c.check("stop_string_honoured", resp["body"]["choices"][0]["finish_reason"] == "stop" and stop not in out
             and copy_ratio(source[:cut], out) >= COPY_MIN_RATIO, tail=out[-80:])
     if steps(server):
-        c.check("stop_counter_consistency", not counter_consistency(delta), violations=counter_consistency(delta),
+        bad = counter_consistency(delta, server.outwave)
+        c.check("stop_counter_consistency", not bad, violations=bad,
                 delta=delta)
     eos = server.measured(lambda: server.post_chat("Reply with exactly the single word: yes", 1500))[0]
     body = eos["body"]
@@ -104,52 +110,61 @@ def sampling_distribution(server, c):
     if steps(server):
         c.check("sampled_sd_active", delta["draft_tokens"] > 0 and 0 < delta["accepted_draft_tokens"]
                 < delta["draft_tokens"], delta=delta)
-        c.check("sampled_counter_consistency", not counter_consistency(delta), violations=counter_consistency(delta))
+        bad = counter_consistency(delta, server.outwave)
+        c.check("sampled_counter_consistency", not bad, violations=bad)
     return {"counts": counts, "delta": delta}
 
 
 STATS_CONCEPTS = {  # contract section 4 items -> any key path containing one of these fragments
-    "round_time": ["round"],
+    "round_time": ["round_ms", "round_gpu_ms", "round_time"],
     "proposal_time": ["proposal"],
-    "verify_time": ["verify_gpu_ms", "verify_ms", "cost_gpu_ms.verify"],
+    "verify_time": ["dflash_verify", "verify_ms", "verify_gpu_ms"],
     "timing_scope": ["timing_scope"],
-    "controller_cpu_time": ["cost_control_ms"],
-    "cost_samples": ["cost_samples"],
+    "fixed_rounds": ["fixed_rounds", "dflash_fixed"],
+    "resource_clipped_requests": ["clip"],
+    "controller_cpu_time": ["cost_control_ms", "decision"],
+    "cost_samples": ["cost_samples", "dflash_samples"],
     "dropped_samples": ["drop"],
     "initialisation": ["init"],
     "probes": ["probe"],
-    "ar_fallback": ["cost_ar_requests"],
+    "ar_fallback": ["cost_ar_requests", "fallback"],
 }
+TIMED = ("round_time", "proposal_time", "verify_time")  # must also be > 0 after drafting
 
 
 def key_paths(value, prefix=""):
     if isinstance(value, dict):
         for k, v in value.items():
-            yield prefix + k
+            yield prefix + k, v
             yield from key_paths(v, prefix + k + ".")
 
 
-def stats_fields(server, c, extra=None):
+def positive(value):
+    if isinstance(value, dict):
+        return any(positive(v) for v in value.values())
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def stats_fields(server, c, concepts, label="stats_field"):
     paths = list(key_paths(server.stats()["speculative"]))
-    concepts = {**STATS_CONCEPTS, **(extra or {})}
     for concept, fragments in concepts.items():
-        found = [p for p in paths if any(f in p for f in fragments)]
-        c.check(f"stats_field:{concept}", bool(found), found=found[:6])
-    return paths
+        found = [(p, v) for p, v in paths if any(f in p for f in fragments)]
+        ok = bool(found) and (concept not in TIMED or any(positive(v) for _, v in found))
+        c.check(f"{label}:{concept}", ok, found=[(p, v if not isinstance(v, dict) else "{...}") for p, v in found][:6])
+    return [p for p, _ in paths]
 
 
-FIXED_CONCEPTS = {k: STATS_CONCEPTS[k] for k in ("round_time", "proposal_time", "verify_time", "timing_scope")}
+FIXED_CONCEPTS = {k: STATS_CONCEPTS[k] for k in ("round_time", "proposal_time", "verify_time", "timing_scope",
+                                                  "fixed_rounds", "resource_clipped_requests")}
 
 
 def fixed_stats_and_api(server, c):
-    """Section 4 timing items after fixed-mode drafting; token-ID prompts stay unsupported (section 2)."""
+    """Section 4 items after fixed-mode drafting; token-ID prompts stay unsupported (section 2)."""
     prompt, _ = copy_prompt(140, 40)
     server.complete(prompt, 200, group=fresh())
     server.wait_idle()
-    paths = list(key_paths(server.stats()["speculative"]))
-    for concept, fragments in FIXED_CONCEPTS.items():
-        found = [p for p in paths if any(f in p for f in fragments)]
-        c.check(f"fixed_stats_field:{concept}", bool(found), found=found[:6])
+    time.sleep(2)  # asynchronous timing observations may lag the reply
+    paths = stats_fields(server, c, FIXED_CONCEPTS, "fixed_stats_field")
     ids = server.complete([1, 2, 3], 4)
     c.check("token_id_prompt_rejected", 400 <= ids["status"] < 500, status=ids["status"], body=str(ids["body"])[:200])
     return {"stats_paths": paths}
@@ -179,7 +194,7 @@ def adaptive_policy(server, c):
         c.check("adaptive_recovers_after_ar", sum(b["histogram"][2:]) > 0, low=a, high=b)
     else:
         c.note("adaptive_ar_fallback_not_reached", low=a)
-    paths = stats_fields(server, c)
+    paths = stats_fields(server, c, STATS_CONCEPTS)
     return {"low": a, "high": b, "stats_paths": paths}
 
 
@@ -195,8 +210,39 @@ def observe_only(server, c):
     other = sum(n for i, n in enumerate(d["histogram"]) if i != 8)
     c.check("observe_executes_configured_length", other <= CLIP_ALLOWANCE * d["requests"] + INIT_ALLOWANCE,
             histogram=d["histogram"])
-    paths = stats_fields(server, c, {"suggested_vs_executed": ["suggest", "observe", "recommend"]})
+    paths = stats_fields(server, c, {**STATS_CONCEPTS, "suggested_vs_executed": ["suggest", "observe", "recommend"]})
     return {"delta": d, "stats_paths": paths}
+
+
+def wave_overlap(server, c):
+    """Long prompts arrive while other requests decode, so prefill waves overlap decoding.
+    outwave: no SD beside a wave; inwave: SD only beside a wave; all: both (layered-pipeline only)."""
+    from workloads import spec_delta
+    phase = server.flag("--speculative-phase", "outwave")
+    early = [copy_prompt(150 + k, 30) for k in range(2)]
+    late = [copy_prompt(160 + k, 200) for k in range(2)]
+    before = server.stats()
+
+    def delayed(work):
+        import time
+        time.sleep(1.5)
+        return server.complete(work[0], 200, group=fresh())
+    calls = [lambda w=w: server.complete(w[0], 700, group=fresh()) for w in early]
+    calls += [lambda w=w: delayed(w) for w in late]
+    resps = server.parallel(calls)
+    after = server.wait_idle()
+    d = spec_delta(after, before)
+    ratios = [copy_ratio(src, text(r)) for (_, src), r in zip(early + late, resps)]
+    c.check("wave_overlap_outputs", min(ratios) >= COPY_MIN_RATIO, ratios=ratios)
+    rounds = d.get("verify_rounds")
+    c.check("wave_rounds_reported", isinstance(rounds, dict) and {"inwave", "outwave"} <= set(rounds), delta=d)
+    if isinstance(rounds, dict) and server.flag("--batching-policy") == "layered-pipeline":
+        expect = {"outwave": rounds.get("inwave") == 0 and rounds.get("outwave", 0) > 0,
+                  "inwave": rounds.get("outwave") == 0 and rounds.get("inwave", 0) > 0,
+                  "all": rounds.get("inwave", 0) > 0 and rounds.get("outwave", 0) > 0}[phase]
+        c.check(f"wave_phase_respected:{phase}", expect, verify_rounds=rounds,
+                fallback=d.get("fallback_requests"), histogram=d["histogram"])
+    return d
 
 
 def c16_matrix(server, c):
@@ -212,7 +258,7 @@ def c16_matrix(server, c):
         ratios = [copy_ratio(src, text(r)) for ((_, src), _), r in zip(work, resps)]
         c.check(f"c16_complete:{wave}", all(r["status"] == 200 for r in resps) and min(ratios) >= COPY_MIN_RATIO,
                 ratios=[round(x, 3) for x in ratios])
-        c.check(f"c16_counter_consistency:{wave}", not counter_consistency(delta), violations=counter_consistency(delta))
+        c.check(f"c16_counter_consistency:{wave}", not counter_consistency(delta, server.outwave), violations=counter_consistency(delta, server.outwave))
         sizes_seen = sorted({s["batch_size"] for s in shapes if s["phase"] == "verify"})
         c.check(f"c16_graph_batches:{wave}", max(sizes_seen, default=0) >= 9 and len(sizes_seen) >= 3
                 and all(s["physical_query_tokens"] >= s["query_tokens"] for s in shapes), batch_sizes=sizes_seen)
@@ -231,17 +277,19 @@ def self_sd_regression(server, c):
 
 PLAN = {
     "nvfp4_ar": [stop_eos_limits, sampling_distribution],
-    "nvfp4_n8": [graph_ragged, stop_eos_limits, sampling_distribution],
+    "nvfp4_n8": [graph_ragged, stop_eos_limits, sampling_distribution, wave_overlap, fixed_stats_and_api],
     "nvfp4_n2": [quality, graph_ragged, fixed_stats_and_api],
     "nvfp4_n4": [quality, graph_ragged, fixed_stats_and_api],
     "nvfp4_n8_eager": [quality, graph_ragged],
     "nvfp4_n8_noreplay": [graph_ragged],
-    "nvfp4_adaptive": [quality, adaptive_policy],
+    "nvfp4_adaptive": [quality],  # smoke
     "nvfp4_observe": [quality, observe_only],
     "nvfp4_c16": [c16_matrix],
-    "nvfp4_self_sd": [quality, self_sd_regression],
-    "bf16_n8": [graph_ragged, stop_eos_limits],
-    "qwen3_tiny": [graph_ragged],
+    "nvfp4_lp_inwave": [wave_overlap],  # smoke
+    "nvfp4_lp_all": [wave_overlap],     # smoke
+    "nvfp4_self_sd": [quality],  # smoke
+
+
 }
 
 

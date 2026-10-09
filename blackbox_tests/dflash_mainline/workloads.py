@@ -106,6 +106,9 @@ def spec_delta(after, before):
     a, b = after["speculative"], before["speculative"]
     out = {k: a[k] - b.get(k, 0) for k in SPEC_COUNTERS if isinstance(a.get(k), (int, float))}  # keys appear lazily
     out["histogram"] = [x - y for x, y in zip(a["draft_length_histogram"], b["draft_length_histogram"])]
+    for key in ("verify_rounds", "verify_requests", "fallback_requests"):
+        if isinstance(a.get(key), dict):
+            out[key] = {k: v - (b.get(key) or {}).get(k, 0) for k, v in a[key].items()}
     out["completion_tokens"] = after["requests"]["completion_tokens_total"] - before["requests"]["completion_tokens_total"]
     out["requests"] = after["requests"]["completed"] - before["requests"]["completed"]
     return out
@@ -115,14 +118,16 @@ def acceptance(delta):
     return delta["accepted_draft_tokens"] / delta["draft_tokens"] if delta.get("draft_tokens") else 0.0
 
 
-def counter_consistency(delta):
-    """Bounds implied by the public counters (histogram[0] counts request-rounds that drafted nothing)."""
+def counter_consistency(delta, outwave_only=True):
+    """Bounds implied by the public counters (histogram[0] counts request-rounds that drafted nothing).
+    Verify positions count rounds outside prefill waves only, so their bounds need outwave-only drafting."""
     bad = []
     hist = delta["histogram"]
     drafted_rounds, rounds = sum(hist[1:]), sum(hist)
     if sum(i * n for i, n in enumerate(hist)) != delta["draft_tokens"]:
         bad.append("sum(i*histogram[i]) != draft_tokens")
-    if not delta["draft_tokens"] + drafted_rounds <= delta["verify_positions"] <= delta["draft_tokens"] + rounds:
+    if outwave_only and not (delta["draft_tokens"] + drafted_rounds <= delta["verify_positions"]
+                             <= delta["draft_tokens"] + rounds):
         bad.append("verify_positions outside [draft + drafted rounds, draft + all rounds]")
     if delta["accepted_draft_tokens"] > delta["draft_tokens"]:
         bad.append("accepted > drafted")

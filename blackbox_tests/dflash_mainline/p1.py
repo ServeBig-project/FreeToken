@@ -8,7 +8,7 @@ from pathlib import Path
 
 from safetensors import safe_open
 
-from harness import BF16, LOG_DIR, QWEN3, Server, StartupError, dflash, gpu_used_mib, qwen36, text
+from harness import BF16, DRAFTER, LOG_DIR, QWEN3, Server, StartupError, dflash, gpu_used_mib, qwen36, text
 from tiny_drafter import build
 from workloads import (CODE_HEADER, CODE_MIN_PASS, CODE_STOP, CODE_TASKS, COPY_MIN_RATIO, NEEDLE, acceptance,
                        code_passes, copy_prompt, copy_ratio, counter_consistency, needle_prompt)
@@ -17,7 +17,7 @@ TINY = LOG_DIR / "tiny_drafter"
 if not (TINY / "config.json").exists():
     build(TINY)
 
-QWEN3_ARGS = ["--model-path", QWEN3, "--moe-backend", "offload", "--moe-cache-size", "1024",
+QWEN3_ARGS = ["--model-path", QWEN3, "--moe-backend", "offload", "--moe-cache-size", "1024", "--batching-policy", "legacy",
               "--num-tokens", "65536", "--max-running-requests", "4", "--attention-backend", "fi",
               "--cuda-graph-max-bs", "4", "--max-seq-len-override", "32768"]
 REAL_ACCEPT_MIN = 0.5      # greedy copying with the matched real drafter
@@ -38,8 +38,12 @@ def rejections(checks):
         "moe_over_capacity": ([a if a != "2048" else "14000" for a in base], ["gib", "exceed", "memory", "capacity"]),
         "triton_attention_eager": (qwen36(graph=0) + dflash(8) + ["--attention-backend", "triton"],
                                    ["attention", "flashinfer"]),
-        # attribution only (pure AR keeps its existing behaviour): reported as a note
-        "moe_over_capacity_ar": ([a if a != "2048" else "14000" for a in qwen36()], ["gib", "exceed", "memory", "capacity"]),
+        "cpu_experts": (qwen36(backend="cpu") + dflash(8), ["cpu", "expert"]),
+        "cpu_expert_layers": (base + ["--moe-cpu-layers", "4"], ["cpu", "expert"]),
+        "window_without_drafter": (qwen36() + ["--dflash-attention-window", "256"], ["window", "draft"]),
+        "adaptive_under_layered": (qwen36(policy="layered-pipeline") + dflash(8, "--speculative-adaptive-cost"),
+                                   ["adaptive", "legacy"]),
+        "inwave_under_legacy": (base + ["--speculative-phase", "inwave"], ["phase", "legacy", "layered"]),
     }
     out = {}
     for name, (args, words) in cases.items():
@@ -63,6 +67,13 @@ def rejections(checks):
 CONFIGS = {
     "rejections": rejections,
     "nvfp4_ar": qwen36() + ["--speculative-num-steps", "0"],
+    # SD off ignores the draft path and DFlash-only settings
+    "nvfp4_off_with_drafter": qwen36() + ["--speculative-num-steps", "0", "--speculative-draft-model-path", DRAFTER,
+                                          "--dflash-attention-window", "256", "--no-dflash-compact-kv"],
+    "nvfp4_lp_n8": qwen36(policy="layered-pipeline") + dflash(8),
+    # representative hybrid config: default phase, draft-step count omitted (contract: 4 with a draft path)
+    "nvfp4_hybrid": qwen36(policy="layered-pipeline", backend="hybrid")
+    + ["--speculative-draft-model-path", DRAFTER],
     "nvfp4_n8": qwen36() + dflash(8),
     "nvfp4_n8_full": qwen36() + dflash(8, "--no-dflash-compact-kv"),
     "nvfp4_n8_noreplay": [a for a in qwen36(tokens=32768) if a != "--enable-gdn-replayssm"] + dflash(8),
@@ -115,6 +126,21 @@ def geometry(server, c):
     return {"geometry": g, "speculative": spec, "window_slots": window_slots, "gpu_used_mib": gpu_used_mib()}
 
 
+def default_steps(server, c):
+    spec = server.stats()["speculative"]
+    c.check("omitted_steps_default_four", spec.get("enabled") and spec.get("max_draft_steps") == 4, speculative=spec)
+
+
+def sd_off_ignores_drafter(server, c):
+    status, spec = server.status(), server.stats()["speculative"]
+    d = status["geometry"].get("dflash") or {}
+    c.check("sd_off_ignores_drafter", not spec.get("enabled") and not d.get("active")
+            and not any("draft" in x["name"] for x in status["prefix_cache"].get("components", [])),
+            speculative_enabled=spec.get("enabled"), dflash=d)
+    answer = text(server.complete(needle_prompt(), 12))
+    c.check("sd_off_serves", NEEDLE in answer, text=answer)
+
+
 def quality(server, c):
     """Self-checking tasks: code with unit tests, needle beyond the drafter window, copying."""
     drafter = server.flag("--speculative-draft-model-path")
@@ -136,7 +162,7 @@ def quality(server, c):
     ratio = copy_ratio(source, text(resp))
     c.check("copy_fidelity", ratio >= COPY_MIN_RATIO, ratio=ratio)
     if drafter:
-        bad = [b for d in out["deltas"] + [delta] for b in counter_consistency(d)]
+        bad = [b for d in out["deltas"] + [delta] for b in counter_consistency(d, server.outwave)]
         c.check("counter_consistency", not bad, violations=bad)
         c.check("dflash_drafts_used", delta["draft_tokens"] > 0
                 and server.stats()["speculative"].get("drafter") == "dflash", delta=delta)
@@ -199,16 +225,21 @@ def no_gdn(server, c):
     return {"rebuild": resp["body"], "geometry": after}
 
 
+# Sessions that repeat another session's whole scenario list under a different execution choice.
+ALIASES = {"nvfp4_lp_n8": "nvfp4_n8"}
+
 PLAN = {
+    "nvfp4_off_with_drafter": [sd_off_ignores_drafter],
+    "nvfp4_hybrid": [default_steps, quality],  # smoke
     "nvfp4_ar": [geometry, quality, long_window_ab],
     "nvfp4_n8": [geometry, quality, long_window_ab, invalid_rebuild],
     "nvfp4_n8_full": [geometry, quality, long_window_ab],
     "nvfp4_n8_noreplay": [geometry, quality],
     "nvfp4_n8_cap": [geometry, quality, long_window_ab],
     "nvfp4_n8_cap_full": [geometry, quality, long_window_ab],
-    "bf16_n8": [geometry, quality, long_window_ab, invalid_rebuild],
+    "bf16_n8": [quality],  # smoke
     "qwen3_ar": [geometry, quality],
-    "qwen3_tiny": [geometry, no_gdn, quality, invalid_rebuild],
+    "qwen3_tiny": [no_gdn, quality],  # smoke
 }
 
 

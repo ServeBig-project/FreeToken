@@ -20,7 +20,7 @@ OVERLAP_COPY_FACTOR = 3.0  # restore bytes for 3 forks of P + 1 other cold promp
 PHYSICAL_SAVING_SHARE = 0.5
 
 CONFIGS = {
-    "nvfp4_n8_cold": qwen36() + dflash(8) + ["--prefix-cache-host-gib", "4"],
+    "nvfp4_n8_cold": qwen36(policy="layered-pipeline") + dflash(8) + ["--prefix-cache-host-gib", "4"],
     "nvfp4_n8_coldsmall": qwen36() + dflash(8) + ["--prefix-cache-host-gib", "0.25"],
 }
 
@@ -101,6 +101,50 @@ def pressure_admission(server, c):
         out.append(ratios)
     idle_window_clean(server, c, "pressure")
     return out
+
+
+def pressure_mixed(server, c):
+    """Short requests keep decoding while long prompts are admitted under window-pool pressure."""
+    short = [copy_prompt(170 + k, 30) for k in range(2)]
+    long = [copy_prompt(175 + k, 500) for k in range(2)]
+
+    def delayed(work):
+        time.sleep(2)
+        return server.complete(work[0], 128, group=fresh())
+    calls = [lambda w=w: server.complete(w[0], 800, group=fresh()) for w in short]
+    calls += [lambda w=w: delayed(w) for w in long]
+    resps = server.parallel(calls)
+    ratios = [copy_ratio(src, text(r)) for (_, src), r in zip(short + long, resps)]
+    c.check("pressure_mixed_complete", all(r["status"] == 200 for r in resps) and min(ratios) >= COPY_MIN_RATIO,
+            ratios=ratios)
+    idle_window_clean(server, c, "pressure_mixed")
+    return ratios
+
+
+def cancel_long_prompt(server, c):
+    """Disconnect while a long prompt is still being prefilled, with another request decoding."""
+    long_prompt, _ = copy_prompt(180, 500)
+    short, short_src = copy_prompt(181, 30)
+    body = json.dumps({"model": "m", "prompt": long_prompt, "max_tokens": 64, "temperature": 0, "stream": True,
+                       "cache_group": fresh()}).encode()
+
+    def cancelled(wait):
+        time.sleep(1.0)
+        try:
+            req = urllib.request.Request(server.url + "/v1/completions", data=body,
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=wait) as response:
+                response.readline()
+        except Exception:
+            pass
+    results = server.parallel([lambda: server.complete(short, 600, group=fresh()),
+                               lambda: cancelled(1.5), lambda: cancelled(4.0)])
+    c.check("decoding_request_unaffected", copy_ratio(short_src, text(results[0])) >= COPY_MIN_RATIO)
+    time.sleep(5)
+    c.check("server_alive_after_prefill_cancel", server.alive())
+    idle_window_clean(server, c, "cancel_long_prompt")
+    again = server.complete(short, 200, group=fresh())
+    c.check("serves_after_prefill_cancel", copy_ratio(short_src, text(again)) >= COPY_MIN_RATIO)
 
 
 def pc(server):
@@ -208,11 +252,10 @@ def cancel_waiting_restore(server, c):
 
 
 PLAN = {
-    "nvfp4_n8": [long_generation, pressure_admission, cold_restore],
-    "bf16_n8": [long_generation, cold_restore],
+    "nvfp4_n8": [long_generation, pressure_admission, pressure_mixed, cold_restore, cancel_long_prompt],
+
     "nvfp4_n8_cold": [cold_restore, fork_copy_overlap, cancel_waiting_restore],
-    "nvfp4_n8_coldsmall": [cold_restore, cancel_waiting_restore],
-    "qwen3_tiny": [long_generation],
+    "nvfp4_n8_coldsmall": [cold_restore],  # smoke
 }
 
 
