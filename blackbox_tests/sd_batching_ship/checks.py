@@ -381,3 +381,43 @@ def cancel_cold(se):
         record(se.name + ":cancel_cold", {"round": rnd, "host_used": used})
     r = se.c.complete(p, 16)
     exact_len(r, 16)
+
+
+def resources(se, sd):
+    """Section 5 / round-2 contract: execution.resources carries both figures with SD on or off."""
+    r = (se.c.stats().get("execution") or {}).get("resources") or {}
+    for k in ("speculative_graph_reserved_bytes", "cpu_executor_pinned_io_bytes"):
+        assert isinstance(r.get(k), int) and r[k] >= 0, f"execution.resources.{k} missing/invalid: {r}"
+    if not sd:
+        assert r["speculative_graph_reserved_bytes"] == 0, f"SD off but SD graph bytes reserved: {r}"
+    return r
+
+
+def _shapes(stats):
+    return {(x["phase"], x["batch_size"], x["query_tokens"]): x["replays"]
+            for x in (stats.get("cuda_graph") or {}).get("replay_shapes") or []}
+
+
+def graph_ladder(se, max_bs):
+    """Target-decode ladder = 1..min(max_bs, max running 4); each size up to it really replays a Graph,
+    larger concurrency stays within the captured sizes (eager outside coverage)."""
+    s = se.c.stats()
+    got = view.get(s, "graph")["batch_sizes"] if max_bs else (view.get(s, "graph") or {}).get("batch_sizes")
+    cover = min(max_bs, 4)
+    want = list(range(1, cover + 1))
+    assert (got or []) == want, f"target-decode Graph ladder {got}, expected {want}"
+    seen = {}
+    for c in range(1, 5):
+        b = se.c.stats()
+        res = se.c.parallel([(se.c.complete, (count_prompt(10 * i + 1), 48), {}) for i in range(c)])
+        for r in res:
+            exact_len(r, 48)
+        a = se.c.stats()
+        sb, sa = _shapes(b), _shapes(a)
+        grew = {k: v - sb.get(k, 0) for k, v in sa.items() if v > sb.get(k, 0)}
+        seen[c] = sorted({k[1] for k in grew})
+        assert all(k[1] <= cover for k in grew), f"Graph replayed batch {grew} beyond coverage {cover}"
+        if c <= cover:
+            assert c in seen[c], f"{c} concurrent decodes never replayed a batch-{c} Graph: {grew}"
+    record(se.name + ":graph_ladder", {"ladder": got, "replayed_batch_sizes": seen,
+                                       "eager": (a.get("cuda_graph") or {}).get("speculative_eager")})

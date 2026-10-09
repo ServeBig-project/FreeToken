@@ -28,6 +28,13 @@ def test_graph_off_no_replay(srv):
     assert view.delta(b, srv.c.stats(), "graph_replays") == 0, "Graph disabled but replays counted"
 
 
+def test_resources_graph_off(srv):
+    st = srv.c.stats()
+    assert not ((view.get(st, "graph") or {}).get("batch_sizes")), view.get(st, "graph")
+    r = checks.resources(srv, sd=True)
+    assert r["cpu_executor_pinned_io_bytes"] > 0, f"hybrid CPU executor ran but no pinned bytes: {r}"
+
+
 def test_stream(srv):
     checks.stream_consistent(srv)
 

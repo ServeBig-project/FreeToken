@@ -1,5 +1,5 @@
-"""Section 5 persistent budget: the same tight GDN budget gives AR + reason when SD is omitted and a
-startup error when SD is explicit. FT_TIGHT_GDN_BYTES (coordinator value, ReplaySSM off, default cache
+"""Section 5 persistent budget: a tight GDN budget serves AR when no SD is requested and fails before
+ready when SD is requested (explicit steps, or a DFlash path with steps omitted). FT_TIGHT_GDN_BYTES (coordinator value, ReplaySSM off, default cache
 type) holds the AR state pool but not one SD window."""
 import pytest
 
@@ -18,12 +18,12 @@ def test_budget_pair():
         c = Client(s.url)
         st = c.stats()
         record("N_default_tight_gdn", {"execution": st.get("execution")})
-        assert not view.sd_on(st), f"budget {env.TIGHT_GDN_BYTES} cannot hold an SD window, yet SD is on"
-        t = view.fallback_text(st)
-        assert any(w in t for w in ("budget", "state", "gdn")), f"no state-budget fallback reason: {t}"
+        assert not view.sd_on(st), f"no SD requested, yet SD is on: {st.get('execution')}"
         r = c.complete("Continue: 1, 2, 3,", 32)
         checks.exact_len(r, 32)
     finally:
         s.stop()
-    log = expect_startup_error("N_explicit_tight_gdn", BASE + tight + ["--speculative-num-steps", "4"])
-    assert any(w in log[-8000:].lower() for w in ("budget", "gdn", "state")), log[-2500:]
+    for name, extra in (("N_explicit_tight_gdn", ["--speculative-num-steps", "4"]),
+                        ("N_dflash_tight_gdn", ["--speculative-draft-model-path", env.DFLASH])):
+        log = expect_startup_error(name, BASE + tight + extra)
+        assert any(w in log[-8000:].lower() for w in ("budget", "gdn", "state")), log[-2500:]

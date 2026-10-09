@@ -31,6 +31,11 @@ def test_cold_restore_keeps_drafter_history(srv):
     checks.cold_restore(srv)
 
 
+def test_ladder_and_resources(srv):
+    checks.graph_ladder(srv, 4)
+    assert checks.resources(srv, sd=True)["speculative_graph_reserved_bytes"] > 0
+
+
 def test_cancels(srv):
     checks.cancels(srv)
 

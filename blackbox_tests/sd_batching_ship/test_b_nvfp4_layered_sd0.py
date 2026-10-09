@@ -48,6 +48,11 @@ def test_no_sd_allocation_vs_default(srv):
             assert v == 0, f"SD off but drafter memory reported: {k}={v}"
 
 
+def test_resources_and_graph_ladder(srv):
+    checks.resources(srv, sd=False)
+    checks.graph_ladder(srv, 4)
+
+
 def test_hot_prefix(srv):
     checks.hot_prefix_and_groups(srv)
 

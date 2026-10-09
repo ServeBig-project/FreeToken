@@ -1,14 +1,14 @@
-"""Existing path without SD support (CPU MoE backend) and SD omitted: AR with a reported reason (section 6)."""
+"""Existing path without layered/SD support (CPU MoE backend), all defaults: AR on the original batching,
+the batching fallback reported (sections 2, 6)."""
 from . import checks, env, view
 
 SESSION = ("L_q3_cpu_moe", "q3", env.BUDGET + ["--moe-backend", "cpu", "--moe-cpu-threads", "8", "--enable-cache-report"], 0)
 
 
 def test_auto_falls_back_with_reason(srv):
-    s = srv.c.stats()
-    assert not view.sd_on(s)
+    s = checks.effective(srv, "legacy", False)
     t = view.fallback_text(s)
-    assert "spec" in t or "sd" in t or "draft" in t, f"no SD fallback reason reported: {t}"
+    assert "batch" in t or "layered" in t, f"auto batching fell back without a reported reason: {t}"
 
 
 def test_generation(srv):

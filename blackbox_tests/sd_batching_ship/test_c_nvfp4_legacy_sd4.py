@@ -40,6 +40,13 @@ def test_graph_coverage(srv):
                                          "graph": view.flat(a.get("cuda_graph"))})
 
 
+def test_ladder_and_resources(srv):
+    checks.graph_ladder(srv, 2)
+    r = checks.resources(srv, sd=True)
+    assert r["speculative_graph_reserved_bytes"] > 0, r
+    assert r["cpu_executor_pinned_io_bytes"] > 0, f"hybrid CPU executor ran but no pinned bytes: {r}"
+
+
 def test_stop_eos(srv):
     checks.stop_and_eos(srv)
 

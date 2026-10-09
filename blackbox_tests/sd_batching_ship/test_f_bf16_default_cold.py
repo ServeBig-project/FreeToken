@@ -1,13 +1,15 @@
-"""Qwen3.6 BF16, offload, SD/batching defaults, CPU cold prefix cache with continuation policy."""
-from . import checks, env
+"""Qwen3.6 BF16, offload, only a DFlash path given (steps/phase omitted => DFlash SD 4, outwave),
+CPU cold prefix cache with continuation policy."""
+from . import checks, env, view
 
 SESSION = ("F_bf16_default_cold", "q36_bf16",
-           env.BUDGET + ["--moe-backend", "offload", "--num-tokens", "12288", "--prefix-cache-host-gib", "4",
+           env.BUDGET + ["--moe-backend", "offload", "--speculative-draft-model-path", env.DFLASH, "--num-tokens", "12288", "--prefix-cache-host-gib", "4",
                          "--prefix-cache-policy", "continuation", "--enable-cache-report"], 4)
 
 
 def test_effective_defaults(srv):
-    checks.effective(srv, "layered", True, phase="outwave", drafter="self")
+    s = checks.effective(srv, "layered", True, phase="outwave", drafter="dflash")
+    assert view.get(s, "req_steps") is None
 
 
 def test_cold_restore(srv):
