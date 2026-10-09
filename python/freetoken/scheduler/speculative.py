@@ -210,15 +210,21 @@ class SpeculativeDecoder:
         else:
             reason = None
             if self.cache.page_units is not None:
-                # One claim for the round's pages, window slots and scratch states, before the
-                # controller decides, so it records the length that can actually run.
-                limited = self._reserve_round(batch, limited, full_width)
-            if short(limited):
-                reason = "kv_capacity"
+                def reserve(selected):
+                    nonlocal limited
+                    if short(selected):
+                        return selected
+                    reserved = self._reserve_round(batch, selected, full_width)
+                    if reserved != selected:
+                        limited = reserved
+                    return reserved
+
+                # Decide AR before reclaiming prefixes; price only the shape that fits.
+                lengths = self.drafter.plan(batch, limited, reserve=reserve)
             else:
                 lengths = self.drafter.plan(batch, limited)
-                if short(lengths):
-                    reason = "draft_plan"
+            if short(lengths):
+                reason = "kv_capacity" if short(limited) else "draft_plan"
         if reason is not None:
             self._drop_round()
             self._fallback(reason, batch)

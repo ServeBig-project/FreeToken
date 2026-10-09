@@ -58,9 +58,9 @@ class PhysicalBlocks:
         self.regions.append(region)
         return region
 
-    @staticmethod
-    def _touched(plan):
-        """Per unit kind the chunks its units touch, and per region all chunks touched."""
+    def acquire(self, plan) -> bool:
+        """Hold ``plan``'s units (pairs of Units and unit ids) together: map what they touch,
+        taking idle blocks of any component if needed; all or nothing."""
         holds = []  # (units, ids, [(region, chunk of every hold)])
         touched: dict[Region, np.ndarray] = {}
         for units, ids in plan:
@@ -69,20 +69,6 @@ class PhysicalBlocks:
             holds.append((units, ids, pieces))
             for region, chunks in pieces:
                 touched[region] = np.union1d(touched.get(region, chunks), chunks)
-        return holds, touched
-
-    def shortfall(self, plan) -> int:
-        """Blocks ``plan`` lacks beyond the free ones and the idle ones it may reclaim."""
-        _, touched = self._touched(plan)
-        missing = sum(int((r.block[c] < 0).sum()) for r, c in touched.items())
-        idle = sum(len(np.setdiff1d(np.flatnonzero(r.idle >= 0), touched.get(r, ()))) for r in
-                   self.regions)
-        return max(0, missing - len(self.free) - idle)
-
-    def acquire(self, plan) -> bool:
-        """Hold ``plan``'s units (pairs of Units and unit ids) together: map what they touch,
-        taking idle blocks of any component if needed; all or nothing."""
-        holds, touched = self._touched(plan)
         missing = [(r, c[r.block[c] < 0]) for r, c in touched.items()]
         short = sum(len(c) for _, c in missing) - len(self.free)
         if short > 0 and not self.reclaim(short, touched):
