@@ -98,7 +98,7 @@ def test_concurrent_sd_requests_intact_under_one_budget(svc):
 def test_runtime_budget_rebuild_keeps_real_sd(svc):
     code, j = svc.c.rebuild({"runtime_cache_gib": 3})
     assert (code, j.get("status")) == (200, "ok"), (code, j)
-    assert svc.c.geometry()["runtime_cache_bytes"] == 3 * GIB == svc.c.rt()["budget_bytes"]
+    assert svc.c.geometry()["runtime_cache_bytes"] == 3 * GIB == svc.rt()["budget_bytes"]
     assert svc.c.geometry()["moe_cache_size"] == 2048
     before = sd_counts(svc.c.stats())
     r = svc.c.complete(enum_prompt(20000, 12), 64)
