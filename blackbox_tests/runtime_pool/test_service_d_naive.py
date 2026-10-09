@@ -59,6 +59,7 @@ def test_paused_requests_recompute_and_complete(svc):
     record(f"{NAME}:recompute", delta=d, host=_host(pc))
     assert d["paused"] >= 1, f"the pressure load paused nothing: {d}"
     assert d["recompute"] >= 1 and d["recomputed_tokens"] > 0, f"host budget 0, yet no recompute: {d}"
+    assert d["paused_ms"] > 0, f"recompute pauses report no paused time: {d}"
     assert d["restored"] == 0, f"host budget 0, yet a restore from a host copy was counted: {d}"
     assert pc.get("host_allocated_bytes", 0) == 0 and pc.get("host_used_bytes", 0) == 0, _host(pc)
 
