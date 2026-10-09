@@ -31,6 +31,8 @@ lab_agent_burst_v1 main 档（4 用户×5 轮同步，512 输出／轮；`--max-
 | 新代码 legacy AR | 34.61 | 6.81 | 7.01 | 1.44 | 10.49 | 15.15 |
 | 新默认 layered AR | 39.44 | 7.72 | 8.70 | 0.96 | 13.22 | 14.61 |
 
+测量边界：本报告使用的 NVFP4 lab block 6–9，各臂 20 个请求中均有 16 项 `measurement_failed_requests`，全部来自后续轮次缓存命中比脚本预期少 64 token，实际新增 prefill 为 896 而非预期 832。包括 main 在内各配置一致，HTTP 错误为 0，每请求均输出 512 token。这些是缓存预期校验失败，不是请求失败；保留墙钟对照，但不宣称 benchmark 内置校验全部通过。
+
 ### 归因
 
 - **同时到达的请求串行 prefill**：默认 `--prefill-wave-max-chunks 1`，每个波次只放一个 prompt 分块；legacy 会把同时到达的 prompt 合并成一次 prefill。lab 每轮 4 个请求同时到达，layered 拆成 4 个波次，解码要陪跑多个波次（TPOT 13.2 vs 10.5 ms）；trace 上表现为 TTFT 变长。main 自身的 layered（`63156df`）同样慢，非移植引入。
@@ -48,7 +50,7 @@ lab，正序／反序：
 
 两组均为后跑的一项更快，平均持平。接受率约 72–76%。
 
-trace（为放下 DFlash 上下文改为 `--num-tokens 98304 --gdn-state-budget-bytes 6e9`，其余同上）：legacy DFlash4 makespan 222.8 s、平均延迟 19.8 s；layered DFlash4 在第 2 个波次 CUDA OOM（GDN prefill 内核申请 64 MiB 失败），同配置 layered AR 与 main layered AR 正常。启动后剩余显存与 layered AR 相同，说明 layered＋DFlash 运行期额外显存未计入 prefill 显存预算。用户决定由后续 HBM 预算 PR 解决。
+trace（为放下 DFlash 上下文改为 `--num-tokens 98304 --gdn-state-budget-bytes 6e9`，其余同上）：legacy DFlash4 makespan 222.8 s、平均延迟 19.8 s；layered DFlash4 在后续 prefill 波次 CUDA OOM（GDN prefill 内核申请 64 MiB 失败），同配置 layered AR 与 main layered AR 正常。现有预算已计入分层保留的 DFlash 特征，但仍未保证该组合的运行期峰值能放下；更具体的峰值归因尚未完成。用户决定由后续 HBM 预算 PR 解决。
 
 ## 正确性与资源（GPU）
 
