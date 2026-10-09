@@ -745,6 +745,13 @@ class CacheManager:
             self._free_decode_reservation(reservation)
 
     def cache_req(self, req: Req, *, finished: bool) -> None:
+        self._commit_req(req, finished=finished)
+        if not finished:
+            # A layered wave can prefill far more than one window, and decode's own release
+            # skips a request's first step: return the prompt's out-of-window part now.
+            self.free_swa_out_of_window_extend([req])
+
+    def _commit_req(self, req: Req, *, finished: bool) -> None:
         """Publish the request's committed prefix; on finish also release what it owns.
 
         The tree may already hold part of the prefix: the request's own pages for it are
