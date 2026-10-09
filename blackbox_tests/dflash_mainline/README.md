@@ -47,3 +47,4 @@ named by the implementation commit(s) tested (each JSON's `impl_head` is authori
 | `r3-2295b39`, `r3-2295b39-perf-repeat` | layered remainder and stress, tool checkpoints, perf A-B-A |
 | `r3-4e761f1-stats` | fixed-mode section 4 |
 | `r4-e07fe48` | perf A-B-A-B with prefix-cache counters, adaptive section 4, stress and cold-cancel smokes |
+| `r5-8d5e935` | pre-ready rejections incl. DFlash-only flags without a drafter; SD-off ignores them |
