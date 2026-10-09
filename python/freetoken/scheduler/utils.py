@@ -29,6 +29,8 @@ class PendingReq:
     arrival: int = 0
     # A paused request being recomputed: its tokens are the prompt and committed outputs.
     paused: Req | None = None
+    # Its prompt was admitted before (it gave way mid-prefill): not reported again.
+    readmitted: bool = False
     # When it was paused (monotonic): its pause lasts until its recompute starts.
     paused_since: float | None = None
 

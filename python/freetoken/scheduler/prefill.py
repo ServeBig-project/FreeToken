@@ -417,7 +417,8 @@ class PrefillManager:
                     pending_req.chunked_req = req
                     chunked_list.append(pending_req)
                 reqs.append(req)
-                first = not is_continuation and pending_req.paused is None
+                redo = pending_req.paused is not None or pending_req.readmitted
+                first = not is_continuation and not redo
                 if first:
                     # Record the COMPLETE prompt length and the prefix-cache hit on the
                     # first chunk. The scheduler publishes them only after _prepare_batch
@@ -428,7 +429,7 @@ class PrefillManager:
                 log_new_tokens += req.extend_len
                 if first:
                     log_cached_tokens += req.cache_handle.cached_len
-                elif pending_req.paused is not None:
+                elif redo:
                     self.cache_manager.paused_stats["recomputed_tokens"] += req.extend_len
                 if pending_req.paused_since is not None and not is_continuation:
                     self.cache_manager.paused_stats["paused_ms"] += (
