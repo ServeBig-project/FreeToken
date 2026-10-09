@@ -362,6 +362,7 @@ class PrefillManager:
         allowed_uids: set[int] | None = None,
         max_reqs: int | None = None,
         incremental_window_prefill: bool = False,
+        wave: bool = False,
     ) -> Batch | None:
         self.cache_manager.poll()
         self.stalled, self.blocked_head = False, None
@@ -383,7 +384,8 @@ class PrefillManager:
             table_manager=self.table_manager,
             reserved_swa=self.cache_manager.decode_swa_reservation(
                 self.decode_manager.running_reqs
-            ),
+            ) + (self.cache_manager.wave_window_growth(self.decode_manager.running_reqs)
+                 if wave else 0),
             incremental_window_prefill=incremental_window_prefill,
         )
         reqs: List[Req] = []

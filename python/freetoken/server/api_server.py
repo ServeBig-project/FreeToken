@@ -848,6 +848,10 @@ def cache_geometry(state: Any) -> dict:
         getattr(state, "free_vram_bytes", 0) or 0
     )
     floors = getattr(state, "cache_floors", None) or {}
+    # The drafter geometry is a load-time snapshot; free window slots come from the live ledger.
+    window = (state.stats.prefix_cache or {}).get("window_slots")
+    if window and "window_free_slots" in (geo["dflash"] or {}):
+        geo["dflash"] = {**geo["dflash"], "window_free_slots": window["free"]}
     geo["limits"] = _cache_limits(geo, unit_bytes, pool_budget, floors)
     return geo
 

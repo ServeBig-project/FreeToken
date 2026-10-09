@@ -72,6 +72,8 @@ class SpeculativeDecoder:
         self.verify_requests = {"inwave": 0, "outwave": 0}
         # Decode requests that ran AR instead of SD, by reason.
         self.fallback_requests: dict[str, int] = {}
+        # Requests that ran SD with a shorter draft: cut by their own output tail or by a resource.
+        self.clipped_requests = {"tail": 0, "capacity": 0}
         self.state_slot_stops = 0
         self.draft_length_histogram = [0] * (engine.config.speculative_num_steps + 1)
 
@@ -88,6 +90,7 @@ class SpeculativeDecoder:
             "verify_rounds": dict(self.verify_rounds),
             "verify_requests": dict(self.verify_requests),
             "fallback_requests": dict(self.fallback_requests),
+            "clipped_requests": dict(self.clipped_requests),
             "state_slot_stops": self.state_slot_stops,
             "draft_length_histogram": list(self.draft_length_histogram),
         }
@@ -221,6 +224,12 @@ class SpeculativeDecoder:
             self._fallback(reason, batch)
             self._record_lengths([0] * batch.size)
             return None
+        steps = self.engine.config.speculative_num_steps
+        for req, length in zip(batch.reqs, limited):
+            if length < min(steps, req.remain_len - 1):
+                self.clipped_requests["capacity"] += 1
+            elif length < steps:
+                self.clipped_requests["tail"] += 1
         return lengths
 
     def _reserve_round(self, batch: Batch, lengths: list[int], full_width: bool) -> list[int]:

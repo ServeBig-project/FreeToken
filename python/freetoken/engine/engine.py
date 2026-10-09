@@ -2387,10 +2387,11 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
     if config.speculative_num_steps == 0:
         override("speculative_draft_model_path", None)
     elif config.speculative_num_steps is None:
-        # A draft model, an SD phase or an SD control asks for SD; without one the default is AR
-        # because self-drafting measured slower than AR.
+        # A draft model, an SD phase or an SD (or DFlash) control asks for SD; without one the
+        # default is AR because self-drafting measured slower than AR.
         asked = (config.speculative_draft_model_path or config.speculative_phase != "outwave"
-                 or config.legacy_sd_controls)
+                 or config.legacy_sd_controls or config.dflash_attention_window
+                 or config.dflash_adaptive_observe_only)
         override("speculative_num_steps", 4 if asked else 0)
     if config.speculative_num_steps:
         config.__post_init__()  # re-check the SD constraints against the resolved components

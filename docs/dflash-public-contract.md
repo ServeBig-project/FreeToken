@@ -17,6 +17,7 @@
 - 固定长度也受单请求剩余长度/容量约束。`--speculative-adaptive-cost` 为 DFlash 选择一整块的 AR/2/4/8，受配置上限裁剪；块内不逐 token 决策。
 - 同批请求可以有不同草稿长度。一个请求只剩 1 token 或无起草容量，不应把其他请求统一缩为零草稿。
 - `--dflash-compact-kv` 默认开启，仅对 DFlash 生效；`--no-dflash-compact-kv` 为全容量存储 A/B。两者不改变注意力数学。
+- compact 的窗口池按并发请求定额：窗口紧张时，新的长 prompt 会等待或分更小的块准入，正在 decode 的请求不受影响，服务不得因此退出。调度和前缀缓存状态相同（如单请求、无窗口压力、两边同为冷启动或同样命中前缀）时两种存储输出逐 token 一致；前缀是否命中或切块不同会改变目标模型的计算路径，可在前两名 logit 近似平局处使输出不同，同一存储模式自身也如此。
 - `--dflash-attention-window W` 默认 0；正值只截断原本全注意力层的历史，原生窗口保持原定义，完整本轮 noise block 保留。目标模型始终完整验证。
 - compact 与历史 cap 相互独立；关闭 compact 只是多留存储，不能悄悄取消已配置的 cap。
 - `--dflash-adaptive-observe-only` 依赖 adaptive：先执行一次真实动作初始化，随后控制器照常计算，但执行固定配置长度及正常逐请求裁剪；初始化单列，正式阶段用于同执行开销对照。
@@ -60,10 +61,11 @@
 `/v1/stats` 至少可区分：
 
 - drafter 类型、配置最大步数、实际每请求草稿长度分布、accepted 和最终 emitted。
-- 实际/物理 draft、verify 位置；请求尾部和资源裁剪，不能只报告最大宽度。verify 位置只计 prefill 波次外的轮次；波次内外的验证轮数与请求数分别报告，退 AR 按原因报告。
+- 实际/物理 draft、verify 位置；请求尾部和资源裁剪，不能只报告最大宽度（`clipped_requests` 按 tail/capacity 统计执行了 SD 但草稿被缩短的请求）。verify 位置只计 prefill 波次外的轮次；波次内外的验证轮数与请求数分别报告，退 AR 按原因报告。
 - 固定执行、成本选择、初始化、探测、退 AR 次数；观察模式下“建议选择”与“实际执行”分别报告。
 - 完整轮累计时间、完整 proposal 时间（包括采样/候选准备）、verify forward 与接受/修正部分；所有计时说明是否重叠，不能无条件相加。
 - 控制器 CPU 决策时间、有效成本样本数、丢样数、初始化与探测实耗；空闲时已结束样本最终可见。
+- 上两项（计时与控制器计数）只在 `--speculative-adaptive-cost`（含观察模式）下提供；固定模式不采集每轮 GPU 计时，不增加额外开销。
 
 原 `dflash_block_gpu_ms` 若改为完整 proposal 口径，必须显式标明 timing_scope，不能直接与旧 forward-only 数字相比。完整轮时间也不等于端到端请求延迟，后者另测。
 
