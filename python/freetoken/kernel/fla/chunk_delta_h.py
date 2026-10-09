@@ -60,6 +60,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     h,
     initial_state,
     initial_state_indices,
+    stride_h0,
     cu_seqlens,
     chunk_offsets,
     T,
@@ -112,9 +113,9 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     stride_k = Hg * K
     stride_w = H * K
 
-    index = tl.load(initial_state_indices + i_n).to(tl.int32)
-    h0 = initial_state + index * stride_h
-    ht = initial_state + index * stride_h
+    index = tl.load(initial_state_indices + i_n).to(tl.int64)
+    h0 = initial_state + index * stride_h0
+    ht = initial_state + index * stride_h0
     if USE_INITIAL_STATE:
         h0 = h0 + i_h * V * K
     if INPLACE_UPDATE:
@@ -338,6 +339,8 @@ def chunk_gated_delta_rule_fwd_h(
         h=h,
         initial_state=initial_state,
         initial_state_indices=initial_state_indices,
+        # The state pool's slot stride; the temporary chunk states h stay compact.
+        stride_h0=initial_state.stride(0) if initial_state is not None else 0,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         T=T,

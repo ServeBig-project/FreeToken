@@ -20,6 +20,13 @@ def ssm_state_dtype() -> torch.dtype:
     return _SSM_DTYPES.get(str(ENV.MAMBA_SSM_DTYPE).lower(), torch.float32)
 
 
+def slot_major(shape, dtype, device) -> torch.Tensor:
+    """Zeroed ``[layers, slots, ...]`` view whose storage keeps each slot's layers adjacent, so
+    one slot (or record row) is a single address range that can be mapped on its own."""
+    layers, slots, *rest = shape
+    return torch.zeros((slots, layers, *rest), dtype=dtype, device=device).transpose(0, 1)
+
+
 def _linear_local_dims(
     group: LinearGatedDeltaGroupConfig, tp_size: int
 ) -> tuple[int, int, int, int]:
@@ -69,18 +76,13 @@ class LinearStatePool:
         n_layers, local_conv_dim, local_v_heads, _ = _linear_local_dims(group, tp_size)
 
         # conv left-context: the last (kernel-1) timesteps of the conv input stream.
-        self.conv_states = torch.zeros(
-            (n_layers, num_slots, local_conv_dim, group.conv_kernel_dim - 1),
-            dtype=dtype,
-            device=device,
-        )
+        self.conv_states = slot_major(
+            (n_layers, num_slots, local_conv_dim, group.conv_kernel_dim - 1), dtype, device)
         # SSM recurrent state. fp32 by default (matches HF mamba_ssm_dtype); the dtype is
         # overridable via FREETOKEN_MAMBA_SSM_DTYPE (see ssm_state_dtype).
-        self.recurrent_states = torch.zeros(
+        self.recurrent_states = slot_major(
             (n_layers, num_slots, local_v_heads, group.key_head_dim, group.value_head_dim),
-            dtype=ssm_state_dtype(),
-            device=device,
-        )
+            ssm_state_dtype(), device)
         self._local_index = {layer_id: i for i, layer_id in enumerate(group.layer_ids)}
 
         # Naive live slots belong to TableManager, so they must never enter this allocator.
@@ -187,14 +189,9 @@ class LinearStatePool:
         if device.type == "cuda":
             torch.cuda.synchronize(device)
             torch.cuda.empty_cache()
-        self.conv_states = torch.zeros(
-            (n_layers, num_slots, local_conv_dim, km1), dtype=conv_dtype, device=device
-        )
-        self.recurrent_states = torch.zeros(
-            (n_layers, num_slots, local_v_heads, key_head_dim, value_head_dim),
-            dtype=rec_dtype,
-            device=device,
-        )
+        self.conv_states = slot_major((n_layers, num_slots, local_conv_dim, km1), conv_dtype, device)
+        self.recurrent_states = slot_major(
+            (n_layers, num_slots, local_v_heads, key_head_dim, value_head_dim), rec_dtype, device)
         self._num_slots = num_slots
         self._free_slots = list(range(self.padding_slot + 1, num_slots))
 

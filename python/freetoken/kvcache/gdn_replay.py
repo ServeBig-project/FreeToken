@@ -28,6 +28,9 @@ def replay_shapes(n_layers, conv_dim, v_heads, k_heads, key_dim, value_dim, kern
     return shapes
 
 
+_ROW_MAJOR = ("u", "k", "g", "window")
+
+
 def _device(values, device) -> torch.Tensor:
     return torch.tensor(values, dtype=torch.int32, pin_memory=True).to(device, non_blocking=True)
 
@@ -45,7 +48,11 @@ class GdnReplay:
 
     def __init__(self, pool, shapes, device) -> None:
         self.pool = pool
-        buffers = {name: torch.zeros(shape, dtype=dtype, device=device)
+        from .linear_state_pool import slot_major
+
+        # Per-layer records keep each row's layers adjacent, like the state slots.
+        buffers = {name: slot_major(shape, dtype, device) if name in _ROW_MAJOR
+                   else torch.zeros(shape, dtype=dtype, device=device)
                    for name, (shape, dtype) in shapes.items()}
         self.u, self.k, self.g = buffers["u"], buffers["k"], buffers["g"]
         self.start, self.stats = buffers["start"], buffers["stats"]
