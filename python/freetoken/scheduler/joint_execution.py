@@ -66,6 +66,7 @@ class JointWaveExecutor:
         self._free_req_resources = free_req_resources
         self._decode_selector = DecodeBatchSelector()
         self._wave: ResidentWaveState | None = None
+        self._retired: ResidentWaveState | None = None  # the finished wave, until released
         self._staged_admission: ResidentWaveAdmission | None = None
         self._deferred_join_members: tuple[int, ...] | None = None
 
@@ -79,6 +80,10 @@ class JointWaveExecutor:
         if self._wave is None:
             return []
         return [req for f in self._wave.frontiers for req in f.forward_input.batch.reqs]
+
+    def release_inputs(self) -> None:
+        """The finished wave's inputs may go: the scheduler stream now follows the engine stream."""
+        self._retired = None
 
     def schedule_first_batch(self, token_budget: int) -> Batch | None:
         decode_batch = self._decode_manager.schedule_next_batch()
@@ -193,6 +198,7 @@ class JointWaveExecutor:
 
         outputs = self._finish_wave(wave)
         self._log_completed_wave(wave)
+        self._retired = wave  # its frontiers' inputs are read until the scheduler stream follows
         self._wave = None
         return outputs
 

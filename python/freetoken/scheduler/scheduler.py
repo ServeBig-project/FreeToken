@@ -912,6 +912,7 @@ class Scheduler(SchedulerIOMixin):
         # stream-ordering barrier used by overlap_loop; copy_done then normally completes while
         # the scheduler prepares and enqueues the next iteration instead of stalling the host.
         self.stream.wait_stream(self.engine.stream)
+        executor.release_inputs()
         ready_outputs = list(last_outputs)
         deferred_outputs: list[ForwardData] = []
         for data in outputs:
