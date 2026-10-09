@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterable, List, Tuple
@@ -284,7 +285,8 @@ class CacheManager:
         self.speculative_slots: list[int] | None = None  # shared runtime: claimed for one round
         # Shared runtime: requests paused under memory pressure, kept on the host or recomputed.
         self.paused_stats = dict(paused=0, recompute=0, restored=0, recomputed_tokens=0,
-                                 paused_ms=0.0, short_decode=0, short_prefill=0, compactions=0)
+                                 paused_ms=0.0, short_decode=0, short_prefill=0, compactions=0,
+                                 claim_ms=0.0)
 
     # ----- capability hooks (defaults; plugged-in pools may narrow them) -----
     supports_runtime_rebuild = True
@@ -1275,6 +1277,13 @@ class CacheManager:
         ``states`` GDN state slots, and ``table``'s next row with its records.
         Cached prefix data is evicted while they do not fit, and every TP rank must hold them
         before any is recorded as taken. Returns (tokens, slots, row), or None."""
+        begin = time.perf_counter()
+        try:
+            return self._claim(pages, window, states, table)
+        finally:  # time on the scheduler thread spent taking memory, evictions included
+            self.paused_stats["claim_ms"] += (time.perf_counter() - begin) * 1e3
+
+    def _claim(self, pages, window, states, table):
         pool, ps, out = self.linear_state_pool, self.page_size, {}
 
         def build():
