@@ -85,7 +85,7 @@ class Server:
                 self.proc.wait(60)
         if self.proc:
             self.log.close()
-        wait_gpu_free()
+            wait_gpu_free()
 
 
 def start_ready(name, args, reference=False):

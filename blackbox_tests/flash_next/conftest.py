@@ -58,7 +58,12 @@ def load(name):
 def se(request):
     cfg = request.module.SESSION
     name = cfg["name"]
-    s = start_ready(name, cfg["args"], cfg.get("reference", False))
+    attach = os.environ.get("FT_ATTACH_URL")  # rerun checks against an already-ready server of this config
+    if attach:
+        s = Server(name, [])
+        s.url, s.load_seconds = attach, None
+    else:
+        s = start_ready(name, cfg["args"], cfg.get("reference", False))
     sess = Session(name, cfg, s, Client(s.url), tok())
     sess.rec.update(config={k: v for k, v in cfg.items()}, load_seconds=s.load_seconds,
                     gpu_mib_ready=gpu_used_mib(), stats_ready=sess.c.get("/v1/stats"),
