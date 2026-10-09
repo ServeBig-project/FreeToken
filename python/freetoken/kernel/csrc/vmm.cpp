@@ -85,15 +85,20 @@ void free_range(int64_t address, int64_t size) {
 
 void map(int64_t device, int64_t address, int64_t size, int64_t handle) {
   use_device(device);
-  auto ptr = static_cast<CUdeviceptr>(address);
-  check(cuMemMap(ptr, static_cast<size_t>(size), 0,
+  check(cuMemMap(static_cast<CUdeviceptr>(address), static_cast<size_t>(size), 0,
                  static_cast<CUmemGenericAllocationHandle>(handle), 0),
         "cuMemMap");
+}
+
+// One access grant covers a run of freshly mapped blocks: the grant, not the map, is
+// the expensive driver call.
+void set_access(int64_t device, int64_t address, int64_t size) {
   CUmemAccessDesc access = {};
   access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   access.location.id = static_cast<int>(device);
   access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-  check(cuMemSetAccess(ptr, static_cast<size_t>(size), &access, 1),
+  check(cuMemSetAccess(static_cast<CUdeviceptr>(address), static_cast<size_t>(size),
+                       &access, 1),
         "cuMemSetAccess");
 }
 
@@ -127,6 +132,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("reserve", &reserve);
   m.def("free_range", &free_range);
   m.def("map", &map);
+  m.def("set_access", &set_access);
   m.def("unmap", &unmap);
   m.def("view", &view);
 }
