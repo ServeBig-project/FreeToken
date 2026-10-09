@@ -194,21 +194,31 @@ def _reference(case, hidden, topk_weights, topk_ids, model_type, swiglu_limit=No
             gate = gate.float().clamp(max=swiglu_limit)
             up = up.float().clamp(min=-swiglu_limit, max=swiglu_limit)
 
-        middle = (F.silu(gate.float()) * up.float()).to(torch.bfloat16)
+        route_weights = topk_weights[positions[:, 0], positions[:, 1]].float()[:, None]
+        middle = F.silu(gate.float()) * up.float()
         if model_type == "deepseek_v4":
-            middle = _fp8_roundtrip(middle)
+            # DSV4 scales the down input by the router weight before its rounding.
+            middle = _fp8_roundtrip((middle * route_weights).to(torch.bfloat16))
+            route_weights = 1.0
+        else:
+            middle = middle.to(torch.bfloat16)
         down = _project(case, "down", expert, middle, codebook, device_banks)
-        route_weights = topk_weights[positions[:, 0], positions[:, 1]].float()
-        result.index_add_(0, tokens, down.float() * route_weights[:, None])
+        result.index_add_(0, tokens, down.float() * route_weights)
     return result.to(torch.bfloat16)
 
 
-def _expert_rounding(model_type):
-    # DeepSeek-V4 experts compute on E4M3-rounded inputs; Qwen keeps BF16 inputs.
+def _expert_math_kwargs(model_type):
+    # DeepSeek-V4 experts compute on E4M3-rounded inputs and weight the down input;
+    # Qwen keeps BF16 inputs and weights the down output.
     from freetoken.moe.expert_format import E4M3_GROUP128_UE8M0
 
-    rounding = E4M3_GROUP128_UE8M0 if model_type == "deepseek_v4" else None
-    return {"gate_up_input_rounding": rounding, "down_input_rounding": rounding}
+    dsv4 = model_type == "deepseek_v4"
+    rounding = E4M3_GROUP128_UE8M0 if dsv4 else None
+    return {
+        "gate_up_input_rounding": rounding,
+        "down_input_rounding": rounding,
+        "router_weight_on_down_input": dsv4,
+    }
 
 
 def _executor(
@@ -230,7 +240,7 @@ def _executor(
         max_tokens=max(8, batch_size),
         device=torch.device("cuda"),
         swiglu_alpha=1.0,
-        **_expert_rounding(model_type),
+        **_expert_math_kwargs(model_type),
     )
     kwargs.update(overrides)
     if limit is not None:

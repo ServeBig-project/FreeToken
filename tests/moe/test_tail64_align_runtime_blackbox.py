@@ -76,7 +76,7 @@ def _call_routed(modules: _Modules, *, num_routes: int) -> torch.Tensor:
     method = bind_expert_method(
         ExpertMath(),
         ExpertLayout("nowag", hidden_size, intermediate_size, num_experts),
-        NowagState(6, 12),
+        NowagState(6, 12, intermediate_size),
         device=torch.device("cpu"),
         backend="offload",
     )

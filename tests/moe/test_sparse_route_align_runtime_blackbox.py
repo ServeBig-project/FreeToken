@@ -121,7 +121,7 @@ def _capture_align_callback(
     method = bind_expert_method(
         ExpertMath(),
         ExpertLayout("nowag", x.shape[1], banks[2].shape[1], 4),
-        NowagState(codebook.shape[1], 12),
+        NowagState(codebook.shape[1], 12, banks[2].shape[1]),
         device=x.device,
         backend="offload",
     )

@@ -12,11 +12,19 @@ def _key(layer: int, expert: int, projection: str, suffix: str) -> str:
     return f"layers.{layer}.ffn.experts.{expert}.{projection}.{suffix}"
 
 
+def _init_tp():
+    from freetoken.distributed import set_tp_info, try_get_tp_info
+
+    if try_get_tp_info() is None:
+        set_tp_info(rank=0, size=1)
+
+
 def _dsv4_math(swiglu_limit):
     from freetoken.moe.expert_format import E4M3_GROUP128_UE8M0, ExpertMath
 
     return ExpertMath(
         activation_limit=swiglu_limit,
+        router_weight_on_down_input=True,
         gate_up_input_rounding=E4M3_GROUP128_UE8M0,
         down_input_rounding=E4M3_GROUP128_UE8M0,
     )
@@ -36,7 +44,11 @@ def _run_nowag(math, x, slots, weights, codebook, *banks):
 
     layout = ExpertLayout("nowag", x.shape[1], banks[2].shape[1], banks[0].shape[0])
     method = bind_expert_method(
-        math, layout, NowagState(codebook.shape[1], 12), device=x.device, backend="offload"
+        math,
+        layout,
+        NowagState(codebook.shape[1], 12, banks[2].shape[1]),
+        device=x.device,
+        backend="offload",
     )
     return method.run(
         x, slots, weights, dict(zip(_BANK_SCHEMAS["nowag"], banks)), {"codebook": codebook}
@@ -47,6 +59,7 @@ def test_nowag_sidecar_maps_three_projections_to_nine_banks(tmp_path, monkeypatc
     from freetoken.moe.host_banks import HostBank
     from freetoken.moe.nowag.weights import NowagState, load_nowag_expert_sources
 
+    _init_tp()
     monkeypatch.setattr(HostBank, "pin", lambda self: setattr(self, "_pinned", True))
     output = tmp_path / "nowag"
     output.mkdir()
@@ -116,7 +129,7 @@ def test_nowag_sidecar_maps_three_projections_to_nine_banks(tmp_path, monkeypatc
     assert banks["up_assignments"][0][1, 0, 0].item() == 21
     assert banks["down_assignments"][0][1, 0, 0].item() == 31
     assert shared["codebook"].shape == (4096, 6)
-    assert state == NowagState(d=6, assignment_bits=12)
+    assert state == NowagState(d=6, assignment_bits=12, intermediate_size=intermediate)
 
 
 @pytest.mark.parametrize("source_layout", [None, "row_major", "word_major"])
@@ -126,6 +139,7 @@ def test_qwen_nowag_sidecar_uses_common_manifest_and_real_shapes(
     from freetoken.moe.host_banks import HostBank
     from freetoken.moe.nowag.weights import load_nowag_expert_sources
 
+    _init_tp()
     monkeypatch.setattr(HostBank, "pin", lambda self: setattr(self, "_pinned", True))
     output = tmp_path / "qwen-nowag"
     output.mkdir()
@@ -243,6 +257,7 @@ def test_dsv4_expert_math_keeps_fp8_roundtrips_and_clamped_swiglu(monkeypatch):
             == "dynamic_e4m3_per_token_group128_ue8m0"
         )
         assert kwargs["down_norm_placement"] == "down_prologue"
+        assert kwargs["router_weight_on_middle"] is True
         assert kwargs["validate_route_ids"] is False
         assert callable(kwargs["align_routes"])
         assert kwargs["gate_codebook"] is kwargs["up_codebook"]
@@ -306,6 +321,7 @@ def test_qwen_expert_math_keeps_bf16_input_and_unclamped_swiglu(monkeypatch):
         assert kwargs["gate_up_input_rounding"] == "none"
         assert kwargs["down_input_rounding"] == "none"
         assert kwargs["down_norm_placement"] == "gate_up_epilogue"
+        assert kwargs["router_weight_on_middle"] is False
         assert kwargs["gate_up_input_transform"] is None
         assert kwargs["middle_transform"] is None
         assert kwargs["validate_route_ids"] is False
@@ -379,7 +395,6 @@ def test_nowag_backend_environment_override(monkeypatch):
 
 def test_qwen_offload_layer_dispatches_unrounded_unclamped_math(monkeypatch):
     nowag_method = _method_module()
-    from freetoken.distributed import set_tp_info, try_get_tp_info
     from freetoken.layers.moe import make_moe_layer
     from freetoken.moe.expert_format import (
         _BANK_SCHEMAS,
@@ -390,8 +405,7 @@ def test_qwen_offload_layer_dispatches_unrounded_unclamped_math(monkeypatch):
     )
     from freetoken.moe.nowag.weights import NowagState
 
-    if try_get_tp_info() is None:
-        set_tp_info(rank=0, size=1)
+    _init_tp()
     config = SimpleNamespace(
         moe_backend="offload",
         expert_quant="nowag",
@@ -415,7 +429,7 @@ def test_qwen_offload_layer_dispatches_unrounded_unclamped_math(monkeypatch):
     layer.expert_method = bind_expert_method(
         expert_math(layer),
         ExpertLayout("nowag", 12, 6, 2),
-        NowagState(6, 12),
+        NowagState(6, 12, 6),
         device=torch.device("cpu"),
         backend="offload",
     )
@@ -440,7 +454,7 @@ def test_qwen_offload_layer_dispatches_unrounded_unclamped_math(monkeypatch):
     assert actual is x
     assert called["math"] == ExpertMath()
     assert called["layout"].num_experts == 2
-    assert called["state"] == NowagState(6, 12)
+    assert called["state"] == NowagState(6, 12, 6)
     assert list(called["banks"]) == list(_BANK_SCHEMAS["nowag"])
     assert called["shared"] is cache.shared
 
@@ -573,19 +587,20 @@ def test_dsv4_nowag_method_compiles_on_cuda():
             ).to(torch.bfloat16).float()
             gate_value = torch.minimum(gate_value, gate_value.new_tensor(0.25))
             up_value = torch.clamp(up_value, -0.25, 0.25)
+            # DSV4 scales the down input by the router weight before its rounding.
             route_middle.append(
-                (F.silu(gate_value) * up_value).to(torch.bfloat16)
+                (
+                    F.silu(gate_value) * up_value * topk_weights[token, route]
+                ).to(torch.bfloat16)
             )
             route_experts.append(expert)
     route_middle = torch.stack(route_middle)
     act_quant_fp8_inplace(route_middle, 128)
     route_output = []
     for ticket, expert in enumerate(route_experts):
-        weight = topk_weights.reshape(-1)[ticket]
         route_output.append(
-            (
-                torch.mv(dense_down[expert].float(), route_middle[ticket].float())
-                * weight
+            torch.mv(
+                dense_down[expert].float(), route_middle[ticket].float()
             ).to(torch.bfloat16)
         )
     expected = torch.stack(route_output).reshape(3, 2, hidden).float().sum(1)

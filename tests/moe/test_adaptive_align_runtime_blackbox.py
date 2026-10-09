@@ -33,7 +33,7 @@ def _run_routed(positional, output):
     method = bind_expert_method(
         ExpertMath(),
         layout,
-        NowagState(codebook.shape[1], 12),
+        NowagState(codebook.shape[1], 12, banks[2].shape[1]),
         device=x.device,
         backend="offload",
     )

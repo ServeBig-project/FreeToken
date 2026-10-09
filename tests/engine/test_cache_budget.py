@@ -124,12 +124,15 @@ def _dsv4_adjust_cfg(**over):
     # attention, offload MoE backend).
     from types import SimpleNamespace
 
+    from freetoken.distributed import DistributedInfo
+
     model_config = SimpleNamespace(
         single_stream_only=False, dsv4_args=SimpleNamespace(window_size=128), is_moe=True,
         expert_quant="ds_fp4", has_swa_attention=False, has_linear_attention=False,
     )
 
     class Cfg:
+        tp_info = DistributedInfo(rank=0, size=1)
         moe_cache_auto = True
         moe_cache_size = 0
         moe_cache_rate = None
