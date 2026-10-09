@@ -659,7 +659,9 @@ class Engine:
         if effective < 1 or (prior and effective < prior["max_running_requests"]):
             raise ValueError(
                 f"{mem_GB(budget)} of runtime holds {resource} requests at their minimum; "
-                f"{prior.get('max_running_requests', 1)} are required")
+                f"{prior.get('max_running_requests', 1)} are required"
+                + (" (the concurrency the server started with is kept; start it with a lower "
+                   "--max-running-requests to allow a smaller runtime)" if prior else ""))
         effective = prior.get("max_running_requests", effective)
         return dict(context_tokens=context, max_running_requests=effective,
                     requested_running_requests=requested, resource_running_requests=resource,
