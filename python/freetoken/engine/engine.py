@@ -1743,7 +1743,9 @@ class Engine:
         reserve = (2 * 4 * config.max_running_req * (steps + 1) * config.model_config.vocab_size
                    if steps else 0)
         budget = int(config.memory_ratio * self._baseline_free) - reserve
-        ps, high = config.page_size, min(config.max_extend_tokens, self.max_seq_len)
+        # The user's --max-extend-tokens bounds every refit; earlier fits only narrowed it.
+        self._asked_extend = getattr(self, "_asked_extend", config.max_extend_tokens)
+        ps, high = config.page_size, min(self._asked_extend, self.max_seq_len)
         small = max(ps, min(256, high // 4) // ps * ps)
         retained = self._prefill_retained_bytes(config)
         peak_a, peak_b = self._probe_prefill(small), self._probe_prefill(2 * small)
