@@ -151,7 +151,7 @@ class QSASparseAttnBackend(BaseAttnBackend):
                 max_position=rotary.max_position,
                 base=rotary.base,
                 rope_scaling=tuple(rotary.scaling.items()) if rotary.scaling else None,
-            )._cos_sin_cache.contiguous()
+            )._cos_sin_cache.to(self.device).contiguous()
         return self._index_cos_sin
 
     # ----- metadata -----------------------------------------------------------------------
@@ -188,18 +188,41 @@ class QSASparseAttnBackend(BaseAttnBackend):
     def _block_table(self, table_idx: torch.Tensor) -> torch.Tensor:
         return (self._block_base_view().index_select(0, table_idx) // self.page_size).to(torch.int32)
 
-    def _stage_decode(self, md: QSASparseMetadata, bs: int, table_idx: torch.Tensor) -> None:
-        """Copy this step's addressing into the static graph buffers (restage per replay)."""
-        self._graph["block_table"][:bs].copy_(
+    def _stage_decode(self, md: QSASparseMetadata, bs: int, table_idx: torch.Tensor,
+                      batch: Batch | None) -> None:
+        """Copy this step's addressing and index-write plan into the static graph buffers
+        (restaged per replay). Without a batch (capture) the plan writes the request scratch
+        rows and no pending row."""
+        g = self._graph
+        g["block_table"][:bs].copy_(
             self._block_base_view().index_select(0, table_idx) // self.page_size
         )
-        self._graph["kvlen"][:bs].copy_(md.kv_len_cpu.to(self.device, non_blocking=True))
-        self._graph["table_idx"][:bs].copy_(table_idx)
-        md.block_table = self._graph["block_table"][:bs]
-        md.seq_lens = self._graph["kvlen"][:bs]
-        md.table_idx = self._graph["table_idx"][:bs]
-        md.token_to_req = self._graph["token_to_req"][:bs]
-        md.cu_seqlens = self._graph["cu_seqlens"][: bs + 1]
+        g["kvlen"][:bs].copy_(md.kv_len_cpu.to(self.device, non_blocking=True))
+        g["table_idx"][:bs].copy_(table_idx)
+        scratch = self.kvcache.cmp_scratch_base + table_idx
+        if batch is None:
+            g["cmp_rows"][:bs].copy_(scratch)
+            g["ring_rows"][:bs].fill_(-1)
+        else:
+            # One row per request: its group closes on out_loc % ratio == ratio - 1 (see
+            # _plan_index_writes), and that row is always one of the last ratio rows kept.
+            out_loc = batch.out_loc.to(torch.int64)
+            closing = out_loc % self.ratio == self.ratio - 1
+            g["cmp_rows"][:bs].copy_(torch.where(closing, out_loc // self.ratio, scratch))
+            g["ring_rows"][:bs].copy_(
+                batch.linear_table_idx.to(torch.int64) * self.ratio + batch.positions % self.ratio
+            )
+            g["state_slots"][:bs].copy_(batch.linear_table_idx)
+            g["positions"][:bs].copy_(batch.positions)
+        md.block_table = g["block_table"][:bs]
+        md.seq_lens = g["kvlen"][:bs]
+        md.table_idx = g["table_idx"][:bs]
+        md.token_to_req = g["token_to_req"][:bs]
+        md.cu_seqlens = g["cu_seqlens"][: bs + 1]
+        md.cmp_rows = g["cmp_rows"][:bs]
+        md.ring_rows = g["ring_rows"][:bs]
+        md.state_slots = g["state_slots"][:bs]
+        md.positions = g["positions"][:bs]
 
     def _snapshot_decode(self, md: QSASparseMetadata, batch: Batch) -> None:
         """Eager decode: this step's rows, once per forward (the live page-table row may
@@ -245,10 +268,10 @@ class QSASparseAttnBackend(BaseAttnBackend):
         self.kvcache.store_kv(k, v, batch.out_loc, layer_id)
         if md.block_table is None:
             self._snapshot_decode(md, batch)
-        if slot == 0 or md.cmp_rows is None:
-            # Rebuilt at the first QSA layer of every forward: a capture batch runs its warmup
-            # and its capture through ONE metadata object, and a cached plan would bake the
-            # warmup's addresses into the graph.
+        if md.cmp_rows is None:
+            # Eager metadata is per batch, so its first QSA layer plans for every later one.
+            # Graph-bound decode never plans here: each range graph may replay alone, so its
+            # plan lives in static buffers restaged before every replay (_stage_decode).
             self._plan_index_writes(md, batch)
         self._update_index_cache(index, md, layer_id, slot)
         indices = self._select(index, md, slot)
@@ -406,6 +429,10 @@ class QSASparseAttnBackend(BaseAttnBackend):
             "table_idx": torch.zeros(max_bs, dtype=torch.int32, device=self.device),
             "token_to_req": torch.arange(max_bs, dtype=torch.int32, device=self.device),
             "cu_seqlens": torch.arange(max_bs + 1, dtype=torch.int32, device=self.device),
+            "cmp_rows": empty(max_bs, dtype=torch.int32),
+            "ring_rows": empty(max_bs, dtype=torch.int32),
+            "state_slots": torch.zeros(max_bs, dtype=torch.int32, device=self.device),
+            "positions": torch.zeros(max_bs, dtype=torch.int32, device=self.device),
             "logits": empty(chunk, columns, dtype=torch.float32),
             "visible": empty(max_bs, dtype=torch.int32),
             "blocks": empty(max_bs, self.block_topk, dtype=torch.int32),
@@ -423,13 +450,13 @@ class QSASparseAttnBackend(BaseAttnBackend):
         assert isinstance(md, QSASparseMetadata)
         bs = batch.size
         dummy = torch.full((bs,), batch.padded_reqs[0].table_idx, dtype=torch.int64, device=self.device)
-        self._stage_decode(md, bs, dummy)
+        self._stage_decode(md, bs, dummy, None)
 
     def prepare_for_replay(self, batch: Batch) -> None:
         md = batch.attn_metadata
         assert isinstance(md, QSASparseMetadata)
         assert batch.active_table_idx is not None, "decode batch is missing its page-table rows"
-        self._stage_decode(md, batch.padded_size, batch.active_table_idx.to(torch.int64))
+        self._stage_decode(md, batch.padded_size, batch.active_table_idx.to(torch.int64), batch)
 
     # Layer-range graphs replay exact-size decode batches through the same static buffers.
     @property

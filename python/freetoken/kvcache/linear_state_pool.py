@@ -134,16 +134,21 @@ class LinearStatePool:
             raise ValueError(f"state caching needs page_size dividing {CHUNK_SIZE}, got {page_size}")
 
     def can_export(self, req, position: int) -> bool:
-        """Whether the complete state after ``position`` inputs can still be produced."""
-        if self.replay is not None:
-            return self.replay.can_export(req, position)
-        return position == req.cached_len
+        """Whether the complete state after ``position`` inputs can still be produced. Replay
+        reaches past positions of the GDN state only; declared slot states keep just the
+        current one, so with them a past position is not a complete state."""
+        if position == req.cached_len:
+            return True
+        return self.replay is not None and not self._slot_specs and self.replay.can_export(req, position)
 
     def export(self, req, position: int, dst: int) -> None:
-        if self.replay is not None:
-            self.replay.export(req, position, dst)
-        else:
+        if self.replay is None:
             self.copy_from(req.linear_slot_idx, dst)
+            return
+        self.replay.export(req, position, dst)
+        src = req.linear_slot_idx if req.linear_slot_idx is not None else req.table_idx
+        for t in self.slot_states.values():
+            t[:, dst].copy_(t[:, src])
 
     def materialize(self, req) -> None:
         """Make the request's own slot its complete current state."""

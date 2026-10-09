@@ -141,10 +141,15 @@ class QSAKVCache(MHAKVCache):
         return kv + slab // tokens, swa
 
     def paged_views(self) -> list[torch.Tensor]:
+        """K/V pages, the INT8 scales, and each page's compressed index rows (scratch rows
+        excluded): a page copied without its index rows would score as all-zero blocks."""
         views = super().paged_views()
         if self._scale_buffer is not None:
             views += [self._scale_buffer[:, layer].movedim(1, 0)
                       for layer in range(self._scale_buffer.shape[1])]
+        rows = self._page_size // self._index_ratio
+        views += [self._cmp_k_buffer[slot, : self._cmp_scratch_base].view(-1, rows, self._index_head_dim)
+                  for slot in range(self._num_index_layers)]
         return views
 
     def store_kv(self, k: torch.Tensor, v: torch.Tensor, out_loc: torch.Tensor, layer_id: int) -> None:

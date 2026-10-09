@@ -210,9 +210,10 @@ def build_ple_metadata(batch: Batch, context_pool: torch.Tensor, eos: int) -> PL
     )
 
 
-def commit_ngram_context(meta: PLEMetadata, context_pool: torch.Tensor, prefill) -> None:
+def commit_ngram_context(meta: PLEMetadata, context_pool: torch.Tensor,
+                         track: tuple[torch.Tensor, torch.Tensor] | None) -> None:
     """Roll each request's ``ple_ngram_ctx`` past this forward's tokens, and write the
-    window ending at each tracked chunk boundary to its snapshot slot."""
+    window ending at each tracked chunk boundary (batch row, snapshot slot) to its slot."""
     ids = meta.input_ids.long()
     ctx_len = meta.ngram_context.shape[1]
     steps = torch.arange(ctx_len, device=ids.device)
@@ -228,9 +229,10 @@ def commit_ngram_context(meta: PLEMetadata, context_pool: torch.Tensor, prefill)
         )
         nxt = torch.where(cand >= cu[:-1].unsqueeze(1), ids[cand.clamp_min(0)], old)
     context_pool.index_copy_(0, meta.state_slots, nxt.to(context_pool.dtype))
-    if prefill is not None and prefill.track_boundary_row is not None:
-        win = ids[prefill.track_boundary_row.unsqueeze(1) - ctx_len + steps]
-        context_pool.index_copy_(0, prefill.track_dst, win.to(context_pool.dtype))
+    if track is not None:
+        rows, dst = track
+        win = ids[rows.unsqueeze(1) - ctx_len + steps]
+        context_pool.index_copy_(0, dst, win.to(context_pool.dtype))
 
 
 class NGramEmbedding(BaseOP):
@@ -362,18 +364,22 @@ class PLELayer(BaseOP):
         states = pool.slot_state(PLE_CONV_STATE, self.layer_id)
         x = self.norm_conv.forward(gated)
         prefill = batch.fla_metadata.prefill
+        track = None
         if prefill is not None and prefill.track_boundary_row is not None:
-            self._write_track_snapshot(states, x, prefill)
+            # The boundary row indexes the prefill rows, which follow the decode rows here.
+            track = (prefill.track_boundary_row + batch.decode_size, prefill.track_dst)
+            self._write_track_snapshot(states, x, *track)
         out = gated + self._short_conv(x, meta, states)
-        commit_ngram_context(meta, context_pool, prefill)
+        commit_ngram_context(meta, context_pool, track)
         return out
 
-    def _write_track_snapshot(self, states: torch.Tensor, x: torch.Tensor, prefill) -> None:
+    def _write_track_snapshot(self, states: torch.Tensor, x: torch.Tensor, rows: torch.Tensor,
+                              dst: torch.Tensor) -> None:
         """Conv history at the GDN track boundary into the same snapshot slot, so a prefix hit
         restores PLE and GDN state together. Track slots never alias the live slots this
         forward advances, so the two writes are order-independent."""
-        src = prefill.track_boundary_row.unsqueeze(1) + torch.arange(-self.state_len, 0, device=x.device)
-        states.index_copy_(0, prefill.track_dst, x[src].transpose(-1, -2).contiguous().to(states.dtype))
+        src = rows.unsqueeze(1) + torch.arange(-self.state_len, 0, device=x.device)
+        states.index_copy_(0, dst, x[src].transpose(-1, -2).contiguous().to(states.dtype))
 
     def _read_state(self, meta: PLEMetadata, states: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         state = states.index_select(0, meta.state_slots).to(dtype)
