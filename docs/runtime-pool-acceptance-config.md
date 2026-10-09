@@ -8,7 +8,7 @@
 - 被测实现：`PYTHONPATH=/home/nengneng/AIPrometheus/servebig/servebig-project/.worktrees/runtime-pool/python`。只能通过 CLI、HTTP 和本文列出的公开入口使用，不得阅读其中源码、diff 或笔记。
 - 原分池基线（对照用）：`PYTHONPATH=/home/nengneng/AIPrometheus/servebig/servebig-project/.worktrees/dflash-mainline/python`。
 - 启动命令：`python -m freetoken --port <端口> --gpu <GPU UUID> --model-path <模型> ...`；就绪判断：`GET /v1/cache/status` 的 `state == "serving"`。模型加载约 4–5 分钟。
-- GPU：只能使用 GPU1 `GPU-b8a2a927-a7dd-4a70-5fca-aa2f74a142cd`（RTX 4090，24 GiB），设置 `CUDA_VISIBLE_DEVICES=<UUID>` 并传 `--gpu <UUID>`。GPU0／GPU2 属于其他用户，禁止使用。GPU1 分时共享：只有协调者消息允许时才能启动 GPU 进程；每轮结束退出全部进程并向协调者报告。
+- GPU：只能使用 GPU1 `GPU-b8a2a927-a7dd-4a70-5fca-aa2f74a142cd`（RTX 4090，24 GiB），设置 `CUDA_VISIBLE_DEVICES=<UUID>` 并传 `--gpu <UUID>`。GPU0／GPU2 属于其他用户，禁止使用。每个服务进程必须用 `taskset -c 8-15,24-31` 启动（其他核归另一组实验，混用会让 CPU 专家计算慢 5～10 倍）。GPU1 分时共享：只有协调者消息允许时才能启动 GPU 进程；每轮结束退出全部进程并向协调者报告。
 - 模型：`/data1/lmcache_kv/models/Qwen3.6-35B-A3B-NVFP4`（hybrid_linear：GDN 线性层＋全注意力，MoE，上下文 262144）。
 - DFlash 草稿模型：`/data2/servebig-envs/dflash_models/models--z-lab--Qwen3.6-35B-A3B-DFlash/snapshots/f181eece646affea2c38b2765f1aaa01a9734ccd`。
 - 公共参数：`--moe-backend offload --moe-cache-size 2048 --attention-backend fi`。专家容量由 `--moe-cache-size` 固定。
