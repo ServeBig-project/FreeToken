@@ -154,20 +154,26 @@ def stats_fields(server, c, concepts, label="stats_field"):
     return [p for p, _ in paths]
 
 
-FIXED_CONCEPTS = {k: STATS_CONCEPTS[k] for k in ("round_time", "proposal_time", "verify_time", "timing_scope",
-                                                  "fixed_rounds", "resource_clipped_requests")}
-
-
 def fixed_stats_and_api(server, c):
-    """Section 4 items after fixed-mode drafting; token-ID prompts stay unsupported (section 2)."""
+    """Section 4 in fixed mode: per-round timing is adaptive-only; clipped_requests counts requests whose
+    draft was shortened (tail = own remaining output, capacity = resources). Token-ID prompts unsupported."""
+    from workloads import spec_delta
     prompt, _ = copy_prompt(140, 40)
-    server.complete(prompt, 200, group=fresh())
-    server.wait_idle()
-    time.sleep(2)  # asynchronous timing observations may lag the reply
-    paths = stats_fields(server, c, FIXED_CONCEPTS, "fixed_stats_field")
+    before = server.stats()
+    server.parallel([lambda: server.complete(prompt, 13, group=fresh()),  # tail shorter than one block
+                     lambda: server.complete(prompt, 200, group=fresh())])
+    after = server.wait_idle()
+    spec0, spec1 = before["speculative"], after["speculative"]
+    clipped = spec1.get("clipped_requests")
+    c.check("clipped_requests_reported", isinstance(clipped, dict) and {"tail", "capacity"} <= set(clipped),
+            clipped=clipped)
+    if isinstance(clipped, dict):
+        tail = clipped.get("tail", 0) - (spec0.get("clipped_requests") or {}).get("tail", 0)
+        c.check("tail_clip_counted", tail > 0, tail_delta=tail, delta=spec_delta(after, before))
+    timing = [p for p, _ in key_paths(spec1) if any(f in p for f in ("timing_scope", "proposal", "round_ms"))]
+    c.note("fixed_mode_timing_fields", present=timing)
     ids = server.complete([1, 2, 3], 4)
     c.check("token_id_prompt_rejected", 400 <= ids["status"] < 500, status=ids["status"], body=str(ids["body"])[:200])
-    return {"stats_paths": paths}
 
 
 def adaptive_policy(server, c):

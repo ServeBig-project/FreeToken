@@ -9,7 +9,7 @@ import urllib.request
 
 from transformers import AutoTokenizer
 
-from harness import cached, document, qwen36, dflash, text
+from harness import cached, document, dflash, post, qwen36, text
 from p1 import REAL_ACCEPT_MIN, TINY
 from p2 import REUSE_ACCEPT_FRACTION, REUSE_MIN_SHARE, fresh, idle_window_clean, note_question
 from workloads import COPY_MIN_RATIO, acceptance, copy_prompt, copy_ratio
@@ -22,6 +22,7 @@ PHYSICAL_SAVING_SHARE = 0.5
 CONFIGS = {
     "nvfp4_n8_cold": qwen36(policy="layered-pipeline") + dflash(8) + ["--prefix-cache-host-gib", "4"],
     "nvfp4_n8_coldsmall": qwen36() + dflash(8) + ["--prefix-cache-host-gib", "0.25"],
+    "nvfp4_lp_tool": qwen36(policy="layered-pipeline") + dflash(8) + ["--enable-special-token-ckpt"],
 }
 
 
@@ -147,6 +148,83 @@ def cancel_long_prompt(server, c):
     c.check("serves_after_prefill_cancel", copy_ratio(short_src, text(again)) >= COPY_MIN_RATIO)
 
 
+SHORT_ADMIT_SECONDS = 10  # a short request beside nearly finished long decodes must finish within this
+
+
+def short_admit_near_end(server, c):
+    """While long-prompt requests decode their last tokens and the window pool has room, a short new
+    request is admitted promptly instead of waiting for them to finish."""
+    longs = [copy_prompt(185 + k, 500) for k in range(3)]
+    first, finished = {}, {}
+
+    def run_long(k):
+        body = {"model": "m", "prompt": longs[k][0], "max_tokens": 600, "temperature": 0, "stream": True,
+                "cache_group": fresh()}
+        req = urllib.request.Request(server.url + "/v1/completions", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        out = ""
+        with urllib.request.urlopen(req, timeout=900) as response:
+            for raw in response:
+                line = raw.decode().strip()
+                if line.startswith("data:") and line[5:].strip() != "[DONE]":
+                    chunk = json.loads(line[5:])
+                    if chunk.get("choices"):
+                        first.setdefault(k, time.monotonic())
+                        out += chunk["choices"][0].get("text", "")
+        finished[k] = time.monotonic()
+        return {"text": out}
+
+    def run_short():
+        while len(first) < 3:
+            time.sleep(0.2)
+        time.sleep(6)  # all three decode, well into their 600-token outputs
+        t0 = time.monotonic()
+        resp = server.complete("The capital of France is", 16, group=fresh())
+        return resp, time.monotonic() - t0, t0
+    results = server.parallel([lambda k=k: run_long(k) for k in range(3)] + [run_short])
+    resp, seconds, t0 = results[3]
+    still_running = sum(1 for t in finished.values() if t > t0 + seconds)
+    if still_running:
+        c.check("short_request_admitted_promptly", resp["status"] == 200 and seconds <= SHORT_ADMIT_SECONDS,
+                seconds=seconds, longs_still_running=still_running)
+    else:
+        c.note("short_admit_not_exercised", seconds=seconds, reason="long requests finished first")
+    c.check("longs_complete_beside_short", all(copy_ratio(src, r["text"]) >= COPY_MIN_RATIO
+                                               for (_, src), r in zip(longs, results[:3])))
+    idle_window_clean(server, c, "short_admit")
+    return {"seconds": seconds, "long_finish_after_short_start": [t - t0 for t in finished.values()]}
+
+
+TOOLS = [{"type": "function", "function": {
+    "name": "lookup_note", "description": "Return the recorded value of one note.",
+    "parameters": {"type": "object", "properties": {"note_id": {"type": "string"}}, "required": ["note_id"]}}}]
+
+
+def tool_ckpt_pressure(server, c):
+    """--enable-special-token-ckpt: concurrent long prompts whose replies call a tool, while a new long
+    prompt arrives; the server stays up and idle accounting is consistent."""
+    def tool_chat(seed):
+        body = {"model": "m", "max_tokens": 200, "temperature": 0, "tools": TOOLS, "cache_group": fresh(),
+                "chat_template_kwargs": {"enable_thinking": False},
+                "messages": [{"role": "user", "content": document(seed, 350) +
+                              f"\n\nUse the lookup_note tool to fetch note {seed}-7. Call the tool now."}]}
+        return post(server.url, "/v1/chat/completions", body, 420)
+
+    def late():
+        time.sleep(3)
+        prompt, src = copy_prompt(199, 450)
+        return server.complete(prompt, 128, group=fresh()), src
+    results = server.parallel([lambda s=s: tool_chat(190 + s) for s in range(3)] + [late])
+    chats, (last, src) = results[:3], results[3]
+    calls = [r["body"]["choices"][0].get("message", {}).get("tool_calls") for r in chats if r["status"] == 200]
+    c.check("tool_replies_ok", all(r["status"] == 200 for r in chats) and any(calls),
+            statuses=[r["status"] for r in chats], tool_calls=[bool(x) for x in calls])
+    c.check("late_long_prompt_ok", copy_ratio(src, text(last)) >= COPY_MIN_RATIO)
+    time.sleep(5)  # idle integrity is checked by the service while idle
+    c.check("server_alive_after_tool_pressure", server.alive() and server.stats()["requests"]["active"] == 0)
+    idle_window_clean(server, c, "tool_ckpt")
+
+
 def pc(server):
     return server.status()["prefix_cache"]
 
@@ -252,7 +330,9 @@ def cancel_waiting_restore(server, c):
 
 
 PLAN = {
-    "nvfp4_n8": [long_generation, pressure_admission, pressure_mixed, cold_restore, cancel_long_prompt],
+    "nvfp4_n8": [long_generation, pressure_admission, pressure_mixed, short_admit_near_end, cold_restore,
+                 cancel_long_prompt],
+    "nvfp4_lp_tool": [tool_ckpt_pressure],
 
     "nvfp4_n8_cold": [cold_restore, fork_copy_overlap, cancel_waiting_restore],
     "nvfp4_n8_coldsmall": [cold_restore],  # smoke

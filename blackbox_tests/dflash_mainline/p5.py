@@ -82,6 +82,7 @@ def wave(server, tokenizer, prompts, max_tokens, concurrent):
     graph = {p: after["cuda_graph"].get(p, 0) - before["cuda_graph"].get(p, 0) for p in ("draft", "verify",
                                                                                           "target_decode")}
     return {"decode_tok_s": statistics.mean(rates), "acceptance": acceptance(delta), "delta": delta,
+            "texts": [r["text"] for r in results],
             "graph_replays": graph, "peak_gpu_mib": max(peak)}
 
 
@@ -134,6 +135,9 @@ def compact_vs_full(sessions, c):
                 c.check(f"compact_decode_gate{suffix}:{name}", False, **detail)
             else:
                 c.note(f"compact_decode_gate_inconclusive{suffix}:{name}", **detail)
+        if "c1_short" in a and "c1_short" in b:  # single sequential requests: same scheduling in both arms
+            same = [x == y for wa, wb in zip(a["c1_short"], b["c1_short"]) for x, y in zip(wa["texts"], wb["texts"])]
+            c.check(f"compact_full_token_identical{suffix}:c1_short", all(same), identical=same)
         c.check(f"compact_reports_less_context{suffix}", a["status"]["context_bytes"] < b["status"]["context_bytes"],
                 compact=a["status"]["context_bytes"], full=b["status"]["context_bytes"])
 

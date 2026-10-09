@@ -1,0 +1,1598 @@
+{
+ "session": "perf_compact",
+ "artifacts": {
+  "perf_run": {
+   "c4_long": [
+    {
+     "decode_tok_s": 22.05969587423511,
+     "acceptance": 0.9582772543741588,
+     "delta": {
+      "draft_tokens": 743,
+      "accepted_draft_tokens": 712,
+      "verify_steps": 52,
+      "emitted_tokens": 900,
+      "verify_positions": 931,
+      "verify_physical_positions": 936,
+      "dflash_draft_positions": 931,
+      "dflash_draft_physical_positions": 938,
+      "cost_ar_requests": 0,
+      "cost_stopped_requests": 0,
+      "cost_probe_requests": 0,
+      "histogram": [
+       0,
+       2,
+       1,
+       1,
+       184
+      ],
+      "verify_rounds": {
+       "inwave": 0,
+       "outwave": 52
+      },
+      "verify_requests": {
+       "inwave": 0,
+       "outwave": 188
+      },
+      "fallback_requests": {
+       "phase": 120
+      },
+      "completion_tokens": 1024,
+      "requests": 4
+     },
+     "texts": [
+      " 300-220: an observation about volcanoes number 1840 records value 473 for later review. Note 300-221: an observation about volcanoes number 1847 records value 510 for later review. Note 300-222: an observation about volcanoes number 1854 records value 547 for later review. Note 300-223: an observation about volcanoes number 1861 records value 584 for later review. Note 300-224: an observation about volcanoes number 1868 records value 621 for later review. Note 300-225: an observation about volcanoes number 1875 records value 658 for later review. Note 300-226: an observation about volcanoes number 1882 records value 695 for later review. Note 300-227: an observation about volcanoes number 1889 records value 732 for later review. Note 300-228",
+      " 301-220: an observation about medieval castles number 1841 records value 484 for later review. Note 301-221: an observation about medieval castles number 1848 records value 521 for later review. Note 301-222: an observation about medieval castles number 1855 records value 558 for later review. Note 301-223: an observation about medieval castles number 1862 records value 595 for later review. Note 301-224: an observation about medieval castles number 1869 records value 632 for later review. Note 301-225: an observation about medieval castles number 1876 records value 669 for later review. Note 301-226: an observation about medieval castles number 1883 records value 706 for later review. Note 301-227: an observation about medieval castles number 1890 records value 743 for later review. Note",
+      " 302-220: an observation about deep sea fish number 1842 records value 495 for later review. Note 302-221: an observation about deep log number 1849 records value 532 for later review. Note 302-222: an observation about deep sea fish number 1856 records value 569 for later review. Note 302-223: an observation about deep sea fish number 1863 records value 606 for later review. Note 302-224: an observation about deep sea fish number 1870 records value 643 for later review. Note 302-225: an observation about deep sea fish number 1877 records value 680 for later review. Note 302-226: an observation about deep sea fish number 1884 records value 717 for later review. Note 302-227:\n\nNote 302-228: an observation about deep sea fish number 1891 records",
+      " 303-220: an observation about tea number 1843 records value 506 for later review. Note 303-221: an observation about tea number 1850 records value 543 for later review. Note 303-222: an observation about tea number 1857 records value 580 for later review. Note 303-223: an observation about tea number 1864 records value 617 for later review. Note 303-224: an observation about tea number 1871 records value 654 for later review. Note 303-225: an observation about tea number 1878 records value 691 for later review. Note 303-226: an observation about tea number 1885 records value 728 for later review. Note 303-227: an observation about tea number 1892 records value 765 for later review. Note 303-228: an observation about tea number 1"
+     ],
+     "graph_replays": {
+      "draft": 52,
+      "verify": 52,
+      "target_decode": 0
+     },
+     "peak_gpu_mib": 19543
+    },
+    {
+     "decode_tok_s": 22.681229285476924,
+     "acceptance": 0.9794801641586868,
+     "delta": {
+      "draft_tokens": 731,
+      "accepted_draft_tokens": 716,
+      "verify_steps": 52,
+      "emitted_tokens": 900,
+      "verify_positions": 915,
+      "verify_physical_positions": 918,
+      "dflash_draft_positions": 915,
+      "dflash_draft_physical_positions": 918,
+      "cost_ar_requests": 0,
+      "cost_stopped_requests": 0,
+      "cost_probe_requests": 0,
+      "histogram": [
+       0,
+       0,
+       2,
+       1,
+       181
+      ],
+      "verify_rounds": {
+       "inwave": 0,
+       "outwave": 52
+      },
+      "verify_requests": {
+       "inwave": 0,
+       "outwave": 184
+      },
+      "fallback_requests": {
+       "phase": 120
+      },
+      "completion_tokens": 1024,
+      "requests": 4
+     },
+     "texts": [
+      " 304-220: an observation about orbital mechanics number 1844 records value 517 for later review. Note 304-221: an observation about orbital mechanics number 1851 records value 554 for later review. Note 304-222: an observation about orbital mechanics number 1858 records value 591 for later review. Note 304-223: an observation about orbital mechanics number 1865 records value 628 for later review. Note 304-224: an observation about orbital mechanics number 1872 records value 665 for later review. Note 304-225: an observation about orbital mechanics number 1879 records value 702 for later review. Note 304-226: an observation about orbital mechanics number 1886 records value 739 for later review. Note 304-227: an observation about orbital mechanics number 1893 records value 776 for later review. Note 304-228",
+      " 305-220: an observation about bread number 1845 records value 528 for later review. Note 305-221: an observation about bread number 1852 records value 565 for later review. Note 305-222: an observation about bread number 1859 records value 602 for later review. Note 305-223: an observation about bread number 1866 records value 639 for later review. Note 305-224: an observation about bread number 1873 records value 676 for later review. Note 305-225: an observation about bread number 1880 records value 713 for later review. Note 305-226: an observation about bread number 1887 records value 750 for later review. Note 305-227: an observation about bread number 1894 records value 787 for later review. Note 305-228: an observation about bread number 1",
+      " 306-220: an observation about glaciers number 1846 records value 539 for later review. Note 306-221: an observation about glaciers number 1853 records value 576 for later review. Note 306-222: an observation about glaciers number 1860 records value 613 for later review. Note 306-223: an observation about glaciers number 1867 records value 650 for later review. Note 306-224: an observation about glaciers number 1874 records value 687 for later review. Note 306-225: an observation about glaciers number 1881 records value 724 for later review. Note 306-226: an observation about glaciers number 1888 records value 761 for later review. Note 306-227: an observation about glaciers number 1895 records value 798 for later review. Note 306-228: an observation about glaciers number 1",
+      " 307-220: an observation about railway signals number 1847 records value 550 for later review. Note 307-221: an observation about railway signals number 1854 records value 587 for later review. Note 307-222: an observation about railway signals number 1861 records value 624 for later review. Note 307-223: an observation about railway signals number 1868 records value 661 for later review. Note 307-224: an observation about railway signals number 1875 records value 698 for later review. Note 307-225: an observation about railway signals number 1882 records value 735 for later review. Note 307-226: an observation about railway signals number 1889 records value 772 for later review. Note 307-227: an observation about railway signals number 1896 records value 809 for later review. Note 307-228"
+     ],
+     "graph_replays": {
+      "draft": 52,
+      "verify": 52,
+      "target_decode": 0
+     },
+     "peak_gpu_mib": 19543
+    },
+    {
+     "decode_tok_s": 21.428233916330992,
+     "acceptance": 0.9340369393139841,
+     "delta": {
+      "draft_tokens": 758,
+      "accepted_draft_tokens": 708,
+      "verify_steps": 55,
+      "emitted_tokens": 900,
+      "verify_positions": 950,
+      "verify_physical_positions": 958,
+      "dflash_draft_positions": 950,
+      "dflash_draft_physical_positions": 958,
+      "cost_ar_requests": 0,
+      "cost_stopped_requests": 0,
+      "cost_probe_requests": 0,
+      "histogram": [
+       1,
+       1,
+       1,
+       1,
+       188
+      ],
+      "verify_rounds": {
+       "inwave": 0,
+       "outwave": 55
+      },
+      "verify_requests": {
+       "inwave": 0,
+       "outwave": 192
+      },
+      "fallback_requests": {
+       "phase": 120
+      },
+      "completion_tokens": 1024,
+      "requests": 4
+     },
+     "texts": [
+      " 308-220: an observation about honeybees number 1848 records value 561 for later review. Note 308-221: an observation about honeybees number 1855 records value 598 for later review. Note 308-222: an observation about honeybees number 1862 records value 635 for later review. Note 308-223: an observation about honeybees number 1869 records value 672 for later review. Note 308-224: an observation about honeybees number 1876 records value 709 for later review. Note 308-225: an observation about honeybees number 1883 records value 746 for later review. Note 308-226: an observation about honeybees number 1890 records value 783 for later review. Note 308-227: an observation about honeybees number 1897 records value 820 for later review. Note",
+      " 309-220: an observation about ancient Rome number 1849 records value 572 for later review. Note 309-221: an observation about ancient Rome number 1856 records value 609 for later review. Note 309-222: an observation about ancient Rome number 1863 records value 646 for later review. Note 309-223: an observation about ancient Rome number 1870 records value 683 for later review. Note 309-224: an observation about ancient Rome number 1877 records value 720 for later review. Note 309-225: an observation about ancient Rome number 1884 records value 757 for later review. Note 309-226: an observation about ancient Rome number 1891 records value 794 for later review. Note 309-227: an observation about ancient Rome number 1898 records value 831 for later review. Note 309-228",
+      " 500-0: an observation about jazz number 500 records value 419 for later review. Note 500-1: an observation about jazz number 507 records value 456 for later review. Note 500-2: an observation about jazz number 514 records value 493 for later review. Note 500-3: an observation about jazz number 521 records value 530 for later review. Note 500-4: an observation about jazz number 528 records value 567 for later review. Note 500-5: an observation about jazz number 535 records value 604 for later review. Note 500-6: an observation about\n\nNote 500-7: an observation about jazz number 542 records value 641 for later review. Note 500-8: an observation about jazz number 549 records value 678 for later review. Note 500-9: an observation about jazz number 556 records value 715 for later review. Note ",
+      " 311-220: an observation about coral reefs number 1851 records value 594 for later review. Note 311-221: an observation about coral reefs number 1858 records value 631 for later review. Note 311-222: an observation about coral reefs number 1865 records value 668 for later review. Note 311-223: an observation about coral reefs number 1872 records value 705 for later review. Note 311-224: an observation about coral reefs number 1879 records value 742 for later review. Note 311-225: an observation about coral reefs number 1886 records value 779 for later review. Note 311-226: an observation about coral reefs number 1893 records value 816 for later review. Note 311-227:\n\nNote 311-228: an observation about coral reefs number 1907 records value 890 for later"
+     ],
+     "graph_replays": {
+      "draft": 55,
+      "verify": 55,
+      "target_decode": 0
+     },
+     "peak_gpu_mib": 19543
+    }
+   ],
+   "c1_short": [
+    {
+     "decode_tok_s": 75.97974057922116,
+     "acceptance": 0.8766891891891891,
+     "delta": {
+      "draft_tokens": 592,
+      "accepted_draft_tokens": 519,
+      "verify_steps": 149,
+      "emitted_tokens": 668,
+      "verify_positions": 741,
+      "verify_physical_positions": 741,
+      "dflash_draft_positions": 741,
+      "dflash_draft_physical_positions": 743,
+      "cost_ar_requests": 0,
+      "cost_stopped_requests": 0,
+      "cost_probe_requests": 0,
+      "histogram": [
+       1,
+       0,
+       1,
+       2,
+       146
+      ],
+      "verify_rounds": {
+       "inwave": 0,
+       "outwave": 149
+      },
+      "verify_requests": {
+       "inwave": 0,
+       "outwave": 149
+      },
+      "fallback_requests": {
+       "phase": 0,
+       "tail": 1
+      },
+      "completion_tokens": 673,
+      "requests": 4
+     },
+     "texts": [
+      "    if n < 2:\n        return False\n    for i in range(2, int(n**0.5) + 1):\n        if n % i == 0:\n            return False\n    return True\n\n\ndef is_palindrome(n: int) -> bool:\n    \"\"\"Return True if n is a palindrome.\"\"\"\n    s = str(n)\n    return s == s[::-1]\n\n\ndef is_palindrome_prime(n: int) -> bool:\n    \"\"\"Return True if n is a palindrome and a prime number.\"\"\"\n    return is_palindrome(n) and is_prime(n)\n\n\ndef is_palindrome_prime(n: int) -> bool:\n    \"\"\"Return True if n is a palindrome and a prime number.\"\"\"\n    return is_palindrome(n) and is_prime(n)\n\n\ndef is_palindrome_prime(n: int) -> bool:\n    \"\"\"Return True if n is a",
+      "    while b:\n        a, b = b, a % b\n    return a\n\n\ndef lcm(a: int, b: int) -> int:\n    \"\"\"Least common multiple of a and b.\"\"\"\n    return a * b // gcd(a, b)\n\n\ndef main():\n    a, b = map(int, input().split())\n    print(lcm(a, b))\n\n\nif __name__ == '__main__':\n    main()",
+      "    return ' '.join(s.split()[::-1])\n\n\ndef reverse_words2(s: str) -> str:\n    \"\"\"Reverse the order of the words in s (single spaces).\"\"\"\n    return ' '.join(reversed(s.split()))\n\n\ndef reverse_words3(s: str) -> str:\n    \"\"\"Reverse the order of the words in s (single spaces).\"\"\"\n    return ' '.join(s.split()[::-1])\n\n\ndef reverse_words4(s: str) -> str:\n    \"\"\"Reverse the order of the words in s (single spaces).\"\"\"\n    return ' '.join(s.split()[::-1])\n\n\ndef reverse_words5(s: str) -> str:\n    \"\"\"Reverse the order of the words in s (single spaces).\"\"\"\n    return ' '.join(s.split()[::-1])\n\n\ndef reverse_words6(s: str) -> str:\n    \"\"\"Reverse the order of the words in",
+      "    if n < 0:\n        raise ValueError(\"n must be non-negative\")\n    if n == 0:\n        return 0\n    if n == 1:\n        return 1\n    a, b = 0, 1\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n    return b\n\n\ndef fib_recursive(n: int) -> int:\n    \"\"\"Return the n-th Fibonacci number, fib(0)=0 and fib(1)=1.\"\"\"\n    if n < 0:\n        raise ValueError(\"n must be non-negative\")\n    if n == 0:\n        return 0\n    if n == 1:\n        return 1\n    return fib_recursive(n - 1) + fib_recursive(n - 2)\n\n\ndef fib_memo(n: int, memo: dict"
+     ],
+     "graph_replays": {
+      "draft": 149,
+      "verify": 149,
+      "target_decode": 1
+     },
+     "peak_gpu_mib": 19559
+    },
+    {
+     "decode_tok_s": 86.5509839226252,
+     "acceptance": 0.8481848184818482,
+     "delta": {
+      "draft_tokens": 606,
+      "accepted_draft_tokens": 514,
+      "verify_steps": 152,
+      "emitted_tokens": 666,
+      "verify_positions": 758,
+      "verify_physical_positions": 758,
+      "dflash_draft_positions": 758,
+      "dflash_draft_physical_positions": 758,
+      "cost_ar_requests": 0,
+      "cost_stopped_requests": 0,
+      "cost_probe_requests": 0,
+      "histogram": [
+       3,
+       0,
+       1,
+       0,
+       151
+      ],
+      "verify_rounds": {
+       "inwave": 0,
+       "outwave": 152
+      },
+      "verify_requests": {
+       "inwave": 0,
+       "outwave": 152
+      },
+      "fallback_requests": {
+       "phase": 0,
+       "tail": 3
+      },
+      "completion_tokens": 673,
+      "requests": 4
+     },
+     "texts": [
+      "    if n < 2:\n        return False\n    for i in range(2, int(n**0.5) + 1):\n        if n % i == 0:\n            return False\n    return True\n\n\ndef is_palindrome(s: str) -> bool:\n    \"\"\"Return True if s is a palindrome.\"\"\"\n    return s == s[::-1]\n\n\ndef is_palindrome_prime(n: int) -> bool:\n    \"\"\"Return True if n is a palindrome and a prime number.\"\"\"\n    return is_palindrome(str(n)) and is_prime(n)\n\n\ndef is_palindrome_prime_in_range(start: int, end: int) -> list:\n    \"\"\"Return a list of palindrome primes in the range [start, end].\"\"\"\n    return [n for n in range(start, end + 1) if is_palindrome_prime(n)]\n\n\ndef is_palindrome_prime_in_range(start",
+      "    while b:\n        a, b = b, a % b\n    return a\n\n\ndef lcm(a: int, b: int) -> int:\n    \"\"\"Least common multiple of a and b.\"\"\"\n    return a * b // gcd(a, b)\n\n\ndef main():\n    a, b = map(int, input().split())\n    print(lcm(a, b))\n\n\nif __name__ == '__main__':\n    main()",
+      "    return ' '.join(s.split()[::-1])\n\n\ndef reverse_words2(s: str) -> str:\n    \"\"\"Reverse the order of the words in s (single spaces).\"\"\"\n    return ' '.join(reversed(s.split()))\n\n\ndef reverse_words3(s: str) -> str:\n    \"\"\"Reverse the order of the words in s (single spaces).\"\"\"\n    return ' '.join(s.split(' ')[::-1])\n\n\ndef reverse_words4(s: str) -> str:\n    \"\"\"Reverse the order of the words in s (single spaces).\"\"\"\n    return ' '.join(s.split(' ')[::-1])\n\n\ndef reverse_words5(s: str) -> str:\n    \"\"\"Reverse the order of the words in s (single spaces).\"\"\"\n    return ' '.join(s.split(' ')[::-1])\n\n\ndef reverse_words6(s: str) -> str:\n    \"\"\"Reverse the order of",
+      "    if n < 0:\n        raise ValueError(\"n must be non-negative\")\n    if n == 0:\n        return 0\n    if n == 1:\n        return 1\n    a, b = 0, 1\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n    return b\n\n\ndef fib_recursive(n: int) -> int:\n    \"\"\"Return the n-th Fibonacci number, fib(0)=0 and fib(1)=1.\"\"\"\n    if n < 0:\n        raise ValueError(\"n must be non-negative\")\n    if n == 0:\n        return 0\n    if n == 1:\n        return 1\n    return fib_recursive(n - 1) + fib_recursive(n - 2)\n\n\ndef fib_memo(n: int, memo: dict"
+     ],
+     "graph_replays": {
+      "draft": 152,
+      "verify": 152,
+      "target_decode": 3
+     },
+     "peak_gpu_mib": 19543
+    },
+    {
+     "decode_tok_s": 86.4041508223326,
+     "acceptance": 0.8571428571428571,
+     "delta": {
+      "draft_tokens": 602,
+      "accepted_draft_tokens": 516,
+      "verify_steps": 152,
+      "emitted_tokens": 668,
+      "verify_positions": 754,
+      "verify_physical_positions": 754,
+      "dflash_draft_positions": 754,
+      "dflash_draft_physical_positions": 754,
+      "cost_ar_requests": 0,
+      "cost_stopped_requests": 0,
+      "cost_probe_requests": 0,
+      "histogram": [
+       1,
+       2,
+       0,
+       0,
+       150
+      ],
+      "verify_rounds": {
+       "inwave": 0,
+       "outwave": 152
+      },
+      "verify_requests": {
+       "inwave": 0,
+       "outwave": 152
+      },
+      "fallback_requests": {
+       "phase": 0,
+       "tail": 1
+      },
+      "completion_tokens": 673,
+      "requests": 4
+     },
+     "texts": [
+      "    if n < 2:\n        return False\n    for i in range(2, int(n**0.5) + 1):\n        if n % i == 0:\n            return False\n    return True\n\n\ndef is_palindrome(n: int) -> bool:\n    \"\"\"Return True if n is a palindrome.\"\"\"\n    s = str(n)\n    return s == s[::-1]\n\n\ndef is_palindrome_prime(n: int) -> bool:\n    \"\"\"Return True if n is a palindrome and a prime number.\"\"\"\n    return is_palindrome(n) and is_prime(n)\n\n\ndef is_palindrome_prime(n: int) -> bool:\n    \"\"\"Return True if n is a palindrome and a prime number.\"\"\"\n    s = str(n)\n    if s != s[::-1]:\n        return False\n    if n < 2:\n        return False\n    for",
+      "    while b:\n        a, b = b, a % b\n    return a\n\n\ndef lcm(a: int, b: int) -> int:\n    \"\"\"Least common multiple of a and b.\"\"\"\n    return a * b // gcd(a, b)\n\n\ndef main():\n    a, b = map(int, input().split())\n    print(lcm(a, b))\n\n\nif __name__ == '__main__':\n    main()",
+      "    return ' '.join(s.split()[::-1])\n\n\ndef reverse_words2(s: str) -> str:\n    \"\"\"Reverse the order of the words in s (single spaces).\"\"\"\n    return ' '.join(reversed(s.split()))\n\n\ndef reverse_words3(s: str) -> str:\n    \"\"\"Reverse the order of the words in s (single spaces).\"\"\"\n    return ' '.join(s.split(' ')[::-1])\n\n\ndef reverse_words4(s: str) -> str:\n    \"\"\"Reverse the order of the words in s (single spaces).\"\"\"\n    return ' '.join(s.split(' ')[::-1])\n\n\ndef reverse_words5(s: str) -> str:\n    \"\"\"Reverse the order of the words in s (single spaces).\"\"\"\n    return ' '.join(s.split(' ')[::-1])\n\n\ndef reverse_words6(s: str) -> str:\n    \"\"\"Reverse the order of",
+      "    if n < 0:\n        raise ValueError(\"n must be non-negative\")\n    if n == 0:\n        return 0\n    if n == 1:\n        return 1\n    a, b = 0, 1\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n    return b\n\n\ndef fib_recursive(n: int) -> int:\n    \"\"\"Return the n-th Fibonacci number, fib(0)=0 and fib(1)=1.\"\"\"\n    if n < 0:\n        raise ValueError(\"n must be non-negative\")\n    if n == 0:\n        return 0\n    if n == 1:\n        return 1\n    return fib_recursive(n - 1) + fib_recursive(n - 2)\n\n\ndef fib_memo(n: int, memo: dict"
+     ],
+     "graph_replays": {
+      "draft": 152,
+      "verify": 152,
+      "target_decode": 1
+     },
+     "peak_gpu_mib": 19543
+    }
+   ],
+   "c16_long": [
+    {
+     "decode_tok_s": 9.192228026684491,
+     "acceptance": 0.958656330749354,
+     "delta": {
+      "draft_tokens": 387,
+      "accepted_draft_tokens": 371,
+      "verify_steps": 26,
+      "emitted_tokens": 469,
+      "verify_positions": 485,
+      "verify_physical_positions": 490,
+      "dflash_draft_positions": 485,
+      "dflash_draft_physical_positions": 490,
+      "cost_ar_requests": 0,
+      "cost_stopped_requests": 0,
+      "cost_probe_requests": 0,
+      "histogram": [
+       0,
+       1,
+       1,
+       0,
+       96
+      ],
+      "verify_rounds": {
+       "inwave": 0,
+       "outwave": 26
+      },
+      "verify_requests": {
+       "inwave": 0,
+       "outwave": 98
+      },
+      "fallback_requests": {
+       "phase": 1563,
+       "tail": 0
+      },
+      "completion_tokens": 2048,
+      "requests": 16
+     },
+     "texts": [
+      " 400-220: an observation about orbital mechanics number 1940 records value 576 for later review. Note 400-221: an observation about orbital mechanics number 1947 records value 613 for later review. Note 400-222: an observation about orbital mechanics number 1954 records value 650 for later review. Note 400-223: an observation about orbital mechanics number 1961 records value 687 for later review. Note 400",
+      " 401-220: an observation about bread number 1941 records value 587 for later review. Note 401-221: an observation about bread number 1948 records value 624 for later review. Note 401-222: an observation about bread number 1955 records value 661 for later review. Note 401-223: an observation about bread number 1962 records value 698 for later review. Note 401-224",
+      " 402-220: an observation about glaciers number 1942 records value 598 for later review. Note 402-221: an observation about glaciers number 1949 records value 635 for later review. Note 402-222: an observation about glaciers number 1956 records value 672 for later review. Note 402-223: an observation about glaciers number 1963 records value 709 for later review. Note 402-224",
+      " 403-220: an observation about railway signals number 1943 records value 609 for later review. Note 403-221: an observation about railway signals number 1950 records value 646 for later review. Note 403-222: an observation about railway signals number 1957 records value 683 for later review. Note 403-223: an observation about railway signals number 1964 records value 720 for later review. Note 403",
+      " 404-220: an observation about honeybees number 1944 records value 620 for later review. Note 404-221: an observation about honeybees number 1951 records value 657 for later review. Note 404-222: an observation about honeybees number 1958 records value 694 for later review. Note 404-223: an observation about honeybees number 1965 records value 731 for later review. Note",
+      " 405-220: an observation about ancient Rome number 1945 records value 631 for later review. Note 40 number 405-221: an observation about ancient Rome number 1952 records value 668 for later review. Note 405-222: an observation about ancient Rome number 1959 records value 705 for later review. Note 405-223: an observation about ancient Rome number 1966 records value 742 for later review. Note",
+      " 406-220: an observation about jazz number 1946 records value 642 for later review. Note 406-221: an observation about jazz number 1953 records value 679 for later review. Note 406-222: an observation about jazz number 1960 records value 716 for later review. Note 406-223: an observation about jazz number 1967 records value 753 for later review. Note 406-224",
+      " 407-220: an observation about coral reefs number 1947 records value 653 for later review. Note 407-221: an observation about coral reefs number 1954 records value 690 for later review. Note 407-222: an observation about coral reefs number 1961 records value 727 for later review. Note 407-223: an observation about coral reefs number 1968 records value 764 for later review. Note 407",
+      " 408-220: an observation about volcanoes number 1948 records value 664 for later review. Note 408-221: an observation about volcanoes number 1955 records value 701 for later review. Note 408-222: an observation about volcanoes number 1962 records value 738 for later review. Note 408-223: an observation about volcanoes number 1969 records value 775 for later review. Note 408",
+      " 409-220: an observation about medieval castles number 1949 records value 675 for later review. Note 409-221: an observation about medieval castles number 1956 records value 712 for later review. Note 409-222: an observation about medieval castles number 1963 records value 749 for later review. Note 409-223: an observation about medieval castles number 1970 records value 786 for later review. Note",
+      " 410-220: an observation about deep sea fish number 1950 records value 686 for later review. Note 4\n\nNote 410-221: an observation about deep sea fish number 1957 records value 723 for later review. Note 410-222: an observation about deep sea fish number 1964 records value 760 for later review. Note 410-223: an observation about deep sea fish number 1971 records value 797 for",
+      " 411-220: an observation about tea number 1951 records value 697 for later review. Note 411-221: an observation about tea number 1958 records value 734 for later review. Note 411-222: an observation about tea number 1965 records value 771 for later review. Note 411-223: an observation about tea number 1972 records value 808 for later review. Note 411-224",
+      " 412-220: an observation about orbital mechanics number 1952 records value 708 for later review. Note 412-221: an observation about orbital mechanics number 1959 records value 745 for later review. Note 412-222: an observation about orbital mechanics number 1966 records value 782 for later review. Note 412-223: an observation about orbital mechanics number 1973 records value 819 for later review. Note 412",
+      " 413-220: an observation about bread number 1953 records value 719 for later review. Note 413-221: an observation about bread number 1960 records value 756 for later review. Note 413-222: an observation about bread number 1967 records value 793 for later review. Note 413-223: an observation about bread number 1974 records value 830 for later review. Note 413-224",
+      " 414-220: an observation about glaciers number 1954 records value 730 for later review. Note 414-221: an observation about glaciers number 1961 records value 767 for later review. Note 414-222: an observation about glaciers number 1968 records value 804 for later review. Note 414-223: an observation about glaciers number 1975 records value 841 for later review. Note 414-224",
+      " 415-220: an observation about railway signals number 1955 records value 741 for later review. Note 415-221: an observation about railway signals number 1962 records value 778 for later review. Note 415-222: an observation about railway signals number 1969 records value 815 for later review. Note 415-223: an observation about railway signals number 1976 records value 852 for later review. Note 415"
+     ],
+     "graph_replays": {
+      "draft": 26,
+      "verify": 26,
+      "target_decode": 0
+     },
+     "peak_gpu_mib": 19543
+    },
+    {
+     "decode_tok_s": 9.01068632623383,
+     "acceptance": 0.9584415584415584,
+     "delta": {
+      "draft_tokens": 385,
+      "accepted_draft_tokens": 369,
+      "verify_steps": 27,
+      "emitted_tokens": 469,
+      "verify_positions": 485,
+      "verify_physical_positions": 497,
+      "dflash_draft_positions": 485,
+      "dflash_draft_physical_positions": 497,
+      "cost_ar_requests": 0,
+      "cost_stopped_requests": 0,
+      "cost_probe_requests": 0,
+      "histogram": [
+       1,
+       3,
+       0,
+       2,
+       94
+      ],
+      "verify_rounds": {
+       "inwave": 0,
+       "outwave": 27
+      },
+      "verify_requests": {
+       "inwave": 0,
+       "outwave": 100
+      },
+      "fallback_requests": {
+       "phase": 1563,
+       "tail": 0
+      },
+      "completion_tokens": 2048,
+      "requests": 16
+     },
+     "texts": [
+      " 416-220: an observation about honeybees number 1956 records value 752 for later review. Note 416-221: an observation about honeybees number 1963 records value 789 for later review. Note 416-222: an observation about honeybees number 1970 records value 826 for later review. Note 416-223: an observation about honeybees number 1977 records value 863 for later review. Note",
+      " 417-220: an observation about ancient Rome number 1957 records value 763 for later review. Note 417-221: an observation about ancient Rome number 1964 records value 800 for later review. Note 417-222: an observation about ancient Rome number 1971 records value 837 for later review. Note 417-223: an observation about ancient Rome number 1978 records value 874 for later review. Note 417",
+      " 418-220: an observation about jazz number 1958 records value 774 for later review. Note 418-221: an observation about jazz number 1965 records value 811 for later review. Note 418-222: an observation about jazz number 1972 records value 848 for later review. Note 418-223: an observation about jazz number 1979 records value 885 for later review. Note 418-224",
+      " 419-220: an observation about coral reefs number 1959 records value 785 for later review. Note 419-221: an observation about coral reefs number 1966 records value 822 for later review. Note 419-222: an observation about coral reefs number 1973 records value 859 for later review. Note 419-223: an observation about coral reefs number 1980 records value 896 for later review. Note 419",
+      " 420-220: an observation about volcanoes number 1960 records value 796 for later review. Note 420-221: an observation about volcanoes number 1967 records value 833 for later review. Note 420-222: an observation about volcanoes number 1974 records value 870 for later review. Note 420-223: an observation about volcanoes number 1981 records value 907 for later review. Note 420",
+      " 421-220: an observation about medieval castles number 1961 records value 807 for later review. Note 421-221: an observation about medieval castles number 1968 records value 844 for later review. Note 421-222: an observation about medieval castles number 1975 records value 881 for later review. Note 421-223: an observation about medieval castles number 1982 records value 918 for later review. Note",
+      " 422-220: an observation about deep sea fish number 1962 records value 818 for later review. Note 422-221: an observation about deep sea fish number 1969 records value 855 for later review. Note 422-222: an observation about deep sea fish number 1976 records value 892 for later review. Note 422-223: an observation about deep sea fish number 1983 records value 929 for later review. Note",
+      " 423-220: an observation about tea number 1963 records value 829 for later review. Note 423-221: an observation about tea number 1970 records value 866 for later review. Note 423-222: an observation about tea number 1977 records value 903 for later review. Note 423-223: an observation about tea number 1984 records value 940 for later review. Note 423-224",
+      " 424-220: an observation about orbital mechanics number 1964 records value 840 for later review. Note 424-221: an observation about orbital mechanics number 1971 records value 877 for later review. Note 424-222: an observation about orbital mechanics number 1978 records value 914 for later review. Note 424-223: an observation about orbital mechanics number 1985 records value 951 for later review. Note 424",
+      " 425-220: an observation about bread number 1965 records value 851 for later review. Note 425-221: an observation about bread number 1972 records value 888 for later review. Note 425-222: an observation about bread number 1979 records value 925 for later review. Note 425-223: an observation about bread number 1986 records value 962 for later review. Note 425-224",
+      " 426-220: an observation about glaciers number 1966 records value 862 for later review. Note 426-221: an observation about glaciers number 1973 records value 899 for later review. Note 426-222: an observation about glaciers number 1980 records value 936 for later review. Note 426-223: an observation about glaciers number 1987 records value 973 for later review. Note 426-224",
+      " 427-220: an observation about railway signals number 1967 records value 873 for later review. Note 427-221: an observation about railway signals number 1974 records value 910 for later review. Note 427-222: an observation about railway signals number 1981 records value 947 for later review. Note 427-223: an observation about railway signals number 1988 records value 984 for later review. Note 427",
+      " 428-220: an observation about honeybees number 1968 records value 884 for later review. Note 428-221: an observation about honeybees number 1975 records value 921 for later review. Note 428-222: an observation about honeybees number 1982 records value 958 for later review. Note 428-223: an observation about honeybees number 1989 records value 995 for later review. Note",
+      " 429-220: an observation about ancient Rome number 1969 records value 895 for later review. Note 429-221: an observation about ancient Rome number 1976 records value 932 for later review. Note 429-222: an observation about ancient Rome number 1983 records value 969 for later review. Note 429-223: an observation about ancient Rome number 1990 records value 9 for later review. Note 429-2",
+      " 430-220: an observation about jazz number 1970 records value 906 for later review. Note 430-221: an observation about jazz number 1977 records value 943 for later review. Note 430-222: an observation about jazz number 1984 records value 980 for later review. Note 430-223: an observation about jazz number 1991 records value 20 for later review. Note 430-224:",
+      " 431-220: an observation about coral reefs number 1971 records value 917 for later review. Note 431-221: an observation about coral reefs number 1978 records value 954 for later review. Note 431-222: an observation about coral reefs number 1985 records value 991 for later review. Note 431-223: an observation about coral reefs number 1992 records value 31 for later review. Note 431-"
+     ],
+     "graph_replays": {
+      "draft": 27,
+      "verify": 27,
+      "target_decode": 0
+     },
+     "peak_gpu_mib": 19543
+    }
+   ],
+   "status": {
+    "active": true,
+    "full_context_bytes": 536875008,
+    "window_context_bytes": 1553879040,
+    "metadata_bytes": 24599640,
+    "workspace_bytes": 20974720,
+    "compact_kv": true,
+    "attention_window": 0,
+    "window_tokens": 4095,
+    "full_token_bytes": 4096,
+    "window_token_bytes": 20480,
+    "window_capacity_limit": 75872,
+    "window_slots": 75872,
+    "window_free_slots": 75872,
+    "weight_bytes": 771812352,
+    "context_bytes": 2090754048,
+    "reserved_bytes": 2908140760
+   }
+  }
+ },
+ "impl_head": "",
+ "cmd": [
+  "/home/nengneng/miniconda3/envs/freetoken-dev/bin/python",
+  "-m",
+  "freetoken",
+  "--gpu",
+  "GPU-b8a2a927-a7dd-4a70-5fca-aa2f74a142cd",
+  "--port",
+  "31781",
+  "--enable-cache-report",
+  "--model-path",
+  "/data1/lmcache_kv/models/Qwen3.6-35B-A3B-NVFP4",
+  "--moe-backend",
+  "offload",
+  "--moe-cache-size",
+  "2048",
+  "--batching-policy",
+  "layered-pipeline",
+  "--num-tokens",
+  "131072",
+  "--max-running-requests",
+  "16",
+  "--attention-backend",
+  "fi",
+  "--cuda-graph-max-bs",
+  "16",
+  "--max-seq-len-override",
+  "32768",
+  "--enable-gdn-replayssm",
+  "--gdn-state-budget-bytes",
+  "4600000000",
+  "--speculative-num-steps",
+  "4",
+  "--speculative-draft-model-path",
+  "/data2/servebig-envs/dflash_models/models--z-lab--Qwen3.6-35B-A3B-DFlash/snapshots/f181eece646affea2c38b2765f1aaa01a9734ccd"
+ ],
+ "startup_seconds": 63.04750774599961,
+ "status0": {
+  "state": "serving",
+  "last_rebuild": null,
+  "geometry": {
+   "num_pages": 131072,
+   "page_size": 1,
+   "moe_cache_size": 2048,
+   "num_mamba_slots": 66,
+   "num_experts": 256,
+   "num_moe_layers": 40,
+   "moe_cache_policy": "lru",
+   "unit_bytes": {
+    "kv_per_token": 20480,
+    "moe_per_expert": 1775616,
+    "mamba_per_slot": 64389120,
+    "swa_per_token": 0
+   },
+   "swa_full_tokens_ratio": 0.0,
+   "swa_page_size": 0,
+   "num_swa_pages": 0,
+   "cache_budget_bytes": 18684425011,
+   "reasoning": {
+    "gears": [
+     "off",
+     "on"
+    ],
+    "default": "on",
+    "kwargs": {
+     "off": {
+      "enable_thinking": false,
+      "thinking_mode": "disabled"
+     },
+     "on": {
+      "enable_thinking": true,
+      "thinking_mode": "enabled"
+     }
+    }
+   },
+   "gdn_replayssm": {
+    "active": true,
+    "buffer_len": 32,
+    "request_capacity": 16,
+    "state_budget_bytes": 4600000000,
+    "checkpoint_bytes": 4314071040,
+    "record_bytes": 190709760,
+    "conv_workspace_bytes": 62914560,
+    "metadata_bytes": 276,
+    "state_workspace_bytes": 0,
+    "reserved_bytes": 4567695636
+   },
+   "dflash": {
+    "active": true,
+    "full_context_bytes": 536875008,
+    "window_context_bytes": 1553879040,
+    "metadata_bytes": 24599640,
+    "workspace_bytes": 20974720,
+    "compact_kv": true,
+    "attention_window": 0,
+    "window_tokens": 4095,
+    "full_token_bytes": 4096,
+    "window_token_bytes": 20480,
+    "window_capacity_limit": 75872,
+    "window_slots": 75872,
+    "window_free_slots": 75872,
+    "weight_bytes": 771812352,
+    "context_bytes": 2090754048,
+    "reserved_bytes": 2908140760
+   },
+   "limits": {
+    "kv_tokens": {
+     "min": 1,
+     "max": 695190
+    },
+    "moe_experts": {
+     "min": 256,
+     "max": 9319
+    },
+    "mamba_slots": {
+     "min": 64,
+     "max": 253
+    },
+    "swa_tokens": {
+     "min": 0,
+     "max": 0
+    }
+   }
+  },
+  "prefix_cache": {
+   "enabled": false,
+   "policy": "baseline",
+   "gpu_checkpoint_count": 0,
+   "active_state_count": 0,
+   "host_budget_bytes": 0,
+   "host_allocated_bytes": 0,
+   "host_used_bytes": 0,
+   "host_inflight_bytes": 0,
+   "transfer_device_bytes": 0,
+   "host_checkpoint_count": 0,
+   "restore_wait_ms": 0.0,
+   "h2d_bytes": 0,
+   "d2h_bytes": 0,
+   "h2d_batches": 0,
+   "d2h_batches": 0,
+   "h2d_time_ms": 0.0,
+   "d2h_time_ms": 0.0,
+   "checkpoint_created": 0,
+   "checkpoint_deduplicated": 0,
+   "checkpoint_pruned": 0,
+   "checkpoint_evicted": 0,
+   "gpu_checkpoint_peak": 0,
+   "host_checkpoint_peak": 0,
+   "gpu_reused_tokens": 0,
+   "host_reused_tokens": 0,
+   "recomputed_tokens": 0,
+   "window_slots": {
+    "total": 75872,
+    "free": 75872,
+    "tree_locked": 0,
+    "tree_evictable": 0,
+    "request_owned": 0,
+    "copy_inflight": 0
+   },
+   "components": [
+    {
+     "name": "paged_kv",
+     "storage_kind": "paged",
+     "device_allocated_bytes": 2684375040,
+     "host_used_bytes": 0,
+     "h2d_bytes": 0,
+     "d2h_bytes": 0
+    },
+    {
+     "name": "draft_kv",
+     "storage_kind": "paged",
+     "device_allocated_bytes": 536875008,
+     "host_used_bytes": 0,
+     "h2d_bytes": 0,
+     "d2h_bytes": 0
+    },
+    {
+     "name": "draft_window",
+     "storage_kind": "window",
+     "device_allocated_bytes": 1553879040,
+     "host_used_bytes": 0,
+     "h2d_bytes": 0,
+     "d2h_bytes": 0
+    },
+    {
+     "name": "recurrent_state",
+     "storage_kind": "boundary_state",
+     "device_allocated_bytes": 4314071040,
+     "host_used_bytes": 0,
+     "h2d_bytes": 0,
+     "d2h_bytes": 0
+    }
+   ]
+  }
+ },
+ "stats0": {
+  "instance_id": "c1645e8b-9b37-4207-840f-226734a6f34b",
+  "model": {
+   "id": "Qwen3.6-35B-A3B-NVFP4",
+   "ctx": 32768,
+   "attn": "hybrid_linear",
+   "moe": true,
+   "sampling": {
+    "temperature": 1.0,
+    "top_k": 20,
+    "top_p": 0.95
+   }
+  },
+  "uptime_s": 2,
+  "kv": null,
+  "mamba": null,
+  "swa": null,
+  "vram_bytes": 0,
+  "gpus": [
+   {
+    "index": 1,
+    "name": "NVIDIA GeForce RTX 4090",
+    "uuid": "GPU-b8a2a927-a7dd-4a70-5fca-aa2f74a142cd",
+    "total_bytes": 25250627584
+   }
+  ],
+  "cuda_graph": {
+   "enabled": true,
+   "target_decode": 0,
+   "draft": 0,
+   "verify": 0,
+   "verify_range": 0,
+   "capture_seconds": 30.136381608986994,
+   "extra_reserved_bytes": 358612992,
+   "replay_shapes": [],
+   "speculative_eager": {
+    "draft": 0,
+    "verify": 0,
+    "verify_range": 0
+   }
+  },
+  "gdn_replayssm": {
+   "active": true,
+   "ar_tokens": 0,
+   "draft_tokens": 0,
+   "verify_tokens": 0,
+   "flushes": 0,
+   "flushed_records": 0,
+   "snapshot_exports": 0,
+   "flush_gpu_ms": 0.0,
+   "export_gpu_ms": 0.0
+  },
+  "execution": {
+   "requested": {
+    "batching_policy": "layered-pipeline",
+    "speculative_num_steps": 4,
+    "speculative_draft_model_path": "/data2/servebig-envs/dflash_models/models--z-lab--Qwen3.6-35B-A3B-DFlash/snapshots/f181eece646affea2c38b2765f1aaa01a9734ccd",
+    "speculative_phase": "outwave"
+   },
+   "effective": {
+    "batching_policy": "layered-pipeline",
+    "drafter": "dflash",
+    "speculative_num_steps": 4,
+    "speculative_phase": "outwave",
+    "cuda_graph": {
+     "batch_sizes": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      16
+     ],
+     "layer_ranges": true,
+     "speculative": true,
+     "inwave_verify": false
+    }
+   },
+   "fallback_reasons": [],
+   "resources": {
+    "speculative_graph_reserved_bytes": 306184192,
+    "cpu_executor_pinned_io_bytes": 0
+   }
+  },
+  "speculative": {
+   "enabled": true,
+   "adaptive_cost_enabled": false,
+   "draft_load_missing_enabled": false,
+   "verify_prefetch_enabled": false,
+   "max_draft_steps": 4,
+   "draft_length_histogram": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "draft_tokens": 0,
+   "accepted_draft_tokens": 0,
+   "verify_steps": 0,
+   "verify_rounds": {
+    "inwave": 0,
+    "outwave": 0
+   },
+   "verify_requests": {
+    "inwave": 0,
+    "outwave": 0
+   },
+   "fallback_requests": {},
+   "residency_stops": 0,
+   "draft_expert_loads": null,
+   "cost_ar_requests": 0,
+   "cost_stopped_requests": 0,
+   "cost_probe_requests": 0,
+   "cost_control_ms": 0.0,
+   "cost_samples": {
+    "ar": 0,
+    "draft": 0,
+    "verify": 0
+   },
+   "cost_gpu_ms": {
+    "ar": 0.0,
+    "draft": 0.0,
+    "verify": 0.0,
+    "state": 0.0,
+    "moe_compute": 0.0,
+    "demand_copy": 0.0,
+    "prefetch_copy": 0.0,
+    "prefetch_wait": 0.0
+   },
+   "cost_transfer_predictions": {
+    "ar": {
+     "predicted_experts": 0.0,
+     "actual_experts": 0,
+     "abs_error_experts": 0.0
+    },
+    "draft": {
+     "predicted_experts": 0.0,
+     "actual_experts": 0,
+     "abs_error_experts": 0.0
+    },
+    "verify": {
+     "predicted_experts": 0.0,
+     "actual_experts": 0,
+     "abs_error_experts": 0.0
+    }
+   },
+   "prefetch_predicted_experts": 0,
+   "prefetch_loaded_experts": 0,
+   "prefetch_used_experts": 0,
+   "prefetch_evicted_unused_experts": 0,
+   "prefetch_loaded_bytes": 0,
+   "prefetch_used_bytes": 0,
+   "prefetch_evicted_unused_bytes": 0,
+   "draft_residency": "off"
+  },
+  "throughput": {
+   "decode_tps": 0.0,
+   "prefill_tps": 0.0
+  },
+  "requests": {
+   "active": 0,
+   "completed": 0,
+   "p95_ms": 0,
+   "ttft_mean_ms": 0,
+   "prompt_tokens_total": 0,
+   "completion_tokens_total": 0
+  }
+ },
+ "process_gpu_mib": 18154,
+ "stats_end": {
+  "instance_id": "c1645e8b-9b37-4207-840f-226734a6f34b",
+  "model": {
+   "id": "Qwen3.6-35B-A3B-NVFP4",
+   "ctx": 32768,
+   "attn": "hybrid_linear",
+   "moe": true,
+   "sampling": {
+    "temperature": 1.0,
+    "top_k": 20,
+    "top_p": 0.95
+   }
+  },
+  "uptime_s": 200,
+  "kv": {
+   "used_pages": 0,
+   "total_pages": 131072,
+   "page_size": 1
+  },
+  "mamba": {
+   "used_slots": 0,
+   "total_slots": 66
+  },
+  "swa": {
+   "used_pages": 0,
+   "total_pages": 75872,
+   "page_size": 1
+  },
+  "vram_bytes": 18668847104,
+  "gpus": [
+   {
+    "index": 1,
+    "name": "NVIDIA GeForce RTX 4090",
+    "uuid": "GPU-b8a2a927-a7dd-4a70-5fca-aa2f74a142cd",
+    "total_bytes": 25250627584
+   }
+  ],
+  "cuda_graph": {
+   "enabled": true,
+   "target_decode": 5,
+   "draft": 680,
+   "verify": 680,
+   "verify_range": 0,
+   "capture_seconds": 30.136381608986994,
+   "extra_reserved_bytes": 358612992,
+   "replay_shapes": [
+    {
+     "phase": "draft",
+     "batch_size": 1,
+     "query_tokens": 2,
+     "replays": 3,
+     "physical_query_tokens": 2
+    },
+    {
+     "phase": "draft",
+     "batch_size": 1,
+     "query_tokens": 3,
+     "replays": 5,
+     "physical_query_tokens": 3
+    },
+    {
+     "phase": "draft",
+     "batch_size": 1,
+     "query_tokens": 4,
+     "replays": 3,
+     "physical_query_tokens": 5
+    },
+    {
+     "phase": "draft",
+     "batch_size": 1,
+     "query_tokens": 5,
+     "replays": 463,
+     "physical_query_tokens": 5
+    },
+    {
+     "phase": "draft",
+     "batch_size": 2,
+     "query_tokens": 7,
+     "replays": 1,
+     "physical_query_tokens": 10
+    },
+    {
+     "phase": "draft",
+     "batch_size": 2,
+     "query_tokens": 9,
+     "replays": 3,
+     "physical_query_tokens": 10
+    },
+    {
+     "phase": "draft",
+     "batch_size": 2,
+     "query_tokens": 10,
+     "replays": 31,
+     "physical_query_tokens": 10
+    },
+    {
+     "phase": "draft",
+     "batch_size": 3,
+     "query_tokens": 11,
+     "replays": 2,
+     "physical_query_tokens": 15
+    },
+    {
+     "phase": "draft",
+     "batch_size": 3,
+     "query_tokens": 12,
+     "replays": 1,
+     "physical_query_tokens": 15
+    },
+    {
+     "phase": "draft",
+     "batch_size": 3,
+     "query_tokens": 15,
+     "replays": 19,
+     "physical_query_tokens": 15
+    },
+    {
+     "phase": "draft",
+     "batch_size": 4,
+     "query_tokens": 17,
+     "replays": 2,
+     "physical_query_tokens": 20
+    },
+    {
+     "phase": "draft",
+     "batch_size": 4,
+     "query_tokens": 18,
+     "replays": 1,
+     "physical_query_tokens": 20
+    },
+    {
+     "phase": "draft",
+     "batch_size": 4,
+     "query_tokens": 19,
+     "replays": 1,
+     "physical_query_tokens": 20
+    },
+    {
+     "phase": "draft",
+     "batch_size": 4,
+     "query_tokens": 20,
+     "replays": 125,
+     "physical_query_tokens": 20
+    },
+    {
+     "phase": "draft",
+     "batch_size": 5,
+     "query_tokens": 24,
+     "replays": 1,
+     "physical_query_tokens": 25
+    },
+    {
+     "phase": "draft",
+     "batch_size": 5,
+     "query_tokens": 25,
+     "replays": 7,
+     "physical_query_tokens": 25
+    },
+    {
+     "phase": "draft",
+     "batch_size": 6,
+     "query_tokens": 28,
+     "replays": 1,
+     "physical_query_tokens": 30
+    },
+    {
+     "phase": "draft",
+     "batch_size": 6,
+     "query_tokens": 29,
+     "replays": 1,
+     "physical_query_tokens": 30
+    },
+    {
+     "phase": "draft",
+     "batch_size": 6,
+     "query_tokens": 30,
+     "replays": 6,
+     "physical_query_tokens": 30
+    },
+    {
+     "phase": "draft",
+     "batch_size": 7,
+     "query_tokens": 32,
+     "replays": 2,
+     "physical_query_tokens": 35
+    },
+    {
+     "phase": "draft",
+     "batch_size": 7,
+     "query_tokens": 35,
+     "replays": 2,
+     "physical_query_tokens": 35
+    },
+    {
+     "phase": "target_decode",
+     "batch_size": 1,
+     "query_tokens": 1,
+     "replays": 5,
+     "physical_query_tokens": 1
+    },
+    {
+     "phase": "verify",
+     "batch_size": 1,
+     "query_tokens": 2,
+     "replays": 3,
+     "physical_query_tokens": 2
+    },
+    {
+     "phase": "verify",
+     "batch_size": 1,
+     "query_tokens": 3,
+     "replays": 5,
+     "physical_query_tokens": 3
+    },
+    {
+     "phase": "verify",
+     "batch_size": 1,
+     "query_tokens": 4,
+     "replays": 3,
+     "physical_query_tokens": 4
+    },
+    {
+     "phase": "verify",
+     "batch_size": 1,
+     "query_tokens": 5,
+     "replays": 463,
+     "physical_query_tokens": 5
+    },
+    {
+     "phase": "verify",
+     "batch_size": 2,
+     "query_tokens": 7,
+     "replays": 1,
+     "physical_query_tokens": 8
+    },
+    {
+     "phase": "verify",
+     "batch_size": 2,
+     "query_tokens": 9,
+     "replays": 3,
+     "physical_query_tokens": 10
+    },
+    {
+     "phase": "verify",
+     "batch_size": 2,
+     "query_tokens": 10,
+     "replays": 31,
+     "physical_query_tokens": 10
+    },
+    {
+     "phase": "verify",
+     "batch_size": 3,
+     "query_tokens": 11,
+     "replays": 2,
+     "physical_query_tokens": 15
+    },
+    {
+     "phase": "verify",
+     "batch_size": 3,
+     "query_tokens": 12,
+     "replays": 1,
+     "physical_query_tokens": 15
+    },
+    {
+     "phase": "verify",
+     "batch_size": 3,
+     "query_tokens": 15,
+     "replays": 19,
+     "physical_query_tokens": 15
+    },
+    {
+     "phase": "verify",
+     "batch_size": 4,
+     "query_tokens": 17,
+     "replays": 2,
+     "physical_query_tokens": 20
+    },
+    {
+     "phase": "verify",
+     "batch_size": 4,
+     "query_tokens": 18,
+     "replays": 1,
+     "physical_query_tokens": 20
+    },
+    {
+     "phase": "verify",
+     "batch_size": 4,
+     "query_tokens": 19,
+     "replays": 1,
+     "physical_query_tokens": 20
+    },
+    {
+     "phase": "verify",
+     "batch_size": 4,
+     "query_tokens": 20,
+     "replays": 125,
+     "physical_query_tokens": 20
+    },
+    {
+     "phase": "verify",
+     "batch_size": 5,
+     "query_tokens": 24,
+     "replays": 1,
+     "physical_query_tokens": 25
+    },
+    {
+     "phase": "verify",
+     "batch_size": 5,
+     "query_tokens": 25,
+     "replays": 7,
+     "physical_query_tokens": 25
+    },
+    {
+     "phase": "verify",
+     "batch_size": 6,
+     "query_tokens": 28,
+     "replays": 1,
+     "physical_query_tokens": 30
+    },
+    {
+     "phase": "verify",
+     "batch_size": 6,
+     "query_tokens": 29,
+     "replays": 1,
+     "physical_query_tokens": 30
+    },
+    {
+     "phase": "verify",
+     "batch_size": 6,
+     "query_tokens": 30,
+     "replays": 6,
+     "physical_query_tokens": 30
+    },
+    {
+     "phase": "verify",
+     "batch_size": 7,
+     "query_tokens": 32,
+     "replays": 2,
+     "physical_query_tokens": 35
+    },
+    {
+     "phase": "verify",
+     "batch_size": 7,
+     "query_tokens": 35,
+     "replays": 2,
+     "physical_query_tokens": 35
+    }
+   ],
+   "speculative_eager": {
+    "draft": 0,
+    "verify": 0,
+    "verify_range": 0
+   }
+  },
+  "gdn_replayssm": {
+   "active": true,
+   "ar_tokens": 3511,
+   "draft_tokens": 0,
+   "verify_tokens": 6152,
+   "flushes": 268,
+   "flushed_records": 8156,
+   "snapshot_exports": 58,
+   "flush_gpu_ms": 71.35696031153202,
+   "export_gpu_ms": 9.507904022932053
+  },
+  "execution": {
+   "requested": {
+    "batching_policy": "layered-pipeline",
+    "speculative_num_steps": 4,
+    "speculative_draft_model_path": "/data2/servebig-envs/dflash_models/models--z-lab--Qwen3.6-35B-A3B-DFlash/snapshots/f181eece646affea2c38b2765f1aaa01a9734ccd",
+    "speculative_phase": "outwave"
+   },
+   "effective": {
+    "batching_policy": "layered-pipeline",
+    "drafter": "dflash",
+    "speculative_num_steps": 4,
+    "speculative_phase": "outwave",
+    "cuda_graph": {
+     "batch_sizes": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      16
+     ],
+     "layer_ranges": true,
+     "speculative": true,
+     "inwave_verify": false
+    }
+   },
+   "fallback_reasons": [],
+   "resources": {
+    "speculative_graph_reserved_bytes": 306184192,
+    "cpu_executor_pinned_io_bytes": 0
+   }
+  },
+  "speculative": {
+   "enabled": true,
+   "adaptive_cost_enabled": false,
+   "draft_load_missing_enabled": false,
+   "verify_prefetch_enabled": false,
+   "max_draft_steps": 4,
+   "draft_length_histogram": [
+    7,
+    9,
+    7,
+    9,
+    1215
+   ],
+   "draft_tokens": 4910,
+   "accepted_draft_tokens": 4504,
+   "verify_steps": 680,
+   "verify_rounds": {
+    "inwave": 0,
+    "outwave": 680
+   },
+   "verify_requests": {
+    "inwave": 0,
+    "outwave": 1242
+   },
+   "fallback_requests": {
+    "phase": 3506,
+    "tail": 5
+   },
+   "residency_stops": 0,
+   "draft_expert_loads": null,
+   "cost_ar_requests": 0,
+   "cost_stopped_requests": 0,
+   "cost_probe_requests": 0,
+   "cost_control_ms": 0.0,
+   "cost_samples": {
+    "ar": 0,
+    "draft": 0,
+    "verify": 0
+   },
+   "cost_gpu_ms": {
+    "ar": 0.0,
+    "draft": 0.0,
+    "verify": 0.0,
+    "state": 0.0,
+    "moe_compute": 0.0,
+    "demand_copy": 0.0,
+    "prefetch_copy": 0.0,
+    "prefetch_wait": 0.0
+   },
+   "cost_transfer_predictions": {
+    "ar": {
+     "predicted_experts": 0.0,
+     "actual_experts": 0,
+     "abs_error_experts": 0.0
+    },
+    "draft": {
+     "predicted_experts": 0.0,
+     "actual_experts": 0,
+     "abs_error_experts": 0.0
+    },
+    "verify": {
+     "predicted_experts": 0.0,
+     "actual_experts": 0,
+     "abs_error_experts": 0.0
+    }
+   },
+   "prefetch_predicted_experts": 0,
+   "prefetch_loaded_experts": 0,
+   "prefetch_used_experts": 0,
+   "prefetch_evicted_unused_experts": 0,
+   "prefetch_loaded_bytes": 0,
+   "prefetch_used_bytes": 0,
+   "prefetch_evicted_unused_bytes": 0,
+   "drafter": "dflash",
+   "phase": "outwave",
+   "emitted_tokens": 5746,
+   "verify_positions": 6152,
+   "verify_physical_positions": 6186,
+   "state_slot_stops": 0,
+   "dflash_control": "fixed",
+   "dflash_draft_positions": 6152,
+   "dflash_draft_physical_positions": 6191,
+   "draft_residency": "off"
+  },
+  "throughput": {
+   "decode_tps": 95.5,
+   "prefill_tps": 0.0
+  },
+  "requests": {
+   "active": 0,
+   "completed": 58,
+   "p95_ms": 143,
+   "ttft_mean_ms": 0,
+   "prompt_tokens_total": 296016,
+   "completion_tokens_total": 9315
+  }
+ },
+ "status_end": {
+  "state": "serving",
+  "last_rebuild": null,
+  "geometry": {
+   "num_pages": 131072,
+   "page_size": 1,
+   "moe_cache_size": 2048,
+   "num_mamba_slots": 66,
+   "num_experts": 256,
+   "num_moe_layers": 40,
+   "moe_cache_policy": "lru",
+   "unit_bytes": {
+    "kv_per_token": 20480,
+    "moe_per_expert": 1775616,
+    "mamba_per_slot": 64389120,
+    "swa_per_token": 0
+   },
+   "swa_full_tokens_ratio": 0.0,
+   "swa_page_size": 0,
+   "num_swa_pages": 0,
+   "cache_budget_bytes": 18684425011,
+   "reasoning": {
+    "gears": [
+     "off",
+     "on"
+    ],
+    "default": "on",
+    "kwargs": {
+     "off": {
+      "enable_thinking": false,
+      "thinking_mode": "disabled"
+     },
+     "on": {
+      "enable_thinking": true,
+      "thinking_mode": "enabled"
+     }
+    }
+   },
+   "gdn_replayssm": {
+    "active": true,
+    "buffer_len": 32,
+    "request_capacity": 16,
+    "state_budget_bytes": 4600000000,
+    "checkpoint_bytes": 4314071040,
+    "record_bytes": 190709760,
+    "conv_workspace_bytes": 62914560,
+    "metadata_bytes": 276,
+    "state_workspace_bytes": 0,
+    "reserved_bytes": 4567695636
+   },
+   "dflash": {
+    "active": true,
+    "full_context_bytes": 536875008,
+    "window_context_bytes": 1553879040,
+    "metadata_bytes": 24599640,
+    "workspace_bytes": 20974720,
+    "compact_kv": true,
+    "attention_window": 0,
+    "window_tokens": 4095,
+    "full_token_bytes": 4096,
+    "window_token_bytes": 20480,
+    "window_capacity_limit": 75872,
+    "window_slots": 75872,
+    "window_free_slots": 75872,
+    "weight_bytes": 771812352,
+    "context_bytes": 2090754048,
+    "reserved_bytes": 2908140760
+   },
+   "limits": {
+    "kv_tokens": {
+     "min": 1,
+     "max": 695190
+    },
+    "moe_experts": {
+     "min": 256,
+     "max": 9319
+    },
+    "mamba_slots": {
+     "min": 64,
+     "max": 253
+    },
+    "swa_tokens": {
+     "min": 0,
+     "max": 0
+    }
+   }
+  },
+  "prefix_cache": {
+   "enabled": false,
+   "policy": "baseline",
+   "gpu_checkpoint_count": 26,
+   "active_state_count": 0,
+   "host_budget_bytes": 0,
+   "host_allocated_bytes": 0,
+   "host_used_bytes": 0,
+   "host_inflight_bytes": 0,
+   "transfer_device_bytes": 0,
+   "host_checkpoint_count": 0,
+   "restore_wait_ms": 0.0,
+   "h2d_bytes": 0,
+   "d2h_bytes": 0,
+   "h2d_batches": 0,
+   "d2h_batches": 0,
+   "h2d_time_ms": 0.0,
+   "d2h_time_ms": 0.0,
+   "checkpoint_created": 103,
+   "checkpoint_deduplicated": 0,
+   "checkpoint_pruned": 0,
+   "checkpoint_evicted": 77,
+   "gpu_checkpoint_peak": 33,
+   "host_checkpoint_peak": 0,
+   "gpu_reused_tokens": 0,
+   "host_reused_tokens": 0,
+   "recomputed_tokens": 296016,
+   "window_slots": {
+    "total": 75872,
+    "free": 909,
+    "tree_locked": 0,
+    "tree_evictable": 74963,
+    "request_owned": 0,
+    "copy_inflight": 0
+   },
+   "components": [
+    {
+     "name": "paged_kv",
+     "storage_kind": "paged",
+     "device_allocated_bytes": 2684375040,
+     "host_used_bytes": 0,
+     "h2d_bytes": 0,
+     "d2h_bytes": 0
+    },
+    {
+     "name": "draft_kv",
+     "storage_kind": "paged",
+     "device_allocated_bytes": 536875008,
+     "host_used_bytes": 0,
+     "h2d_bytes": 0,
+     "d2h_bytes": 0
+    },
+    {
+     "name": "draft_window",
+     "storage_kind": "window",
+     "device_allocated_bytes": 1553879040,
+     "host_used_bytes": 0,
+     "h2d_bytes": 0,
+     "d2h_bytes": 0
+    },
+    {
+     "name": "recurrent_state",
+     "storage_kind": "boundary_state",
+     "device_allocated_bytes": 4314071040,
+     "host_used_bytes": 0,
+     "h2d_bytes": 0,
+     "d2h_bytes": 0
+    }
+   ]
+  }
+ },
+ "checks": [
+  {
+   "session": "perf_compact",
+   "check": "perf:c4_long",
+   "ok": null,
+   "decode_tok_s": [
+    22.06,
+    22.68,
+    21.43
+   ],
+   "acceptance": [
+    0.958,
+    0.979,
+    0.934
+   ],
+   "peak_gpu_mib": 19543,
+   "verify_rounds_not_on_graph": [
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "session": "perf_compact",
+   "check": "perf_graph_used:c4_long",
+   "ok": true,
+   "replays": [
+    {
+     "draft": 52,
+     "verify": 52,
+     "target_decode": 0
+    },
+    {
+     "draft": 52,
+     "verify": 52,
+     "target_decode": 0
+    },
+    {
+     "draft": 55,
+     "verify": 55,
+     "target_decode": 0
+    }
+   ]
+  },
+  {
+   "session": "perf_compact",
+   "check": "perf:c1_short",
+   "ok": null,
+   "decode_tok_s": [
+    75.98,
+    86.55,
+    86.4
+   ],
+   "acceptance": [
+    0.877,
+    0.848,
+    0.857
+   ],
+   "peak_gpu_mib": 19559,
+   "verify_rounds_not_on_graph": [
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "session": "perf_compact",
+   "check": "perf_graph_used:c1_short",
+   "ok": true,
+   "replays": [
+    {
+     "draft": 149,
+     "verify": 149,
+     "target_decode": 1
+    },
+    {
+     "draft": 152,
+     "verify": 152,
+     "target_decode": 3
+    },
+    {
+     "draft": 152,
+     "verify": 152,
+     "target_decode": 1
+    }
+   ]
+  },
+  {
+   "session": "perf_compact",
+   "check": "perf:c16_long",
+   "ok": null,
+   "decode_tok_s": [
+    9.19,
+    9.01
+   ],
+   "acceptance": [
+    0.959,
+    0.958
+   ],
+   "peak_gpu_mib": 19543,
+   "verify_rounds_not_on_graph": [
+    0,
+    0
+   ]
+  },
+  {
+   "session": "perf_compact",
+   "check": "perf_graph_used:c16_long",
+   "ok": true,
+   "replays": [
+    {
+     "draft": 26,
+     "verify": 26,
+     "target_decode": 0
+    },
+    {
+     "draft": 27,
+     "verify": 27,
+     "target_decode": 0
+    }
+   ]
+  }
+ ]
+}
