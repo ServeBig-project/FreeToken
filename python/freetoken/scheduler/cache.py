@@ -210,6 +210,7 @@ class CacheManager:
         if draft_kv is not None and draft_kv.swa_paged:
             # SD targets have no window of their own: the drafter's window rides the tree.
             swa_pool, sliding_window_size = draft_kv, draft_kv.window
+            self.request_window = draft_kv.layout.request_slots
         self.swa_pool = swa_pool
         self.sliding_window_size = sliding_window_size
         # swa_paged: the pool keeps window KV behind a full->window mapping with its own slots,
@@ -253,6 +254,7 @@ class CacheManager:
     # ----- capability hooks (defaults; plugged-in pools may narrow them) -----
     supports_runtime_rebuild = True
     prefill_chunk_budget = None  # generic shared page pool: no per-model prefill chunk cap
+    request_window = None  # window slots one running request may grow into (drafter pool)
 
     def _make_tree(self) -> RadixCache | None:
         if not self.reuse:
@@ -303,6 +305,10 @@ class CacheManager:
         total = 0
         reservations = getattr(self, "_decode_page_reservations", {})
         for req in reqs:
+            if self.request_window is not None:
+                # The drafter's pool is sized per running request, and a layered wave keeps
+                # decoding without new admissions: keep what each may still grow into.
+                total += max(0, self.request_window - (req.device_len - req.swa_evicted_seqlen))
             first_page = div_ceil(req.cached_len, ps)
             last_page = div_ceil(req.device_len, ps)
             reservation = reservations.get(req) if reservations else None

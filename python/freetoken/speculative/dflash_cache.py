@@ -31,6 +31,15 @@ class DFlashLayout:
         self.row_bytes = 2 * draft.num_key_value_heads * draft.head_dim * config.dtype.itemsize
         self.config = config
 
+    @property
+    def request_slots(self) -> int:
+        """Window slots one running request may hold between two releases."""
+        from freetoken.scheduler.cache import _SWA_EVICTION_INTERVAL
+
+        p = self.config.page_size
+        steps = self.config.speculative_num_steps
+        return align_ceil(self.window + _SWA_EVICTION_INTERVAL + steps + 1, p) + 2 * p
+
     def window_capacity(self, pages: int) -> int:
         """Usable window slots, never more than the target positions they map: per running
         request its read window, the committed tokens one release interval lets pass and one
@@ -39,16 +48,15 @@ class DFlashLayout:
         anchors are on."""
         if not self.window_layers:
             return 0
-        from freetoken.scheduler.cache import _SWA_EVICTION_INTERVAL, _SWA_RETAIN_GAP
+        from freetoken.scheduler.cache import _SWA_RETAIN_GAP
 
         c, p = self.config, self.config.page_size
         up = lambda n: align_ceil(n, p)
-        request = up(self.window + _SWA_EVICTION_INTERVAL + c.speculative_num_steps + 1) + 2 * p
         prefill = up(getattr(c, "max_extend_tokens", c.max_seq_len))
         copies = up(self.window) if c.prefix_cache_host_gib > 0 else 0
         anchors = (c.max_running_req * up(self.window + _SWA_RETAIN_GAP)
                    if getattr(c, "special_token_ckpt", False) else 0)
-        return min(pages, c.max_running_req * request + prefill + copies + anchors)
+        return min(pages, c.max_running_req * self.request_slots + prefill + copies + anchors)
 
     def history_width(self, limit: int | None, pages: int) -> int:
         """Index entries one request's history plus its draft block can need for a mode."""
