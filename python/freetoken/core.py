@@ -71,9 +71,14 @@ class Req:
     # _process_last_data frees the request when the batch drains (after copy_done.synchronize).
     aborted: bool = False
     cache_group: str = ""
+    # Tokens of the original prompt; a resumed request's input_ids also hold its outputs.
+    prompt_len: int = -1
+    arrival: int = 0  # order the scheduler received it in
 
     def __post_init__(self) -> None:
         assert self.input_ids.is_cpu
+        if self.prompt_len < 0:
+            self.prompt_len = len(self.input_ids)
         self.device_len = len(self.input_ids)
         self.max_device_len = len(self.input_ids) + self.output_len
         assert 0 <= self.cached_len < self.device_len <= self.max_device_len

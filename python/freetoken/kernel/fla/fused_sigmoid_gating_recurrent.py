@@ -25,6 +25,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     o,
     h0_source,
     h0_indices,
+    stride_h0,
     cu_seqlens,
     # Parameters for target_verify support (unused for decode)
     intermediate_states_buffer,
@@ -104,7 +105,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         if idx >= 0:
             p_h0 = (
                 h0_source
-                + idx * HV * K * V
+                + idx.to(tl.int64) * stride_h0
                 + i_hv * K * V
                 + o_v[None, :] * K
                 + o_k[:, None]
@@ -236,7 +237,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
             if idx >= 0:
                 p_h0 = (
                     h0_source
-                    + idx * HV * K * V
+                    + idx.to(tl.int64) * stride_h0
                     + i_hv * K * V
                     + o_v[None, :] * K
                     + o_k[:, None]
@@ -336,6 +337,8 @@ def fused_sigmoid_gating_delta_rule_update(
         o=o,
         h0_source=initial_state_source,
         h0_indices=initial_state_indices,
+        # A pool view's slots can sit further apart than one state (all layers of a slot).
+        stride_h0=initial_state_source.stride(0) if initial_state_source is not None else 0,
         cu_seqlens=cu_seqlens,
         intermediate_states_buffer=intermediate_states_buffer,
         intermediate_state_indices=intermediate_state_indices,

@@ -28,6 +28,9 @@ def replay_shapes(n_layers, conv_dim, v_heads, k_heads, key_dim, value_dim, kern
     return shapes
 
 
+_ROW_MAJOR = ("u", "k", "g", "window")
+
+
 def _device(values, device) -> torch.Tensor:
     return torch.tensor(values, dtype=torch.int32, pin_memory=True).to(device, non_blocking=True)
 
@@ -43,10 +46,25 @@ class GdnReplay:
     drafting. The host only resets ``start`` at prefill.
     """
 
-    def __init__(self, pool, shapes, device) -> None:
+    def __init__(self, pool, shapes, device, runtime=None) -> None:
         self.pool = pool
-        buffers = {name: torch.zeros(shape, dtype=dtype, device=device)
-                   for name, (shape, dtype) in shapes.items()}
+        from .linear_state_pool import slot_major
+        from .runtime_pool import Units, slot_rows
+
+        # Per-layer records keep each row's layers adjacent, like the state slots. With a shared
+        # runtime a row is mapped while a request holds its table row.
+        buffers, banks = {}, []
+        for name, (shape, dtype) in shapes.items():
+            if name not in _ROW_MAJOR:
+                buffers[name] = torch.zeros(shape, dtype=dtype, device=device)
+            elif runtime is None:
+                buffers[name] = slot_major(shape, dtype, device)
+            else:
+                buffers[name], bank = slot_rows(runtime, f"replay_{name}", shape, dtype)
+                banks.append(bank)
+        self.units = Units(banks) if banks else None
+        if self.units is not None:
+            self.units.pin([0])  # every layer view starts inside row 0
         self.u, self.k, self.g = buffers["u"], buffers["k"], buffers["g"]
         self.start, self.stats = buffers["start"], buffers["stats"]
         self.window = buffers.get("window")
@@ -70,6 +88,11 @@ class GdnReplay:
             gdn_replay_fold(pool.recurrent_states, self.u, self.k, self.g, self.start, pad, pad,
                             pad, pad, widths)
         gdn_replay_advance(self.start, self.stats, pad, pad, pad, self.ring)
+
+    def unbind(self, row: int) -> None:
+        """A table row's request is gone: its records' memory may serve others."""
+        if self.units is not None and row < self.rows:
+            self.units.release([row])
 
     def snapshot(self) -> dict:
         """Counters as of the previous snapshot's copy of the GPU fold counters (lagging by
@@ -108,11 +131,15 @@ class GdnReplay:
 
     def begin_prefill(self, reqs) -> None:
         # Prefill leaves the complete state in the slot: no records until the next decode.
+        self.restart(reqs, [req.device_len for req in reqs])
+
+    def restart(self, reqs, positions) -> None:
+        """Each request's slot holds its complete state after ``positions`` inputs."""
         if not reqs:
             return
         device = self.pool.device
         rows = [req.table_idx for req in reqs]
-        self.start[_device(rows, device)] = _device([req.device_len for req in reqs], device)
+        self.start[_device(rows, device)] = _device(positions, device)
         for row in rows:
             self.window_span[row] = None
 

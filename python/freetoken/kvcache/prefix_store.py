@@ -17,6 +17,7 @@ from typing import Callable, List
 
 import torch
 from freetoken.kernel.pinned import alloc_pinned_tensor
+from freetoken.kvcache.runtime_pool import upload
 
 _ALIGN = 512
 STAGING_BYTES = 8 << 20  # per copy direction; a starting point, not a tuned value
@@ -176,6 +177,9 @@ class PrefixTransfer:
         """Run ``tasks`` after all work already queued on the current stream; ``done`` runs
         from ``poll`` once they completed."""
         tasks = _merge_adjacent(tasks)  # before the wait: the side stream reads merged indices
+        # A shared runtime keeps page ids on the host.
+        tasks = [t if t.index.is_cuda else CopyTask(t.comp, upload(t.index, self.device), t.span)
+                 for t in tasks]
         stream = self.streams[direction]
         stream.wait_stream(torch.cuda.current_stream(self.device))
         job = _Job(tasks, done, [*keep, *(t.index for t in tasks)])

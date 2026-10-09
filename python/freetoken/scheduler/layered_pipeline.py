@@ -88,6 +88,7 @@ class LayeredPipelineExecutor:
             engine.device, self._execution.retained_feature_bytes_per_token
         )
         self._wave: _LayeredPipelineWave | None = None
+        self._retired: tuple | None = None  # the last step's execution inputs
         self._staged_admission: ResidentWaveAdmission | None = None
         self._decode_input: ForwardInput | None = None
         # Decode rows an in-wave SD round verifies instead, with their draft lengths.
@@ -98,6 +99,15 @@ class LayeredPipelineExecutor:
     @property
     def active(self) -> bool:
         return self._wave is not None
+
+    @property
+    def wave_reqs(self) -> list:
+        """Requests inside the open wave: their pages are read until it closes."""
+        return list(self._wave.prefill_input.batch.reqs) if self._wave is not None else []
+
+    def release_inputs(self) -> None:
+        """The last step's inputs may go: the scheduler stream now follows the engine stream."""
+        self._retired = None
 
     def schedule_first_batch(self, token_budget: int) -> Batch | None:
         """Freeze one FIFO wave before its first group reaches the model."""
@@ -282,6 +292,8 @@ class LayeredPipelineExecutor:
         if group_input is None or prefill_input is None:
             raise RuntimeError("layered pipeline iteration was not prepared")
 
+        # The measured peak covers what an in-wave SD round keeps from its start.
+        memory_before = self._memory.start()
         round_input, round_ = None, None
         if self._round is not None:
             round_input, lengths = self._round
@@ -289,7 +301,6 @@ class LayeredPipelineExecutor:
         has_decode = self._decode_input is not None or round_ is not None
         rows = sum(req.extend_len for req in prefill_input.batch.prefill_reqs)
         first_stage = wave.current_stage == 0
-        memory_before = self._memory.start()
         stage = wave.cache_session.begin(
             wave.current_stage,
             has_decode=has_decode,
@@ -357,6 +368,10 @@ class LayeredPipelineExecutor:
                 )
             )
         self._memory.record(memory_before, rows, first_stage=first_stage)
+        # The group's execution inputs stay referenced until the scheduler stream follows
+        # the engine stream (release_inputs): freed earlier, their storage could be handed
+        # to the next scheduler-stream allocation while the group still reads them.
+        self._retired = (wave, self._group_input, self._current_prefill_input, self._decode_input)
         self._decode_input = None
         self._round = None
         self._group_input = None

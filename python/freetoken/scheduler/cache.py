@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import os
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterable, List, Tuple
 
+import numpy as np
 import torch
 from freetoken.core import Batch, Req
 from freetoken.kvcache.prefix_policy import ANCHOR, INPUT, OUTPUT, POLICIES
 from freetoken.kvcache.radix_cache import CacheHandle, RadixCache
+from freetoken.kvcache.runtime_pool import Claim, upload
 
 from .host_tier import HostTier, build_components, wait_ms
+from freetoken.kvcache.prefix_store import units_of
 from freetoken.utils import align_down, div_ceil
 
 if TYPE_CHECKING:
@@ -56,6 +60,21 @@ class StateCapture:
     purpose: str
     slot: int | None = None
     pos: int | None = None
+
+
+DEFERRED = object()  # a paused request's host copy must wait for copy budget
+_ALL = lambda tokens: tokens  # bind a window slot to every claimed location
+
+
+@dataclass(eq=False)
+class PausedState:
+    """A paused request's model state on the host: one copy per component, and the positions
+    whose window it holds. ``saved``/``loaded`` turn true when the copies finished."""
+
+    window: torch.Tensor
+    copies: list | None = None
+    saved: bool = False
+    loaded: bool = False
 
 
 @dataclass(frozen=True)
@@ -141,7 +160,7 @@ class _PrefillExecutionSession:
             )
             start = self._evicted_pos[table_idx]
             if new_evicted > start:
-                manager._free_swa(manager.page_table[table_idx, start:new_evicted])
+                manager._free_swa(manager.rows[table_idx, start:new_evicted])
                 self._evicted_pos[table_idx] = new_evicted
 
         bindings: list[torch.Tensor] = []
@@ -200,11 +219,18 @@ class CacheManager:
     def __init__(self, num_pages: int, page_size: int, page_table: torch.Tensor, type: str,
                  linear_state_pool=None, swa_pool=None, sliding_window_size=None,
                  policy: str = "baseline", host_bytes: int = 0, draft_kv=None,
-                 tp_group=None):
+                 tp_group=None, page_units=None):
         # The `_free_slots` follows a page-aligned manner. For example, if page_size = 2,
         # the `_free_slots` may look like [0, 2, 4, 6, ...], and each slot represents a page.
         device = page_table.device
-        self.free_slots = torch.arange(num_pages, dtype=torch.int32, device=device) * page_size
+        # Shared runtime: the host decides which pages exist before a kernel touches them, so
+        # page ids, the prefix tree and a mirror of the page table (``rows``) stay on the CPU.
+        # Page 0 is the engine's dummy page, and the tail of the free list (recently freed, still
+        # mapped) is allocated first.
+        self.page_units = page_units
+        self.index_device = torch.device("cpu") if page_units is not None else device
+        self.page_size = page_size
+        self._reset_pages(num_pages, page_table)
         self.linear_state_pool = linear_state_pool
         kv_pool = swa_pool
         if draft_kv is not None and draft_kv.swa_paged:
@@ -225,11 +251,13 @@ class CacheManager:
         self.device = device
         self.num_pages = num_pages
         self.page_table = page_table
-        self.page_size = page_size
         self.reuse = type != "naive"
         # The prefix tree carries each component the pools hold: recurrent states when a state
         # pool exists, windows when the pool pages its window KV.
         self.state_cache = self.reuse and linear_state_pool is not None
+        # Live GDN states come from the pool (not the table row) with a tree or a shared runtime.
+        self.private_states = linear_state_pool is not None and (
+            self.state_cache or page_units is not None)
         self.window_cache = self.reuse and self.swa_paged
         if self.state_cache:
             linear_state_pool.check_page_size(page_size)
@@ -240,17 +268,25 @@ class CacheManager:
             "checkpoint_evicted", "gpu_checkpoint_peak", "host_checkpoint_peak",
             "gpu_reused_tokens", "host_reused_tokens", "recomputed_tokens"), 0)
         self.tree = self._make_tree()
-        if host_bytes and not self.reuse:
+        if host_bytes and not self.reuse and page_units is None:
             raise ValueError("--prefix-cache-host-gib needs prefix reuse (--cache-type radix)")
+        # A shared runtime also keeps paused requests on the host, with or without a tree.
         self.components = build_components(
-            kv_pool, linear_state_pool, draft_kv, window_pool=swa_pool, window=self.window_cache,
-            state=self.state_cache, required=bool(host_bytes))
+            kv_pool, linear_state_pool, draft_kv, window_pool=swa_pool,
+            window=self.window_cache or (page_units is not None and self.swa_paged),
+            state=self.state_cache or (page_units is not None and linear_state_pool is not None),
+            required=bool(host_bytes))
         self.tp_group = tp_group  # CPU group when TP > 1: ranks agree on finished copies
         self.host = HostTier(self, host_bytes, self.components) if host_bytes else None
         self._host_reuse: dict[int, int] = {}  # uid -> tokens its admission got from the host
-        self.empty = torch.empty(0, dtype=torch.int32, device=device)
+        self.empty = torch.empty(0, dtype=torch.int32, device=self.index_device)
         self._decode_page_reservations: dict[Req, _DecodePageReservation] = {}
         self._prefill_execution: _PrefillExecutionSession | None = None
+        self.speculative_slots: list[int] | None = None  # shared runtime: claimed for one round
+        # Shared runtime: requests paused under memory pressure, kept on the host or recomputed.
+        self.paused_stats = dict(paused=0, recompute=0, restored=0, recomputed_tokens=0,
+                                 paused_ms=0.0, short_decode=0, short_prefill=0, compactions=0,
+                                 claim_ms=0.0)
 
     # ----- capability hooks (defaults; plugged-in pools may narrow them) -----
     supports_runtime_rebuild = True
@@ -262,7 +298,7 @@ class CacheManager:
         if not self.reuse:
             return None
         return RadixCache(
-            self.device, self.page_size, self.policy, self.stats,
+            self.index_device, self.page_size, self.policy, self.stats,
             window=self.sliding_window_size if self.window_cache else None,
             has_state=self.state_cache,
         )
@@ -270,8 +306,10 @@ class CacheManager:
     def page_usage(self) -> tuple[int, int]:
         """(used_pages, total_pages): allocated, non-evictable pages over the pool total
         (active requests + protected prefix; evictable prefix-cache pages are excluded)."""
-        total = self.num_pages
-        return total - len(self.free_slots) - self._evictable("kv") // self.page_size, total
+        used = self.num_pages - len(self.free_slots) - self._evictable("kv") // self.page_size
+        if self.page_units is not None:  # the page count is address space, not memory
+            return used, used + self.available_size // self.page_size
+        return used, self.num_pages
 
     def _evictable(self, kind: str) -> int:
         return self.tree.evictable[kind] if self.tree is not None else 0
@@ -286,7 +324,14 @@ class CacheManager:
         return self.tree.match(req.input_ids[: input_len - 1], req.cache_group, reuse=True)
 
     @property
+    def copies_inflight(self) -> bool:
+        """Host copies still running (their nodes cannot be evicted meanwhile)."""
+        return self.host is not None and self.host.transfer.inflight_bytes > 0
+
+    @property
     def available_size(self) -> int:
+        # A shared runtime counts free page ids; whether memory backs them is settled when
+        # pages are taken (``take``), which evicts or fails as a whole.
         return self._evictable("kv") + len(self.free_slots) * self.page_size
 
     @property
@@ -377,7 +422,7 @@ class CacheManager:
         """The public ``prefix_cache`` status object (host-side counters only, no sync)."""
         states = self.tree.state_count if self.tree is not None else 0
         pool = self.linear_state_pool
-        active = pool.num_slots - 1 - pool.num_free_slots - states if self.state_cache else 0
+        active = pool.num_slots - 1 - pool.unused_slots - states if self.state_cache else 0
         out = {"enabled": False, "policy": self.policy_name, "gpu_checkpoint_count": states,
                "active_state_count": active, "host_budget_bytes": 0,
                "host_allocated_bytes": 0, "host_used_bytes": 0, "host_inflight_bytes": 0,
@@ -386,6 +431,9 @@ class CacheManager:
                "h2d_time_ms": 0.0, "d2h_time_ms": 0.0, **self.stats}
         if self.host is not None:
             out.update(self.host.status())
+        if self.page_units is not None:
+            out["runtime"] = dict(self.page_units.blocks.status(), **self.paused_stats,
+                                  evictable_bytes=self._evictable_bytes())
         if self.swa_paged:
             # Physical slots: free, held by the tree (locked by request handles or window
             # copies, else evictable), and the rest owned by running requests. Copies in
@@ -398,9 +446,11 @@ class CacheManager:
                 request_owned=slots - free - locked - unlocked,
                 copy_inflight=self.host.window_inflight if self.host is not None else 0)
         comps = self.components
+        held = (self.page_units.blocks.held_bytes if self.page_units is not None
+                else lambda views: sum(_storage_bytes(v) for v in views))
         out["components"] = [
             {"name": c.name, "storage_kind": c.storage_kind,
-             "device_allocated_bytes": sum(_storage_bytes(v) for v in c.views()),
+             "device_allocated_bytes": held(c.views()),
              **(self.host.component_status(c) if self.host is not None else
                 {"host_used_bytes": 0, "h2d_bytes": 0, "d2h_bytes": 0})}
             for c in (*comps["paged"], comps["window"], comps["state"]) if c is not None]
@@ -427,6 +477,9 @@ class CacheManager:
         self.stats["gpu_reused_tokens"] += cached - host
 
     def _alloc_state(self) -> int | None:
+        if self.page_units is not None:
+            got = self.claim(states=1)
+            return got[1][0] if got is not None else None
         self.ensure_mamba_slots(1)
         pool = self.linear_state_pool
         return pool.alloc(1)[0] if pool.num_free_slots else None
@@ -520,7 +573,7 @@ class CacheManager:
                 self.tree.advance_window(req.cache_handle, new_evicted)
             start = max(req.swa_evicted_seqlen, floor)
             if new_evicted > start:
-                self._free_swa(self.page_table[req.table_idx, start:new_evicted])
+                self._free_swa(self.rows[req.table_idx, start:new_evicted])
                 req.swa_evicted_seqlen = new_evicted
 
     def free_swa_out_of_window_extend(self, reqs: List[Req], *, before: int | None = None) -> None:
@@ -546,7 +599,7 @@ class CacheManager:
                                      self.page_size)
             start = max(req.swa_evicted_seqlen, floor)
             if new_evicted > start:
-                self._free_swa(self.page_table[req.table_idx, start:new_evicted])
+                self._free_swa(self.rows[req.table_idx, start:new_evicted])
                 req.swa_evicted_seqlen = new_evicted
 
     def open_prefill_execution(self, batch: Batch) -> _PrefillExecutionSession | None:
@@ -619,7 +672,8 @@ class CacheManager:
         if needed_pages > 0:
             execution = self._prefill_execution
             if execution is None or not any(execution.owns(req) for req in allocation_reqs):
-                self._allocate_paged_rows(needed_pages, allocation_info)
+                if self._allocate_paged_rows(needed_pages, allocation_info) is None:
+                    raise RuntimeError("shared runtime: a batch ran rows nobody reserved")
                 return
 
             allocated = self._allocate_paged_rows(
@@ -653,30 +707,46 @@ class CacheManager:
         """
         if self.device.type != "cuda":
             return
-
-        reservation_info: List[Tuple[Req, int, int]] = []
-        needed_pages = 0
         for req in reqs:
-            previous = self._decode_page_reservations.pop(req, None)
-            if previous is not None:
-                self._free_decode_reservation(previous)
-            if not req.can_decode:
-                continue
+            self._cancel_decode_reservation(req)
+        self.reserve([req for req in reqs if req.can_decode])
+
+    def reserve(self, reqs: List[Req]) -> bool:
+        """Take the pages (and their window slots) of each request's pending rows
+        ``[cached_len, device_len)`` ahead of the batch that runs them, which then reuses
+        them; all or nothing. With a shared runtime False means memory is short now."""
+        info = []
+        for req in reqs:
             first_page = div_ceil(req.cached_len, self.page_size)
             last_page = div_ceil(req.device_len, self.page_size)
+            if self._reservation_matches(req, self._decode_page_reservations.get(req),
+                                         first_page=first_page, last_page=last_page):
+                continue
+            self._cancel_decode_reservation(req)
             if last_page > first_page:
-                needed_pages += last_page - first_page
-                reservation_info.append((req, first_page, last_page))
-        if needed_pages == 0:
-            return
+                info.append((req, first_page, last_page))
+        if not info:
+            return True
+        allocated = self._allocate_paged_rows(
+            sum(last - first for _, first, last in info),
+            [(req.table_idx, first, last) for req, first, last in info])
+        if allocated is None:
+            return False
+        self._record_reservations(info, allocated)
+        return True
 
-        allocation_info = [
-            (req.table_idx, first_page, last_page)
-            for req, first_page, last_page in reservation_info
-        ]
-        allocated = self._allocate_paged_rows(needed_pages, allocation_info)
+    def hold_rows(self, req: Req, tokens: torch.Tensor) -> None:
+        """Point a request's pending rows at pages a claim already took, as a reservation the
+        batch that runs them reuses."""
+        info = [(req, div_ceil(req.cached_len, self.page_size),
+                 div_ceil(req.device_len, self.page_size))]
+        if len(tokens):
+            self._write_rows(tokens, [(req.table_idx, info[0][1], info[0][2])])
+            self._record_reservations(info, tokens)
+
+    def _record_reservations(self, info, allocated: torch.Tensor) -> None:
         offset = 0
-        for req, first_page, last_page in reservation_info:
+        for req, first_page, last_page in info:
             length = (last_page - first_page) * self.page_size
             self._decode_page_reservations[req] = _DecodePageReservation(
                 table_idx=req.table_idx,
@@ -692,6 +762,8 @@ class CacheManager:
         pool = self.linear_state_pool
         if pool is None:
             return lengths
+        if self.page_units is not None:
+            return lengths  # the round's scratch states come with its pages (reserve_round)
         available = self.mamba_available_size if self.state_cache else pool.num_free_slots
         return pool.limit_speculation(lengths, available)
 
@@ -699,15 +771,45 @@ class CacheManager:
         pool = self.linear_state_pool
         if pool is None:
             return None
+        if self.page_units is not None and pool.replay is None:
+            slots, self.speculative_slots = self.speculative_slots, None
+            return pool.begin_speculation(reqs, views, lengths, draft=draft, slots=slots)
         if self.state_cache:
             self.ensure_mamba_slots(pool.speculative_size(lengths))
         return pool.begin_speculation(reqs, views, lengths, draft=draft)
+
+    def reserve_round(self, views: List[Req], states: int) -> bool:
+        """Shared runtime: an SD round's draft pages (the views' pending rows, with their
+        window slots) and its ``states`` scratch states in one claim; False, with nothing
+        taken, when they do not fit. ``start`` runs the views and uses the states."""
+        self.drop_speculative_slots()
+        info = []
+        for req in views:
+            first_page = div_ceil(req.cached_len, self.page_size)
+            last_page = div_ceil(req.device_len, self.page_size)
+            if last_page > first_page:
+                info.append((req, first_page, last_page))
+        got = self.claim(sum(last - first for _, first, last in info),
+                         window=_ALL if self.swa_paged else None, states=states)
+        if got is None:
+            return False
+        allocated, self.speculative_slots, _ = got
+        if info:
+            self._write_rows(allocated, [(r.table_idx, first, last) for r, first, last in info])
+            self._record_reservations(info, allocated)
+        return True
+
+    def drop_speculative_slots(self) -> None:
+        """Give back scratch states claimed for a round that does not run."""
+        if self.speculative_slots:
+            self.linear_state_pool.free(self.speculative_slots)
+        self.speculative_slots = None
 
     def release_speculative(self, req: Req, allocated_len: int) -> None:
         """Return whole provisional pages beyond the committed target KV."""
         start = div_ceil(req.cached_len, self.page_size) * self.page_size
         end = div_ceil(allocated_len, self.page_size) * self.page_size
-        pages = self.page_table[req.table_idx, start:end]
+        pages = self.rows[req.table_idx, start:end]
         self._free_swa(pages)
         self._free(pages)
 
@@ -717,12 +819,33 @@ class CacheManager:
         allocation_info: List[Tuple[int, int, int]],
         *,
         bind_swa: bool = True,
-    ) -> torch.Tensor:
-        allocated = self._page_to_token(self._allocate(needed_pages))
-        if bind_swa:
-            self._bind_swa(allocated)
-        _write_page_table(self.page_table, allocated, allocation_info, self.page_size)
+    ) -> torch.Tensor | None:
+        if self.page_units is None:
+            allocated = self._page_to_token(self._allocate(needed_pages))
+            if bind_swa:
+                self._bind_swa(allocated)
+        else:  # None: the runtime cannot back them now, nothing taken
+            got = self.claim(needed_pages, window=_ALL if bind_swa and self.swa_paged else None)
+            if got is None:
+                return None
+            allocated = got[0]
+        self._write_rows(allocated, allocation_info)
         return allocated
+
+    def _write_rows(self, allocated: torch.Tensor, allocation_info) -> None:
+        on_device = allocated
+        if self.page_units is not None:
+            _write_page_table(self.rows, allocated, allocation_info, self.page_size)
+            on_device = upload(allocated, self.device)
+        _write_page_table(self.page_table, on_device, allocation_info, self.page_size)
+
+    def write_row(self, table_idx: int, start: int, values: torch.Tensor) -> None:
+        """Point ``page_table[table_idx, start:]`` at ``values`` (page ids on the index device)."""
+        end = start + len(values)
+        if self.page_units is not None:
+            self.rows[table_idx, start:end] = values
+            values = upload(values, self.device)
+        self.page_table[table_idx, start:end].copy_(values)
 
     def _bind_swa(self, allocated: torch.Tensor) -> None:
         if not self.swa_paged or allocated.numel() == 0:
@@ -794,7 +917,7 @@ class CacheManager:
         if not boundaries and not finished:
             self._release_captures(req, keep_future=True)
             return  # nothing new is resumable yet; the request keeps its handle
-        pages = self.page_table[req.table_idx, : req.cached_len]
+        pages = self.rows[req.table_idx, : req.cached_len]
         free_upto, published, ends = old.cached_len, [], []
         for pos, capture, purpose in boundaries:
             slot = capture.slot if capture is not None else (
@@ -840,8 +963,7 @@ class CacheManager:
         # resumable part: the duplicates freed above were the request's pages for all of it.
         handle = self.tree.published(req.input_ids[:free_upto], req.cache_group)
         if handle.cached_len > old.cached_len:
-            self.page_table[req.table_idx, old.cached_len : handle.cached_len].copy_(
-                handle.kv_indices[old.cached_len :])
+            self.write_row(req.table_idx, old.cached_len, handle.kv_indices[old.cached_len :])
         req.cache_handle = handle
         self.lock(handle)
         self._release_captures(req, keep_future=True)
@@ -855,7 +977,104 @@ class CacheManager:
         """Publish finished host copies; called every scheduling pass, never waits."""
         if self.host is not None:
             self.host.poll()
-            self._release(self.tree.take_released())
+            if self.tree is not None:
+                self._release(self.tree.take_released())
+
+    # ----- paused requests (shared runtime) -----
+    def pause(self, req: Req) -> PausedState | None:
+        """Start keeping a drained request's committed model state (KV, window and recurrent
+        state through ``cached_len``) on the host; None when the host budget cannot hold it,
+        so it will be recomputed. Its GPU data stays until ``release_paused``."""
+        self._cancel_decode_reservation(req)
+        if self.linear_state_pool is not None:
+            self.linear_state_pool.materialize(req)
+        return self.save_paused(req) if self.host is not None else None
+
+    def save_paused(self, req: Req) -> PausedState | None:
+        """Copy a paused request's state to the host; None when the budget cannot hold it,
+        DEFERRED while the copy queue or window copy budget is busy."""
+        units, window = self._paused_units(req)
+        if not self.host.credit(len(window), save=True):
+            return DEFERRED
+        state = PausedState(window=window)
+        state.copies = self.host.save(units, len(window), lambda: setattr(state, "saved", True))
+        if self._agree(state.copies is not None):
+            return state
+        if state.copies is not None:  # another TP rank keeps no copy: all recompute
+            self.discard_paused(state)
+        return None
+
+    def _evictable_bytes(self) -> int:
+        """Bytes of cached prefix data no request holds (KV, GDN checkpoints, window slots):
+        claims reclaim it for any component. Logical bytes, not whole physical blocks."""
+        unit = lambda units: sum(length for *_, length in units.banks) if units else 0
+        pages = self._evictable("kv") // self.page_size * unit(self.page_units)
+        states = self._evictable("state") * unit(getattr(self.linear_state_pool, "units", None))
+        windows = (self._evictable("window") * unit(self.swa_pool.slot_units)
+                   if self.swa_paged else 0)
+        return pages + states + windows
+
+    def drop_cached(self) -> None:
+        """Release every unlocked cached prefix from the GPU, so the next claims, taking the
+        lowest free ids, lay a request out packed."""
+        while self._evict_any(1 << 62):  # any amount: everything unlocked goes
+            pass
+
+    def release_paused(self, req: Req) -> None:
+        """Give back a paused request's GPU data, as a finish would, without publishing it."""
+        self._cancel_decode_reservation(req)
+        self.unlock(req.cache_handle)
+        self._free_tail(req, req.cache_handle.cached_len)
+        self._free_req_slots(req)
+
+    def restore_paused(self, req: Req, state: PausedState, table) -> bool:
+        """Take a new table row and fresh storage for a paused request's saved state in one
+        claim and copy it back (``state.loaded`` once done); False when the runtime cannot
+        hold it now."""
+        c = req.cached_len
+        if not self.host.credit(len(state.window), save=False):
+            return False
+        got = self.claim(div_ceil(c, self.page_size),
+                         window=(lambda tokens: tokens[state.window]) if len(state.window)
+                         else None,
+                         states=int(self.private_states), table=table)
+        if got is None:
+            return False
+        tokens, slots, req.table_idx = got
+        self.write_row(req.table_idx, 0, tokens)
+        req.linear_slot_idx = slots[0] if slots else None
+        if slots and self.linear_state_pool.replay is not None:
+            self.linear_state_pool.replay.restart([req], [c])
+        req.cache_handle = CacheHandle(0, None, self.empty)
+        req.swa_evicted_seqlen = int(state.window[0]) if len(state.window) else c
+        units, _ = self._paused_units(req)
+
+        def loaded():
+            for copy in state.copies:
+                copy.release()
+            state.loaded = True
+        self.host.load(units, state.copies, len(state.window), loaded)
+        return True
+
+    def discard_paused(self, state: PausedState) -> None:
+        for copy in state.copies:
+            copy.release()
+
+    def _paused_units(self, req: Req):
+        """(component, unit indices) of a request's state through ``cached_len``, and the
+        positions whose window is bound (the drafter's trailing window)."""
+        ps, c, comps = self.page_size, req.cached_len, self.components
+        row = self.rows[req.table_idx]
+        units = [(comp, units_of(row[: div_ceil(c, ps) * ps], ps)) for comp in comps["paged"]]
+        window = self.empty
+        if comps["window"] is not None:
+            start = max(align_down(c - self.sliding_window_size - ps, ps), 0)
+            bound = self.swa_pool.window_units(row[start:c])
+            window = torch.nonzero(bound > 0).flatten() + start
+            units.append((comps["window"], bound[bound > 0]))
+        if comps["state"] is not None:
+            units.append((comps["state"], torch.tensor([req.linear_slot_idx])))
+        return units, window
 
     def _prune_round(self, req: Req, deepest) -> None:
         """Let the policy drop the states this finished round replaced above ``deepest``. The
@@ -890,7 +1109,7 @@ class CacheManager:
         diverges right at the prompt end. Re-stamp the path, its head oldest; it stays unlocked.
         The head's windows are not dropped here: other resume points on a shared path still
         need them, and window pressure evicts the head first anyway."""
-        prompt_len = align_down(req.max_device_len - req.output_len, self.page_size)
+        prompt_len = align_down(req.prompt_len, self.page_size)
         if prompt_len > 0:
             self.tree.match(req.input_ids[:prompt_len], req.cache_group)
 
@@ -914,7 +1133,7 @@ class CacheManager:
         start = div_ceil(handle.cached_len, self.page_size) * self.page_size
         end = div_ceil(allocated_device_len, self.page_size) * self.page_size
         self.unlock(handle)
-        self._free(self.page_table[table_idx, start:end])
+        self._free(self.rows[table_idx, start:end])
 
     def _padded_tail(self, req: Req, start: int) -> torch.Tensor:
         """The request's OWN slice [start, page_ceil(cached_len)) of the page table. A finish
@@ -923,7 +1142,7 @@ class CacheManager:
         to the finishing request. ``start`` is page-aligned (a match/insert boundary), so the
         full-pool page bases derived via ``[::page_size]`` are identical to the unpadded slice."""
         end = div_ceil(req.cached_len, self.page_size) * self.page_size
-        return self.page_table[req.table_idx, start:end]
+        return self.rows[req.table_idx, start:end]
 
     def _free_tail(self, req: Req, start: int) -> None:
         """Free the request's own pages from ``start``; its window only where still bound."""
@@ -942,7 +1161,8 @@ class CacheManager:
         if self.host is not None:
             # Idle: finish this cache's own copies so restored pages are in the tree.
             self.host.drain()
-            self._release(self.tree.take_released())
+            if self.tree is not None:
+                self._release(self.tree.take_released())
         cache_pages = 0
         if self.tree is not None:
             tree = self.tree
@@ -975,8 +1195,9 @@ class CacheManager:
         if self.page_size > 1:
             assert torch.all(self.free_slots % self.page_size == 0)
 
-    def rebuild(self, num_pages: int, page_table: torch.Tensor) -> None:
-        """Re-point the page table and reset page accounting + prefix tree IN PLACE.
+    def rebuild(self, num_pages: int, page_table: torch.Tensor, page_units=None) -> None:
+        """Re-point the page table and reset page accounting + prefix tree IN PLACE (onto a
+        shared runtime's new ``page_units``, whose pools come back empty).
 
         Idle-only: assumes no request holds a live handle.
         """
@@ -984,19 +1205,32 @@ class CacheManager:
         self.device = device
         self.num_pages = num_pages
         self.page_table = page_table
-        self.free_slots = torch.arange(num_pages, dtype=torch.int32, device=device) * self.page_size
+        self.page_units = page_units
+        self._reset_pages(num_pages, page_table)
         self._decode_page_reservations.clear()
+        self.speculative_slots = None
         if self.host is not None:
             # Same layout and components: host data stays reusable; GPU copies come back by
             # restore into the new pools.
             self.host.drain()
-            self.tree.drop_gpu()
+            if self.tree is not None:
+                self.tree.drop_gpu()
         else:
             self.tree = self._make_tree()
         # The discarded tree owned donated states; rebuild is idle-only, so reclaim the whole
         # state free-list (else those slots leak -> admission hangs).
-        if self.state_cache:
+        if self.state_cache and page_units is None:
             self.linear_state_pool.reclaim_all_slots()
+
+    def _reset_pages(self, num_pages: int, page_table: torch.Tensor) -> None:
+        """Every page free (with a shared runtime, page 0 is the dummy page)."""
+        if self.page_units is None:
+            self.free_slots = torch.arange(
+                num_pages, dtype=torch.int32, device=page_table.device) * self.page_size
+            self.rows = page_table
+        else:
+            self.free_slots = torch.arange(num_pages, 0, -1, dtype=torch.int32) * self.page_size
+            self.rows = torch.zeros(page_table.shape, dtype=page_table.dtype)
 
     @contextmanager
     def lazy_free_region(self):
@@ -1023,7 +1257,7 @@ class CacheManager:
             if lazy_swa_list:
                 self.swa_pool.free_swa(torch.cat(lazy_swa_list))
             if lazy_free_list:
-                self.free_slots = torch.cat([self.free_slots] + lazy_free_list)
+                self._return_pages(torch.cat(lazy_free_list))
 
     def _allocate(self, needed_pages: int) -> torch.Tensor:
         if needed_pages > (free_pages := len(self.free_slots)) and self.tree is not None:
@@ -1037,15 +1271,107 @@ class CacheManager:
         self.free_slots = self.free_slots[needed_pages:]
         return allocated
 
+    def claim(self, pages: int = 0, *, window=None, states: int = 0, table=None):
+        """Shared runtime: one operation's units, held together or not at all -- ``pages``
+        pages (as token locations), window slots for the locations ``window(tokens)`` names,
+        ``states`` GDN state slots, and ``table``'s next row with its records.
+        Cached prefix data is evicted while they do not fit, and every TP rank must hold them
+        before any is recorded as taken. Returns (tokens, slots, row), or None."""
+        begin = time.perf_counter()
+        try:
+            return self._claim(pages, window, states, table)
+        finally:  # time on the scheduler thread spent taking memory, evictions included
+            self.paused_stats["claim_ms"] += (time.perf_counter() - begin) * 1e3
+
+    def _claim(self, pages, window, states, table):
+        pool, ps, out = self.linear_state_pool, self.page_size, {}
+
+        def build():
+            claim = Claim()
+            ids = self.free_slots[len(self.free_slots) - pages:] if pages else self.empty
+            if len(ids) < pages:
+                return None
+            tokens = self._page_to_token(ids)
+            claim.add(self.page_units, ids.numpy() // ps, lambda _: self._pop_pages(pages))
+            if window is not None:
+                locs = window(tokens).to(torch.int64)
+                slots = self.swa_pool.next_slots(len(locs))
+                if slots is None:
+                    return None
+                claim.add(self.swa_pool.slot_units, slots.numpy(),
+                          lambda _: self.swa_pool.bind_slots(locs, slots))
+            state = pool.peek(states) if states else []
+            if state is None:
+                return None
+            if states:
+                claim.add(pool.units, state, pool.take)
+            row = table.peek() if table is not None else None
+            if table is not None:
+                if row is None:
+                    return None
+                claim.add(table.row_units, [row], lambda _: table.take(row))
+            out.update(tokens=tokens, slots=state, row=row)
+            return claim
+
+        batch = 1  # cached data evicted per retry doubles: a large claim retries log-many times
+        while (claim := build()) is None or not self.page_units.blocks.acquire(claim.plan):
+            if not self._evict_any(max(pages, 1) * ps * batch, states=batch):
+                claim = None
+                break
+            batch *= 2
+        if not self._agree(claim is not None):
+            if claim is not None:  # another TP rank could not: release, record nothing
+                claim.release()
+            return None
+        claim.commit()
+        return out["tokens"], out["slots"], out["row"]
+
+    def _pop_pages(self, pages: int) -> None:
+        self.free_slots = self.free_slots[: len(self.free_slots) - pages]
+
+    def _agree(self, ok: bool) -> bool:
+        """Whether every TP rank's shared-runtime step succeeded (each rank asks at the same
+        point of the same scheduling pass)."""
+        if self.tp_group is None:
+            return ok
+        flag = torch.tensor([int(ok)], dtype=torch.int64)
+        torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MIN, group=self.tp_group)
+        return bool(flag.item())
+
+    def _evict_any(self, tokens: int, states: int = 1) -> bool:
+        """Release one batch of unlocked cached prefix data; False when nothing is left."""
+        if self.tree is None:
+            return False
+        kinds = [(self.tree.evict_kv, tokens), (self.tree.evict_states, states)]
+        if self.swa_paged:
+            kinds.append((self.tree.evict_window, tokens))
+        for evict, amount in kinds:
+            ev = evict(amount)
+            if ev.kv.numel() or ev.window.numel() or ev.states:
+                self._release(ev)
+                return True
+        return False
+
     def _free(self, indices: torch.Tensor) -> None:
         if len(indices) > 0:
-            self.free_slots = torch.cat([self.free_slots, indices[:: self.page_size]])
+            self._return_pages(indices[:: self.page_size])
+
+    def _return_pages(self, pages: torch.Tensor) -> None:
+        if self.page_units is None:
+            self.free_slots = torch.cat([self.free_slots, pages])
+            return
+        # Kept descending, the lowest page next (claims take the tail): live pages pack into
+        # the fewest blocks. Inserted in place of a full sort: returns happen every step.
+        free, back = self.free_slots.numpy()[::-1], np.sort(pages.numpy())
+        self.free_slots = torch.from_numpy(
+            np.insert(free, np.searchsorted(free, back), back)[::-1].copy())
+        self.page_units.release(pages.numpy() // self.page_size)
 
     def _page_to_token(self, pages: torch.Tensor) -> torch.Tensor:
         if self.page_size == 1:
             return pages
         # [X * page_size] -> [X * page_size, ..., X * page_size + page_size - 1]
-        offsets = torch.arange(self.page_size, device=self.device, dtype=torch.int32)
+        offsets = torch.arange(self.page_size, device=pages.device, dtype=torch.int32)
         return (pages.unsqueeze(1) + offsets).flatten()
 
 

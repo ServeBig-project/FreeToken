@@ -47,6 +47,17 @@ setup(
             libraries=["cudart"],
             extra_compile_args=["-O3", "-std=c++17"],
         ),
+        # CUDA virtual memory for the shared runtime pool (--runtime-cache-gib).
+        CppExtension(
+            name="freetoken.kernel._vmm",
+            sources=[
+                "python/freetoken/kernel/csrc/vmm.cpp",
+            ],
+            include_dirs=cuda_include_dirs,
+            library_dirs=[*cuda_library_dirs, *(f"{d}/stubs" for d in cuda_library_dirs)],
+            libraries=["cuda"],
+            extra_compile_args=["-O3", "-std=c++17"],
+        ),
         # CPU-compute MoE executor for --moe-backend cpu. Links cudart for the
         # cudaLaunchHostFunc submit/sync graph nodes; the bf16 GEMV microkernels
         # use per-function target attributes (avx512bf16/avx512f) + a runtime

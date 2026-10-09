@@ -39,16 +39,39 @@ class DFlashLayout:
         anchors are on."""
         if not self.window_layers:
             return 0
-        from freetoken.scheduler.cache import _SWA_EVICTION_INTERVAL, _SWA_RETAIN_GAP
+        from freetoken.scheduler.cache import _SWA_RETAIN_GAP
 
         c, p = self.config, self.config.page_size
         up = lambda n: align_ceil(n, p)
-        request = up(self.window + _SWA_EVICTION_INTERVAL + c.speculative_num_steps + 1) + 2 * p
+        request = self.request_window()
         prefill = up(getattr(c, "max_extend_tokens", c.max_seq_len))
         copies = up(self.window) if c.prefix_cache_host_gib > 0 else 0
         anchors = (c.max_running_req * up(self.window + _SWA_RETAIN_GAP)
                    if getattr(c, "special_token_ckpt", False) else 0)
         return min(pages, c.max_running_req * request + prefill + copies + anchors)
+
+    def request_window(self) -> int:
+        """Window slots one running request holds: its read window, the committed tokens one
+        release interval lets pass and one draft block, plus two pages of slack."""
+        from freetoken.scheduler.cache import _SWA_EVICTION_INTERVAL
+
+        p = self.config.page_size
+        return align_ceil(self.window + _SWA_EVICTION_INTERVAL
+                          + self.config.speculative_num_steps + 1, p) + 2 * p
+
+    def page_banks(self) -> list[tuple[int, int]]:
+        """(banks, bytes of one page in each) of the full-history context on a shared runtime."""
+        layers = len(self.full_layers)
+        return [(2 * layers, self.row_bytes // 2 * self.config.page_size)] if layers else []
+
+    def window_banks(self) -> list[tuple[int, int]]:
+        """(banks, bytes of one window slot in each) of the window context on a shared runtime."""
+        layers = len(self.window_layers)
+        return [(2 * layers, self.row_bytes // 2)] if layers else []
+
+    def index_bytes(self, width: int) -> int:
+        """One request's history and plan index lists at a ``width``-token context."""
+        return width * (8 * len(set(self.modes)) + (8 if self.window_layers else 0))
 
     def history_width(self, limit: int | None, pages: int) -> int:
         """Index entries one request's history plus its draft block can need for a mode."""
@@ -58,7 +81,7 @@ class DFlashLayout:
     def bytes(self, pages: int) -> dict:
         c = self.config
         capacity = self.window_capacity(pages)
-        batches = c.max_running_req * (c.max_running_req + 1) // 2  # wrappers for sizes 1..C
+        batches = c.max_running_req  # one index buffer per mode serves every batch size
         modes = {mode: limit for mode, limit in zip(self.modes, self.limits)}
         indices = sum(self.history_width(limit, pages) for limit in modes.values())
         indptr = len(modes) * sum(3 * b + 2 for b in range(1, c.max_running_req + 1))
@@ -91,7 +114,7 @@ class DFlashContext:
         self.features = [None] * len(self.feature_indices)
         maximum = engine.config.max_running_req
         self.batch_sizes = list(range(1, maximum + 1))
-        self.wrappers, self.integer_workspaces = {}, {}
+        self.wrappers, self.integer_workspaces, self.index_buffers = {}, {}, {}
         # Plan inputs per attention mode: its history limit and whether the window pool holds it.
         self.modes = {}
         for layer, (mode, limit) in enumerate(zip(model.attention_modes, layout.limits)):
@@ -127,18 +150,28 @@ class DFlashContext:
         self.window_history = (torch.empty(requests * max(widths), dtype=torch.int64, device=device)
                                if widths else None)
         self.kv = self.pool = None
+        # Shared runtime: full-history pages map with the target's (page_banks); the window
+        # pool spans what the runtime could hold and maps slots as they are bound.
+        runtime, self.page_banks = self.engine.runtime, []
         if not layout.window_layers:
-            self.kv = torch.empty(
-                (2, c.num_hidden_layers, pages + 1, 1, c.num_key_value_heads, c.head_dim),
-                dtype=self.engine.dtype, device=self.engine.device)
+            shape = (2, c.num_hidden_layers, pages + 1, 1, c.num_key_value_heads, c.head_dim)
+            if runtime is None:
+                self.kv = torch.empty(shape, dtype=self.engine.dtype, device=self.engine.device)
+            else:
+                from freetoken.kvcache.runtime_pool import banked
+
+                self.kv, self.page_banks = banked(runtime, "draft_kv", shape, self.engine.dtype)
             return
         groups = [
             KVCacheGroupSpec("full", layout.full_layers, c.num_key_value_heads, c.head_dim, None),
             KVCacheGroupSpec("swa", layout.window_layers, c.num_key_value_heads, c.head_dim,
                              self.window, attn_type=AttnType.SWA)]
+        capacity = (layout.window_capacity(pages) if runtime is None else min(
+            pages, runtime.total_bytes // (len(layout.window_layers) * layout.row_bytes)))
         self.pool = HybridSWAKVCache(
             groups, c.num_hidden_layers, pages + 1, 1, self.engine.dtype, self.engine.device,
-            layout.window_capacity(pages) + 1)
+            capacity + 1, runtime=runtime)
+        self.page_banks = self.pool.page_banks
 
     # ---- the window pool the prefix cache drives (only when windowed layers exist) ----
     @property
@@ -157,6 +190,17 @@ class DFlashContext:
 
     def swa_available_size(self) -> int:
         return self.pool.swa_available_size()
+
+    # Shared runtime: the cache manager claims window slots through these.
+    @property
+    def slot_units(self):
+        return self.pool.slot_units
+
+    def next_slots(self, n):
+        return self.pool.next_slots(n)
+
+    def bind_slots(self, full, slots):
+        self.pool.bind_slots(full, slots)
 
     def window_units(self, indices):
         return self.pool.window_units(indices)
@@ -188,6 +232,11 @@ class DFlashContext:
     def geometry(self) -> dict:
         layout, pages = self.layout, self.engine.num_pages
         out = layout.bytes(pages)
+        runtime = self.engine.runtime
+        if runtime is not None:  # held memory, not the address space the layout spans
+            window = self.window_views() if self.pool is not None else []
+            out.update(full_context_bytes=runtime.held_bytes(self.paged_views()),
+                       window_context_bytes=runtime.held_bytes(window))
         out.update(compact_kv=bool(self.engine.config.dflash_compact_kv),
                    attention_window=self.engine.config.dflash_attention_window,
                    window_tokens=self.window,
@@ -204,11 +253,15 @@ class DFlashContext:
         if key not in self.wrappers:
             zeros = lambda n: torch.zeros(n, dtype=torch.int32, device=self.engine.device)
             width = self.layout.history_width(limit, self.engine.num_pages)
+            # A round plans and runs one batch size at a time, so every size of a mode reads
+            # its history indices from the same largest buffer.
+            if mode not in self.index_buffers:
+                self.index_buffers[mode] = zeros(self.engine.config.max_running_req * width)
             wrapper = BatchPrefillWithPagedKVCacheWrapper(
                 self.engine.attn_backend.float_workspace_buffer, kv_layout="NHD", backend="fa2",
                 use_cuda_graph=True, qo_indptr_buf=zeros(batch + 1),
                 paged_kv_indptr_buf=zeros(batch + 1),
-                paged_kv_indices_buf=zeros(batch * width),
+                paged_kv_indices_buf=self.index_buffers[mode][: batch * width],
                 paged_kv_last_page_len_buf=zeros(batch))
             if mode not in self.integer_workspaces:
                 self.integer_workspaces[mode] = wrapper._int_workspace_buffer
@@ -285,5 +338,6 @@ class DFlashContext:
         self.kv = self.pool = None
         self.wrappers.clear()
         self.integer_workspaces.clear()
+        self.index_buffers.clear()
         self.allocate()
         self._prime_plans()

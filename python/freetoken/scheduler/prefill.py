@@ -53,11 +53,24 @@ class PrefillAdder:
     reserved_size: int
     cache_manager: CacheManager
     table_manager: TableManager
+    # A shared runtime could not take even one page for a prompt's NEXT chunk this pass.
+    stalled: bool = False
     # SWA-pool tokens charged to reqs admitted so far this pass. Mirrors reserved_size: swa is
     # allocated only in allocate_paged (after the pass), so swa_available_size does not decrement
     # across the admission loop -- without this, successive admits all see the full pool.
     reserved_swa: int = 0
     incremental_window_prefill: bool = False
+
+    def _output_reserve(self, req: PendingReq) -> int:
+        """KV an admission sets aside for the output: all of it, or with a shared runtime only
+        the first decode step (requests that outgrow the runtime are paused instead)."""
+        if self._shared:
+            return self.cache_manager.page_size
+        return req.output_len
+
+    @property
+    def _shared(self) -> bool:
+        return getattr(self.cache_manager, "page_units", None) is not None
 
     def _try_allocate_one(self, req: PendingReq):
         if self.table_manager.available_size == 0:
@@ -71,7 +84,9 @@ class PrefillAdder:
         cached_len = handle.cached_len
         # TODO: better estimate policy
         extend_len = req.input_len - cached_len
-        estimated_len = extend_len + req.output_len
+        if self._shared:
+            extend_len = min(extend_len, self.token_budget)  # later chunks are sized as they run
+        estimated_len = extend_len + self._output_reserve(req)
 
         if estimated_len + self.reserved_size > self.cache_manager.available_size:
             return None
@@ -80,9 +95,10 @@ class PrefillAdder:
             return self.cache_manager.unlock(handle)
 
         # A request needs one private live state; snapshots are allocated only when produced.
-        if self.cache_manager.state_cache:
+        private = getattr(self.cache_manager, "private_states", self.cache_manager.state_cache)
+        if private and not self._shared:  # a shared runtime claims it with the first chunk
             pool = self.cache_manager.linear_state_pool
-            if pool.num_free_slots < 1:
+            if pool.num_free_slots < 1 and self.cache_manager.state_cache:
                 self.cache_manager.ensure_mamba_slots(1)
             if pool.num_free_slots < 1:
                 return self.cache_manager.unlock(handle)
@@ -101,7 +117,19 @@ class PrefillAdder:
             if self.cache_manager.swa_available_size - self.reserved_swa < need_swa:
                 return self.cache_manager.unlock(handle)
 
+        if self._shared:  # the row and state are claimed with the first chunk's pages
+            return handle, None, None, handle.state
+        linear_slot_idx = None
+        if private:
+            linear_slot_idx = self.cache_manager.linear_state_pool.alloc(1)[0]
         table_idx = self.table_manager.allocate()
+        self._seat(table_idx, req, handle)
+
+        return handle, table_idx, linear_slot_idx, handle.state
+
+    def _seat(self, table_idx: int, req: PendingReq, handle: CacheHandle) -> None:
+        """Point a new row at the reused prefix: its token ids and KV locations."""
+        cached_len = handle.cached_len
         if cached_len > 0:  # NOTE: set the cached part
             device_ids = self.table_manager.token_pool[table_idx][:cached_len]
             device_ids.copy_(_maybe_pinned(req.input_ids[:cached_len]), non_blocking=True)
@@ -112,14 +140,7 @@ class PrefillAdder:
             # (DSV4 reads this table too: its pool's full_loc_map is attached to it.)
             matched = handle.get_matched_indices()
             n = int(matched.numel())
-            self.table_manager.page_table[table_idx][cached_len - n : cached_len].copy_(matched)
-
-        linear_slot_idx = None
-        if self.cache_manager.state_cache:
-            pool = self.cache_manager.linear_state_pool
-            linear_slot_idx = pool.alloc(1)[0]
-
-        return handle, table_idx, linear_slot_idx, handle.state
+            self.cache_manager.write_row(table_idx, cached_len - n, matched)
 
     def _add_one_req(
         self,
@@ -137,6 +158,7 @@ class PrefillAdder:
         chunk_size = min(self.token_budget, remain_len)
         if self.chunk_token_limit is not None:
             chunk_size = min(chunk_size, self.chunk_token_limit)
+        shared = self._shared
         if (
             self.incremental_window_prefill
             and self.cache_manager.swa_paged
@@ -192,21 +214,13 @@ class PrefillAdder:
             self.reserved_swa += (
                 div_ceil(cached_len + chunk_size, ps) - div_ceil(cached_len, ps)
             ) * ps
-        is_chunked = chunk_size < remain_len
-        CLS = ChunkedReq if is_chunked else Req
-        self.token_budget -= chunk_size
-        self.reserved_size += remain_len + pending_req.output_len
-        # NOTE: update the tokens ids only; new pages will be allocated in the scheduler
-        _slice = slice(cached_len, cached_len + chunk_size)
-        device_ids = self.table_manager.token_pool[table_idx, _slice]
-        device_ids.copy_(_maybe_pinned(pending_req.input_ids[_slice]), non_blocking=True)
-        if is_chunked and pending_req.mm_embeds is not None:
+        if chunk_size < remain_len and pending_req.mm_embeds is not None:
             raise NotImplementedError(
                 "Multimodal prompts must fit in a single prefill chunk; increase "
                 "--max-extend-tokens or shrink the prompt."
             )
-        req = CLS(
-            input_ids=pending_req.input_ids[: cached_len + chunk_size],
+        make = lambda size: (ChunkedReq if size < remain_len else Req)(
+            input_ids=pending_req.input_ids[: cached_len + size],
             table_idx=table_idx,
             cached_len=cached_len,
             output_len=pending_req.output_len,
@@ -215,7 +229,40 @@ class PrefillAdder:
             sampling_params=pending_req.sampling_params,
             mm_embeds=pending_req.mm_embeds,
             cache_group=pending_req.cache_group,
+            prompt_len=pending_req.prompt_len,
+            arrival=pending_req.arrival,
         )
+        if shared:
+            # One claim: the chunk's pages and window slots, and for a new request its table
+            # row and GDN state. When memory is short a smaller chunk, ending on a page, still
+            # makes progress.
+            cm, ps, new = self.cache_manager, self.cache_manager.page_size, table_idx is None
+            while (got := cm.claim(
+                    div_ceil(cached_len + chunk_size, ps) - div_ceil(cached_len, ps),
+                    window=(lambda tokens: tokens) if cm.swa_paged else None,
+                    states=int(new and cm.private_states),
+                    table=self.table_manager if new else None)) is None:
+                chunk_size = align_down(cached_len + chunk_size // 2, ps) - cached_len
+                if chunk_size <= 0:
+                    # A new arrival waits; a continuation already holds state older requests
+                    # may be asked to make room for. Cached data under a host copy cannot be
+                    # evicted yet: that is not a shortage.
+                    self.stalled = not new and not cm.copies_inflight
+                    return None
+            tokens, slots, row = got
+            if new:
+                table_idx, linear_slot_idx = row, (slots[0] if slots else None)
+                self._seat(table_idx, pending_req, cache_handle)
+        req = make(chunk_size)
+        if shared:
+            cm.hold_rows(req, tokens)
+        self.token_budget -= chunk_size
+        self.reserved_size += (chunk_size if shared else remain_len) + self._output_reserve(
+            pending_req)
+        # NOTE: update the tokens ids only; new pages will be allocated in the scheduler
+        _slice = slice(cached_len, cached_len + chunk_size)
+        device_ids = self.table_manager.token_pool[table_idx, _slice]
+        device_ids.copy_(_maybe_pinned(pending_req.input_ids[_slice]), non_blocking=True)
         # Hybrid GDN per-request state slots (None for non-hybrid). On a fresh admit these are
         # freshly allocated; on a chunked continuation they are inherited from the prior chunk.
         req.linear_slot_idx = linear_slot_idx
@@ -265,9 +312,11 @@ class PrefillAdder:
             )
             if req is None:
                 # no aligned chunk this pass: undo the admission (a continuation keeps its
-                # resources -- they belong to the prior chunk's Req)
+                # resources -- they belong to the prior chunk's Req); a shared runtime's
+                # claim took nothing then
                 self.cache_manager.unlock(cache_handle)
-                self.table_manager.free(table_idx)
+                if table_idx is not None:
+                    self.table_manager.free(table_idx)
                 if linear_slot_idx is not None:
                     self.cache_manager.linear_state_pool.free(linear_slot_idx)
             else:
@@ -283,12 +332,27 @@ class PrefillManager:
     table_manager: TableManager
     decode_manager: DecodeManager
     pending_list: List[PendingReq] = field(default_factory=list)
+    arrivals: int = 0
+    # Shared runtime: a prompt's next chunk got no page this pass; the queue's head (a prompt
+    # not started yet) could not be admitted at all; and only arrivals before ``admit_before``
+    # may start (continuations always may), set by the pause policy.
+    stalled: bool = False
+    blocked_head: PendingReq | None = None
+    empty: bool = False  # shared runtime: nothing else holds or copies memory this pass
+    admit_before: int | None = None
 
     def add_one_req(self, req: UserMsg) -> None:
+        self.arrivals += 1
         self.pending_list.append(
             PendingReq(req.uid, req.input_ids, req.sampling_params,
-                       mm_embeds=req.mm_embeds, cache_group=req.cache_group)
+                       mm_embeds=req.mm_embeds, cache_group=req.cache_group,
+                       arrival=self.arrivals)
         )
+
+    def requeue(self, pending: PendingReq) -> None:
+        """Queue a paused request to be recomputed, at its original arrival order."""
+        later = [i for i, p in enumerate(self.pending_list) if p.arrival > pending.arrival]
+        self.pending_list.insert(later[0] if later else len(self.pending_list), pending)
 
     def schedule_next_batch(
         self,
@@ -301,6 +365,7 @@ class PrefillManager:
         wave: bool = False,
     ) -> Batch | None:
         self.cache_manager.poll()
+        self.stalled, self.blocked_head = False, None
         if len(self.pending_list) == 0:
             return None
 
@@ -337,6 +402,9 @@ class PrefillManager:
                 break
             if max_reqs is not None and len(reqs) >= max_reqs:
                 break
+            if (pending_req.chunked_req is None and self.admit_before is not None
+                    and pending_req.arrival >= self.admit_before):
+                break
             is_continuation = pending_req.chunked_req is not None
             req = adder.try_add_one(pending_req)
             if req is WAIT_RESTORE:
@@ -349,18 +417,28 @@ class PrefillManager:
                     pending_req.chunked_req = req
                     chunked_list.append(pending_req)
                 reqs.append(req)
-                if not is_continuation:
+                first = not is_continuation and pending_req.paused is None
+                if first:
                     # Record the COMPLETE prompt length and the prefix-cache hit on the
                     # first chunk. The scheduler publishes them only after _prepare_batch
-                    # succeeds; continuation chunks must never publish them again.
+                    # succeeds; continuation chunks and resumed requests never publish them.
                     prompt_admissions.append(
                         (req.uid, pending_req.input_len, req.cache_handle.cached_len)
                     )
                 log_new_tokens += req.extend_len
-                if not is_continuation:
+                if first:
                     log_cached_tokens += req.cache_handle.cached_len
+                elif pending_req.paused is not None:
+                    self.cache_manager.paused_stats["recomputed_tokens"] += req.extend_len
+                if pending_req.paused_since is not None and not is_continuation:
+                    self.cache_manager.paused_stats["paused_ms"] += (
+                        time.monotonic() - pending_req.paused_since) * 1e3
+                    pending_req.paused_since = None
             else:
+                if not reqs and pending_req.chunked_req is None and self.empty:
+                    self.blocked_head = pending_req  # could not start in an empty runtime
                 break  # We cannot add more requests
+        self.stalled = adder.stalled
         if len(reqs) == 0:
             return None
         self.pending_list = chunked_list + [
@@ -409,6 +487,8 @@ class PrefillManager:
         for i, req in enumerate(self.pending_list):
             if req.uid == uid:
                 self.pending_list.pop(i)
+                if self.blocked_head is req:
+                    self.blocked_head = None
                 return req.chunked_req
         return None
 

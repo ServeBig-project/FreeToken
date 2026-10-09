@@ -58,16 +58,19 @@ def resolve_pool_class(model_config: ModelConfig) -> type[BaseKVCachePool]:
     return MHAKVCache
 
 
-def create_kv_pool(config, num_pages: int, device: torch.device, dtype: torch.dtype):
+def create_kv_pool(config, num_pages: int, device: torch.device, dtype: torch.dtype,
+                   runtime=None):
     """Build the engine's KV pool for ``num_pages`` USABLE pages (the dummy page and every
     secondary tier -- window pool, index slab, state rings -- are derived here or inside
-    the pool). Single factory entry for all pool families, DSV4 included."""
+    the pool). Single factory entry for all pool families, DSV4 included. A shared
+    ``runtime`` backs the paged full-attention pool (the engine admits no other)."""
     from .dsv4_cost_model import _dsv4_pool_sizes
     from .hybrid_swa_pool import _naive_swa_num_tokens, _swa_paged_num_tokens
     from .dsv4_paged_pool import DSV4PagedKVCache
 
     model_config = config.model_config
-    if resolve_pool_class(model_config) is DSV4PagedKVCache:
+    family = resolve_pool_class(model_config)
+    if family is DSV4PagedKVCache:
         # DSV4 is driven by the generic CacheManager over the shared page table; the pool is
         # the only DSV4-specific piece (the swa_pool plug-in: window tier + cmp/idx/state
         # shadows). Sizing reads dsv4_args, never the group spec.
@@ -100,6 +103,7 @@ def create_kv_pool(config, num_pages: int, device: torch.device, dtype: torch.dt
         dtype=dtype,
         num_req_slots=config.max_running_req + 1,  # + 1 for the dummy request row
         kv_dtype=getattr(config, "kv_dtype", "bf16"),
+        runtime=runtime,
     )
 
 
@@ -112,6 +116,7 @@ def create_kvcache_pool(
     num_swa_tokens: int | None = None,
     num_req_slots: int | None = None,
     kv_dtype: str = "bf16",
+    runtime=None,
 ) -> BaseKVCachePool:
     if model_config.has_swa_attention:
         from .hybrid_swa_pool import HybridSWAKVCache
@@ -227,6 +232,7 @@ def create_kvcache_pool(
         device=device,
         dtype=dtype,
         layer_ids=layer_ids,
+        runtime=runtime,
     )
 
 
