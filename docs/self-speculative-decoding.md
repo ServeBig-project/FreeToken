@@ -164,6 +164,13 @@ resource and cost decisions. The default state budget is not a guarantee that
 full concurrency can draft: protected prefixes also consume it. The existing idle
 cache rebuild can explicitly resize `num_mamba_slots`.
 
+`/v1/stats` `execution.resources` is present with SD on or off and refreshes at
+ready, after each reply and after a rebuild. `speculative_graph_reserved_bytes` is
+the GPU memory the SD graph capture newly reserved; after a cache rebuild it can be
+lower because the process already holds the previous graphs' memory (process usage
+is `vram_bytes`). `cpu_executor_pinned_io_bytes` is the CPU MoE executor's pinned
+staging, which grows when a new row count first runs.
+
 With `--cache-type naive`, fixed live-state slots and the padding sink are
 reserved. The default naive pool has no temporary-state capacity, so an SD request
 fails at startup;
