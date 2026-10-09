@@ -88,7 +88,8 @@ Temporary draft tokens must never be emitted to clients.
 
 `GET /v1/stats` exposes a `speculative` object with `enabled`, `draft_tokens`,
 `accepted_draft_tokens`, `emitted_tokens`, `verify_steps`, and the real and
-physical (graph-padded) `verify_positions` / `verify_physical_positions`. Counters
+physical (graph-padded) `verify_positions` / `verify_physical_positions` of rounds
+outside prefill waves. Counters
 are cumulative since server startup. Accepted draft tokens are the drafts the target
 accepted, counted before EOS, stop strings or output limits cut the reply;
 `emitted_tokens` are the tokens speculative rounds actually delivered. Target

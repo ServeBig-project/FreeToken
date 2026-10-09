@@ -1,17 +1,19 @@
 # DFlash 主线交付：独立公开验收契约
 
-状态：目标行为已确认，待实现；不是当前 main 已全部支持的声明。实现基线 `main@63156df`。
+状态：目标行为已确认，待验收。实现基线为 SD batching（`feat/sd-batching-ship`，合入后以 main 为准）：公共 SD 已支持 layered-pipeline 调度与 hybrid 专家后端。
+
+本轮交付固定长度 DFlash。`--speculative-adaptive-cost` 与 observe-only 保留、默认关闭，其策略收益和同执行开销门槛（第 6 节第 1、3 项）另开 issue，不作为本轮交付条件；功能正确性仍需验收。
 
 本文可单独交给独立黑盒 agent。测试作者只能获得本文、公开模型格式/数学、CLI/API 和运行权限；不得读取实现源码、diff、内部测试或实现协议。公开失败由协调者转给实现者，不向实现者开放黑盒测试源码。
 
 ## 1. 范围、默认值与配置
 
-- 单 GPU、legacy、offload，目标权重 BF16/NVFP4；DFlash 自身使用公开支持的 BF16 权重/激活。Graph 覆盖并发与自然尾批。
+- 单 GPU；legacy 或 layered-pipeline 调度（后者按 `--speculative-phase outwave|inwave|all` 选择在 prefill 波次外、内或两者起草）；专家后端 offload 或 hybrid；目标权重 BF16/NVFP4；DFlash 自身使用公开支持的 BF16 权重/激活。Graph 覆盖并发与自然尾批。
 - 保留现有 DFlash 的 FlashInfer、BF16 激活和 page_size=1 要求；NVFP4 目标权重不改变此 attention/KV 支持边界。
-- CPU/hybrid 专家执行、layered 调度的 SD 不在本次支持范围；不兼容配置在 ready 前明确拒绝。普通 AR 的既有后端支持不变。
+- 全 CPU 专家层的 SD 不在支持范围；adaptive/observe-only 只支持 legacy 调度，layered 下在 ready 前拒绝。不兼容配置在 ready 前明确拒绝。普通 AR 的既有后端支持不变。
 - 不按模型名或路径名限制功能；目标必须有匹配 drafter、支持的 features/输出头和状态/attention 能力。真实配对至少覆盖 Qwen3.6-35B-A3B 与匹配 DFlash。
 - 无 GDN 目标不必指定 GDN 预算；如果没有可用的真实匹配权重，可以用合法小模型检查公开能力/资源行为，但不得冒称真实模型性能验收。
-- `--speculative-draft-model-path PATH` 指定外部 DFlash；不指定时保留现有 self-SD。`--speculative-num-steps 0` 关闭 SD；正值为最多草稿 token 数，不含已有输入，当前上限 8。
+- `--speculative-draft-model-path PATH` 指定外部 DFlash；不指定时保留现有 self-SD。`--speculative-num-steps 0` 关闭 SD 并忽略 draft 路径；正值为最多草稿 token 数，不含已有输入，当前上限 8；给出 draft 路径但不指定步数时为 4。
 - 固定长度也受单请求剩余长度/容量约束。`--speculative-adaptive-cost` 为 DFlash 选择一整块的 AR/2/4/8，受配置上限裁剪；块内不逐 token 决策。
 - 同批请求可以有不同草稿长度。一个请求只剩 1 token 或无起草容量，不应把其他请求统一缩为零草稿。
 - `--dflash-compact-kv` 默认开启，仅对 DFlash 生效；`--no-dflash-compact-kv` 为全容量存储 A/B。两者不改变注意力数学。
@@ -58,7 +60,7 @@
 `/v1/stats` 至少可区分：
 
 - drafter 类型、配置最大步数、实际每请求草稿长度分布、accepted 和最终 emitted。
-- 实际/物理 draft、verify 位置；请求尾部和资源裁剪，不能只报告最大宽度。
+- 实际/物理 draft、verify 位置；请求尾部和资源裁剪，不能只报告最大宽度。verify 位置只计 prefill 波次外的轮次；波次内外的验证轮数与请求数分别报告，退 AR 按原因报告。
 - 固定执行、成本选择、初始化、探测、退 AR 次数；观察模式下“建议选择”与“实际执行”分别报告。
 - 完整轮累计时间、完整 proposal 时间（包括采样/候选准备）、verify forward 与接受/修正部分；所有计时说明是否重叠，不能无条件相加。
 - 控制器 CPU 决策时间、有效成本样本数、丢样数、初始化与探测实耗；空闲时已结束样本最终可见。
@@ -74,7 +76,7 @@
 | 维度 | 必测内容 |
 | --- | --- |
 | 格式/模型 | 匹配 Qwen3.6 BF16 与 NVFP4；无 GDN 的公开能力案例；原有 Qwen3/Qwen3.6 self-SD 和 AR 回归 |
-| 执行 | 固定 N2/4/8、adaptive、observe-only；Graph/eager 数值；Replay 开/关 |
+| 执行 | 固定 N2/4/8、adaptive、observe-only；Graph/eager 数值；Replay 开/关；legacy 与 layered-pipeline（outwave/inwave/all）；offload 与 hybrid |
 | 批次 | C1/C4/C16 及中间/自然尾批；实际长度不一、单请求不能起草、真实/物理位置不等；有填充的较大 N8 图 |
 | 输入 | 短于窗口、跨窗口边界、远长于窗口、分块 prefill、长生成多次滑出旧公共窗口 |
 | 共享 | 同前缀多请求、不同分叉/继续长度、组隔离、一个结束另一个继续、旧分支再次访问 |
