@@ -130,9 +130,11 @@ class EngineConfig:
         external_draft = self.speculative_draft_model_path is not None and self.speculative_num_steps != 0
         if self.dflash_attention_window < 0:
             raise ValueError("--dflash-attention-window must be >= 0")
-        if self.dflash_attention_window and not external_draft:
+        # With SD off the DFlash-only settings are ignored along with the draft path.
+        if self.dflash_attention_window and self.speculative_num_steps and not external_draft:
             raise ValueError("--dflash-attention-window requires --speculative-draft-model-path")
-        if self.dflash_adaptive_observe_only and not (external_draft and self.speculative_adaptive_cost):
+        if (self.dflash_adaptive_observe_only and self.speculative_num_steps
+                and not (external_draft and self.speculative_adaptive_cost)):
             raise ValueError("--dflash-adaptive-observe-only requires --speculative-draft-model-path "
                              "and --speculative-adaptive-cost")
         if external_draft:
