@@ -48,6 +48,7 @@ from .layered_batch import (
 from .joint_execution import JointWaveExecutor
 from .layered_pipeline import LayeredPipelineExecutor
 from .mixed_batch import LegacyBatchComposer, MixedBatchComposer
+from .pause import PauseManager
 from .prefill import ChunkedReq, PrefillManager
 from .resident_decode import StableDecodeInput, prepare_stable_decode
 from .resident_wave import ResidentExecutor, request_output_view
@@ -89,7 +90,9 @@ class Scheduler(SchedulerIOMixin):
         self.gpus = [gpu_identity(self.device.index)] if self.device.type == "cuda" else []
 
         # initialize other managers
-        self.table_manager = TableManager(config.max_running_req, self.engine.page_table)
+        pool = self.engine.linear_state_pool
+        self.table_manager = TableManager(config.max_running_req, self.engine.page_table,
+                                          pool.replay if pool is not None else None)
         # ONE cache manager for every model (ShadowRadix layering): the shared page table is the
         # virtual full-token coordinate; model-specific tiers ride the plug-ins -- DSV4's
         # window/cmp/idx shadows via swa_pool, Gemma's swa via swa_pool, GDN state via
@@ -106,11 +109,18 @@ class Scheduler(SchedulerIOMixin):
             host_bytes=int(config.prefix_cache_host_gib * (1 << 30)),
             draft_kv=self.engine.dflash.context if self.engine.dflash is not None else None,
             tp_group=self.engine.tp_cpu_group if config.tp_info.size > 1 else None,
+            page_units=self.engine.page_units,
         )
         self.decode_manager = DecodeManager(config.page_size)
         self.prefill_manager = PrefillManager(
             self.cache_manager, self.table_manager, self.decode_manager
         )
+        self.pause_manager = None
+        if self.engine.runtime is not None:
+            self.decode_manager.reserve_outputs = False
+            self.pause_manager = PauseManager(self.cache_manager, self.table_manager,
+                                              self.decode_manager, self.prefill_manager,
+                                              self._inflight_reqs, self._fail_request)
         self.layered_composer: LayeredBatchComposer | None = None
         self.layered_wave: LayeredPrefillWave | None = None
         self.layered_stats = LayeredExecutionStats()
@@ -252,6 +262,7 @@ class Scheduler(SchedulerIOMixin):
         num_pages: int | None = None,
         num_mamba_slots: int | None = None,
         num_swa_pages: int | None = None,
+        runtime_cache_gib: float | None = None,
         _prefill_budget_event: str = "cache_rebuild",
     ) -> None:
         """Idle-only runtime cache rebuild: resize the MoE slot cache, KV pages, GDN (mamba) state
@@ -265,7 +276,7 @@ class Scheduler(SchedulerIOMixin):
         assert not (
             resident_executor is not None and resident_executor.active
         ), "rebuild requires no active resident prefill"
-        assert not self.prefill_manager.runnable, "rebuild requires no pending prefill"
+        assert not self._queued, "rebuild requires no pending prefill"
         assert not self.decode_manager.runnable, "rebuild requires no running decode"
         torch.cuda.synchronize(self.device)
         if self.config.tp_info.size > 1:
@@ -278,9 +289,18 @@ class Scheduler(SchedulerIOMixin):
         self._resident_decode_input = None
         self.engine.rebuild_runtime_cache(
             moe_cache_size=moe_cache_size, num_pages=num_pages, num_mamba_slots=num_mamba_slots,
-            num_swa_pages=num_swa_pages,
+            num_swa_pages=num_swa_pages, runtime_cache_gib=runtime_cache_gib,
         )
-        if num_pages is not None or num_mamba_slots is not None or num_swa_pages is not None:
+        if runtime_cache_gib is not None:
+            # New physical blocks under new pool views: every page, slot and row id restarts.
+            self.cache_manager.rebuild(self.engine.num_pages, self.engine.page_table,
+                                       page_units=self.engine.page_units)
+            pool = self.engine.linear_state_pool
+            self.table_manager.rebuild(self.engine.page_table,
+                                       rows=pool.replay if pool is not None else None)
+            self.token_pool = self.table_manager.token_pool
+            self.cache_manager.check_integrity()
+        elif num_pages is not None or num_mamba_slots is not None or num_swa_pages is not None:
             # Any of these resizes invalidates the prefix cache: a KV resize leaves stale page
             # indices, a mamba resize leaves stale GDN-snapshot slot ids, and a window-pool resize
             # (num_swa_pages) reallocates the SWA/window token pool, leaving stale slot ids in the
@@ -322,7 +342,7 @@ class Scheduler(SchedulerIOMixin):
         self._last_data = last_data
         blocking = not (
             last_data is not None  # don't block if we have a batch to be processed
-            or self.prefill_manager.runnable
+            or self._queued
             or self.decode_manager.runnable
             or self._pending_rebuild is not None  # a queued rebuild to drain toward + execute
         )
@@ -333,7 +353,7 @@ class Scheduler(SchedulerIOMixin):
         # no last batch to process, no pending prefill, no running decode. finished_reqs is
         # NOT a gate — those requests are already freed (no live GPU/page resources).
         if self._pending_rebuild is not None and last_data is None and not (
-            self.prefill_manager.runnable or self.decode_manager.runnable
+            self._queued or self.decode_manager.runnable
         ):
             self._execute_pending_rebuild()
 
@@ -344,6 +364,7 @@ class Scheduler(SchedulerIOMixin):
         # still-pending output write -- corrupting tokens (e.g. dropping an image
         # placeholder, which the multimodal merge then rejects).
         self.stream.wait_stream(self.engine.stream)
+        self._relieve()
         forward_input = self._schedule_next_batch()
         ongoing_data = None
         if forward_input is not None:
@@ -362,12 +383,13 @@ class Scheduler(SchedulerIOMixin):
         # in-flight forward. copy_done only covers batch N; order against N+1 explicitly.
         self.stream.wait_stream(self.engine.stream)
         self._process_last_data(last_data)
+        self._advance_pauses([ongoing_data] if ongoing_data is not None else [])
         self._flush_abort_acks()
         return ongoing_data
 
     def normal_loop(self) -> None:
         blocking = not (
-            self.prefill_manager.runnable
+            self._queued
             or self.decode_manager.runnable
             or self._pending_rebuild is not None  # a queued rebuild to execute at idle
         )
@@ -378,10 +400,11 @@ class Scheduler(SchedulerIOMixin):
         # the scheduler is idle (no pending prefill / running decode). Without this, a
         # rebuild in DISABLE_OVERLAP_SCHEDULING mode stays pending until the HTTP timeout.
         if self._pending_rebuild is not None and not (
-            self.prefill_manager.runnable or self.decode_manager.runnable
+            self._queued or self.decode_manager.runnable
         ):
             self._execute_pending_rebuild()
 
+        self._relieve()
         forward_input = self._schedule_next_batch()
         ongoing_data = None
         if forward_input is not None:
@@ -392,13 +415,14 @@ class Scheduler(SchedulerIOMixin):
         self._process_last_data(ongoing_data)
         if self.speculative is not None:
             self.speculative.end_round()
+        self._advance_pauses([])
         self._flush_abort_acks()
 
     def layered_loop(self) -> None:
         """Run one decode, then finish the active prefill layer group."""
         blocking = not (
             self.layered_wave is not None
-            or self.prefill_manager.runnable
+            or self._queued
             or self.decode_manager.runnable
             or self._pending_rebuild is not None
         )
@@ -407,14 +431,16 @@ class Scheduler(SchedulerIOMixin):
 
         if self._pending_rebuild is not None and not (
             self.layered_wave is not None
-            or self.prefill_manager.runnable
+            or self._queued
             or self.decode_manager.runnable
         ):
             self._execute_pending_rebuild()
 
         self.stream.wait_stream(self.engine.stream)
+        self._relieve()
         decode_input, prefill_chunk = self._schedule_layered_work()
         if decode_input is None and prefill_chunk is None:
+            self._advance_pauses([])
             self._flush_abort_acks()
             return
 
@@ -512,6 +538,7 @@ class Scheduler(SchedulerIOMixin):
 
         for data in prefill_data:
             self._process_last_data(data)
+        self._advance_pauses([])
         self._flush_abort_acks()
 
     def _drain_layered_decode(
@@ -772,7 +799,7 @@ class Scheduler(SchedulerIOMixin):
             last_outputs
             or
             executor.active
-            or self.prefill_manager.runnable
+            or self._queued
             or self.decode_manager.runnable
             or self._pending_rebuild is not None
         )
@@ -781,7 +808,7 @@ class Scheduler(SchedulerIOMixin):
 
         if self._pending_rebuild is not None and not last_outputs and not (
             executor.active
-            or self.prefill_manager.runnable
+            or self._queued
             or self.decode_manager.runnable
         ):
             self._execute_pending_rebuild()
@@ -796,6 +823,7 @@ class Scheduler(SchedulerIOMixin):
             self._process_last_outputs(last_outputs)
             last_outputs = []
         outputs: list[ForwardData] = []
+        self._relieve()
         if not executor.active:
             gate = self.adaptive_fast_path_gate
             if gate is not None:
@@ -896,6 +924,7 @@ class Scheduler(SchedulerIOMixin):
                 deferred_outputs.append(data)
         self._process_last_outputs(ready_outputs)
         self._resident_last_outputs = deferred_outputs
+        self._advance_pauses(deferred_outputs)
         self._flush_abort_acks()
 
     def _forward_direct_resident_batch(self, batch: Batch) -> list[ForwardData]:
@@ -1153,12 +1182,51 @@ class Scheduler(SchedulerIOMixin):
         self.send_result(reply)
         return new_finished_reqs
 
+    @property
+    def _queued(self) -> bool:
+        """Prompts waiting for prefill, or paused requests still to be saved or restored."""
+        pauses = getattr(self, "pause_manager", None)
+        return self.prefill_manager.runnable or (pauses is not None and pauses.runnable)
+
+    def _relieve(self) -> None:
+        """Before choosing a batch: under memory pressure the newest requests give way."""
+        if getattr(self, "pause_manager", None) is not None:
+            self.pause_manager.relieve()
+
+    def _advance_pauses(self, inflight: list) -> None:
+        """End of every round, output or not: drained held requests are paused, host copies
+        move along, paused requests come back."""
+        if getattr(self, "pause_manager", None) is not None:
+            self.pause_manager.advance({req for data in inflight for req in data[0].batch.reqs})
+
+    def _fail_request(self, uid: int, error: str, req: Req | None) -> None:
+        """End a request with a public error. A running one's resources go when no batch reads
+        them (now, or at the drain of the batch it is in, like an abort)."""
+        if req is not None:
+            req.aborted = True
+            self.decode_manager.remove_req(req)
+            if req not in self._inflight_reqs():
+                self._free_req_resources(req)
+        self.send_result([ErrorReplyMsg(uid=uid, error=error, code="context_length_exceeded")])
+
+    def _inflight_reqs(self) -> set:
+        """Requests whose GPU data a launched batch or an open prefill wave still reads."""
+        launched = [self._last_data] if getattr(self, "_last_data", None) is not None else []
+        launched += getattr(self, "_resident_last_outputs", ())
+        reqs = {req for data in launched for req in data[0].batch.reqs}
+        if self.resident_executor is not None:
+            reqs.update(self.resident_executor.wave_reqs)
+        if self.layered_wave is not None:
+            reqs.update(req for chunk in self.layered_wave.chunks
+                        for req in chunk.forward_input.batch.reqs)
+        return reqs
+
     def _match_stop_str(self, req: Req) -> str | None:
         """First stop string present in this request's generated tail, else None. Decodes
         only a short suffix (bounded by the longest stop string's char length, so a stop of
         N chars spans at most N tokens) to keep the per-step cost small."""
         stop_strs = req.sampling_params.stop_strs
-        prompt_len = req.max_device_len - req.output_len
+        prompt_len = req.prompt_len
         if len(req.input_ids) <= prompt_len:
             return None
         max_chars = max(len(s) for s in stop_strs)
@@ -1186,7 +1254,8 @@ class Scheduler(SchedulerIOMixin):
         Mirrors SGLang's mamba-pool semantics: ``total`` excludes the reserved padding
         sink (slot 0); ``used`` excludes free slots and evictable tree snapshots.
         """
-        if not self.cache_manager.state_cache:
+        # A shared runtime's slot count is address space; its memory is in the runtime status.
+        if not self.cache_manager.state_cache or self.cache_manager.page_units is not None:
             return None
         total = self.cache_manager.linear_state_pool.num_slots - 1
         return total - self.cache_manager.mamba_available_size, total
@@ -1198,7 +1267,7 @@ class Scheduler(SchedulerIOMixin):
         unit; ``used`` excludes free slots and evictable (unlocked) tree tokens.
         """
         cm = self.cache_manager
-        if not cm.swa_paged:
+        if not cm.swa_paged or getattr(cm, "page_units", None) is not None:
             return None
         total = cm.swa_pool.swa_num_tokens - 1
         return total - cm.swa_available_size, total
@@ -1224,6 +1293,12 @@ class Scheduler(SchedulerIOMixin):
                 logger.debug_rank0(
                     "Dropping request %d because its abort arrived before admission", msg.uid
                 )
+                return
+            if getattr(self, "pressure", None) is not None and msg.mm_embeds is not None:
+                # Paused requests are rebuilt from token ids, which do not carry image content.
+                self.send_result([ErrorReplyMsg(
+                    uid=msg.uid, error="multimodal requests are not supported with "
+                    "--runtime-cache-gib", code="unsupported_request")])
                 return
             input_len, max_seq_len = len(msg.input_ids), self.engine.max_seq_len
             max_output_len = max_seq_len - input_len
@@ -1269,6 +1344,8 @@ class Scheduler(SchedulerIOMixin):
             while len(tombstones) > 65_536:
                 tombstones.pop(next(iter(tombstones)))
             pending_req = self.prefill_manager.abort_req(msg.uid)
+            if getattr(self, "pause_manager", None) is not None:
+                self.pause_manager.abort(msg.uid)
             layered_req = self._abort_layered_wave(msg.uid)
             resident_executor = getattr(self, "resident_executor", None)
             resident_req = (
@@ -1329,7 +1406,7 @@ class Scheduler(SchedulerIOMixin):
                     self.resident_executor is not None
                     and self.resident_executor.active
                 )
-                or self.prefill_manager.runnable
+                or self._queued
                 or self.decode_manager.runnable
             ):
                 # if_idle: refuse rather than wait. (finished_reqs hold no resources — they
@@ -1403,6 +1480,7 @@ class Scheduler(SchedulerIOMixin):
             "num_pages": msg.num_pages,
             "num_mamba_slots": msg.num_mamba_slots,
             "num_swa_pages": msg.num_swa_pages,
+            "runtime_cache_gib": msg.runtime_cache_gib,
         }
         # Rollback target: the CURRENT (serving) sizes of ONLY the pools this request touches.
         # Passing the untouched pools too would trip rebuild_cache's KV/mamba/SWA gate and wipe
@@ -1482,11 +1560,14 @@ class Scheduler(SchedulerIOMixin):
             getattr(config, "cache_type", None) == "swa_radix"
         ):  # usable window tokens = pool tokens minus the slot-0 sentinel
             num_swa_pages = max(0, int(getattr(eng.kv_cache, "swa_num_tokens", 0) or 0) - 1)
+        shared = getattr(eng, "runtime", None) is not None  # page/slot counts: address space
         return dict(
-            num_pages=eng.num_pages,
+            num_pages=0 if shared else eng.num_pages,
             moe_cache_size=eng.moe_offload_cache.cache_size if eng.moe_offload_cache is not None else None,
-            num_mamba_slots=(eng.linear_state_pool.num_slots - 1) if eng.linear_state_pool is not None else None,
+            num_mamba_slots=(0 if shared else eng.linear_state_pool.num_slots - 1)
+            if eng.linear_state_pool is not None else None,
             num_swa_pages=num_swa_pages,
+            runtime_cache_gib=config.runtime_cache_gib,
         )
 
     def _log_cache_geometry(self, event: str) -> None:
@@ -1500,6 +1581,8 @@ class Scheduler(SchedulerIOMixin):
             unit = compute_cache_unit_bytes(self.engine)
             kv_tokens = pools["num_pages"] * pools["page_size"]
             parts = [
+                f"shared runtime {_gib(pools['runtime_cache_bytes'])}"
+                if "runtime_cache_bytes" in pools else
                 f"KV {pools['num_pages']} pages"
                 f" ({kv_tokens} tokens, {_gib(kv_tokens * unit['kv_bytes_per_token'])})"
             ]

@@ -73,6 +73,13 @@ class JointWaveExecutor:
     def active(self) -> bool:
         return self._wave is not None
 
+    @property
+    def wave_reqs(self) -> list:
+        """Requests inside the open wave: their pages are read until it closes."""
+        if self._wave is None:
+            return []
+        return [req for f in self._wave.frontiers for req in f.forward_input.batch.reqs]
+
     def schedule_first_batch(self, token_budget: int) -> Batch | None:
         decode_batch = self._decode_manager.schedule_next_batch()
         decode_reqs, _ = self._decode_selector.select(decode_batch, token_budget)

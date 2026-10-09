@@ -99,6 +99,11 @@ class LayeredPipelineExecutor:
     def active(self) -> bool:
         return self._wave is not None
 
+    @property
+    def wave_reqs(self) -> list:
+        """Requests inside the open wave: their pages are read until it closes."""
+        return list(self._wave.prefill_input.batch.reqs) if self._wave is not None else []
+
     def schedule_first_batch(self, token_budget: int) -> Batch | None:
         """Freeze one FIFO wave before its first group reaches the model."""
         decode_batch = self._decode_manager.schedule_next_batch()
@@ -281,6 +286,8 @@ class LayeredPipelineExecutor:
         if group_input is None or prefill_input is None:
             raise RuntimeError("layered pipeline iteration was not prepared")
 
+        # The measured peak covers what an in-wave SD round keeps from its start.
+        memory_before = self._memory.start()
         round_input, round_ = None, None
         if self._round is not None:
             round_input, lengths = self._round
@@ -288,7 +295,6 @@ class LayeredPipelineExecutor:
         has_decode = self._decode_input is not None or round_ is not None
         rows = sum(req.extend_len for req in prefill_input.batch.prefill_reqs)
         first_stage = wave.current_stage == 0
-        memory_before = self._memory.start()
         stage = wave.cache_session.begin(
             wave.current_stage,
             has_decode=has_decode,
