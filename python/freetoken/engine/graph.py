@@ -128,12 +128,15 @@ class GraphRunner:
         moe_offload_cache: OffloadMoeCache | None = None,
         layered_execution_adapter: LayeredExecutionAdapter | None = None,
         speculative_config=None,
+        graph_bs_limit: int | None = None,
     ) -> None:
-        cuda_graph_bs, self.graph_bs_limit = _determine_cuda_graph_bs(
+        cuda_graph_bs, limit = _determine_cuda_graph_bs(
             cuda_graph_bs=cuda_graph_bs,
             cuda_graph_max_bs=cuda_graph_max_bs,
             free_memory=free_memory,
         )
+        # A rebuild passes the startup limit; the sparse set alone cannot recover it.
+        self.graph_bs_limit = graph_bs_limit if graph_bs_limit is not None else limit
         self.attn_backend = attn_backend
         self.max_graph_bs = max(cuda_graph_bs) if cuda_graph_bs else 0
         self.graph_bs_list = sorted(cuda_graph_bs)

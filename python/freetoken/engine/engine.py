@@ -984,6 +984,7 @@ class Engine:
         # batch sizes after the first rebuild. Reusing the already-resolved list keeps the
         # captured coverage identical (the fit-check above guarantees the graph headroom fits).
         prior_graph_bs = self.graph_runner.graph_bs_list
+        prior_graph_limit = self.graph_runner.graph_bs_limit
         # Point of no return for the scheduler's rollback logic: from here the live graphs and
         # pools start being freed. A failure BEFORE this flag flips leaves the engine serving
         # untouched (no rollback needed); after it, only a rebuild restores service.
@@ -1043,6 +1044,7 @@ class Engine:
             moe_offload_cache=self.moe_offload_cache,
             layered_execution_adapter=self._layered_execution_adapter,
             speculative_config=config if config.speculative_graphs else None,
+            graph_bs_limit=prior_graph_limit,
         )
         self.graph_runner.replay_counts = prior_replays
         self.graph_runner.eager_counts = prior_eager
