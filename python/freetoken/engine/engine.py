@@ -1744,7 +1744,7 @@ _DENSE_MOE_SETTINGS = {
 
 
 _SD_GRAPH_UNSUPPORTED = (
-    "SD CUDA Graph requires BF16 activations and BF16 or NVFP4 experts "
+    "SD CUDA Graph requires BF16 activations and BF16, NVFP4 or NoWAG experts "
     "with --moe-backend offload or hybrid, "
     "FlashInfer attention, page size 1 and at most 8 draft steps; "
     "pass --cuda-graph-max-bs 0 to run speculation eagerly"

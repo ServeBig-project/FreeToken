@@ -76,6 +76,13 @@ _BANK_SCHEMAS: dict[str, tuple[str, ...]] = {
 # Banks a format carries only when the model has them (expert biases).
 _OPTIONAL_BANKS: dict[str, tuple[str, ...]] = {"nowag": ("gate_bias", "up_bias", "down_bias")}
 
+# Speculative-decoding capabilities by ModelConfig.expert_quant: experts whose compute
+# is captured in the draft/verify CUDA graphs, and experts whose rows the measured
+# missing-expert loads and verify prefetch move (they copy whole bank rows of any
+# layout and cost them by measured copy time).
+SPECULATIVE_GRAPH_FORMATS = ("none", "nvfp4", "nowag")
+SPECULATIVE_LOAD_FORMATS = ("none", "nowag")
+
 # Dynamic per-token, per-128-lane E4M3 quantize/dequantize with UE8M0 scales
 # (DeepSeek-V4 expert inputs).
 E4M3_GROUP128_UE8M0 = "dynamic_e4m3_per_token_group128_ue8m0"

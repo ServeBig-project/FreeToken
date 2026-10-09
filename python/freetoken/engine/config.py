@@ -165,15 +165,20 @@ class EngineConfig:
             if self.speculative_draft_load_missing and self.speculative_draft_residency != "router":
                 raise ValueError("--speculative-draft-load-missing requires --speculative-draft-residency router")
             model = self.model_config
-            # Measured costs need no particular expert format; the expert-loading controls
-            # read BF16 expert rows.
-            formats = ("none",) if (self.speculative_draft_load_missing
-                                   or self.speculative_verify_prefetch) else ("none", "nvfp4")
+            from freetoken.moe.expert_format import (
+                SPECULATIVE_GRAPH_FORMATS,
+                SPECULATIVE_LOAD_FORMATS,
+            )
+
+            formats = (SPECULATIVE_LOAD_FORMATS if (self.speculative_draft_load_missing
+                                                    or self.speculative_verify_prefetch)
+                       else SPECULATIVE_GRAPH_FORMATS)
             if (self.moe_backend not in ("auto", "offload") or self.dtype != torch.bfloat16
-                    or model.expert_quant not in formats or self.nowag_expert_path
+                    or model.expert_quant not in formats
                     or model.moe_weight_format not in (None, "bf16")):
-                raise ValueError("SD controls require --moe-backend offload with BF16 activations; "
-                                 "missing-expert loads and prefetch also require BF16 experts")
+                raise ValueError(
+                    "SD controls require --moe-backend offload with BF16 activations and "
+                    f"{'/'.join(formats)} experts; got {model.expert_quant!r}")
         if not self.speculative_num_steps:
             return
         if self.tp_info.size != 1:
@@ -232,6 +237,7 @@ class EngineConfig:
     @property
     def speculative_graphs(self) -> bool:
         from freetoken.attention import attention_backend_info
+        from freetoken.moe.expert_format import SPECULATIVE_GRAPH_FORMATS
 
         backend = self.attention_backend
         graph_attention = (backend != "auto" and "," not in backend
@@ -239,7 +245,7 @@ class EngineConfig:
         return bool(
             0 < self.speculative_num_steps <= 8
             and self.dtype == torch.bfloat16
-            and self.model_config.expert_quant in ("none", "nvfp4") and not self.nowag_expert_path
+            and self.model_config.expert_quant in SPECULATIVE_GRAPH_FORMATS
             and self.model_config.moe_weight_format in (None, "bf16")
             and graph_attention and self.moe_backend in ("offload", "hybrid")
             and self.page_size == 1 and self.tp_info.size == 1
