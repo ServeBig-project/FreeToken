@@ -58,7 +58,7 @@ def pause_round(svc, salt, out=1200, items=40, preamble="", probe_busy=True):
     if not preamble:
         assert all(cached_tokens(s.usage) == 0 for s in streams), [s.usage for s in streams]
     if busy is not None:
-        assert (busy[0], busy[1].get("status")) == (409, "busy"), busy
+        assert busy[1].get("status") == "busy", busy  # HTTP 503 or 409 by the published configuration
     svc.c.wait_idle()
     return dict(delta=delta, busy=busy, streams=streams, watch=w)
 
@@ -184,24 +184,28 @@ def short_long_short(svc, salt):
     c = _short_phase(svc, k, salt + 50000)
     budget = rt0["budget_bytes"]
     names = set(a.max_component) | set(b.max_component) | set(c.max_component)
+    assert names, "runtime.components is empty"
 
-    def held(w, name):
-        return w.max_component.get(name, {}).get("held_bytes", 0)
+    def peak(w, name):
+        return max((smp.get(name, 0) for smp in w.series), default=0)
 
-    grow = {name: held(b, name) - held(a, name) for name in names}
-    x, y = max(grow, key=grow.get), min(grow, key=grow.get)
-    # identified by behaviour; the published names (kv grows, gdn_state/gdn_conv shrink) are reported
-    record(f"{svc.name}:short_long_short", k=k, n=n, plen=plen, budget=budget, grow=grow, grew=x, shrank=y,
+    # identified by behaviour (published names: kv grows, gdn_state gives way); compared at one instant
+    x = max(names, key=lambda n: peak(b, n) - peak(a, n))
+    y = max(names - {x}, key=lambda n: peak(a, n))
+    at = max(b.series, key=lambda smp: smp.get(x, 0))  # the long-phase sample where x holds most
+    record(f"{svc.name}:short_long_short", k=k, n=n, plen=plen, budget=budget, grew=x, gave_way=y,
+           short_peak={n_: peak(a, n_) for n_ in names}, at_long_peak=at,
+           short_again_peak={n_: peak(c, n_) for n_ in names},
            phases={p: w.report() for p, w in (("short", a), ("long", b), ("short_again", c))},
            geometry_after=svc.c.geometry())
     for w in (a, b, c):
         assert not w.violations, w.report()
     assert svc.c.geometry()["moe_cache_size"] == g0["moe_cache_size"] == 2048
     assert svc.c.status().get("last_rebuild") == rebuild0
-    assert names, "runtime.components is empty"
-    assert grow[x] > 0 > grow[y], f"no complementary change between the short and long phases: {grow}"
-    assert held(b, x) + held(a, y) > budget, (
-        f"{x} at its long-phase peak {held(b, x)} plus {y} at its short-phase peak {held(a, y)} fit "
+    assert at.get(x, 0) + peak(a, y) > budget, (
+        f"{x} at its long-phase peak {at.get(x, 0)} plus {y} at its short-phase peak {peak(a, y)} fit "
         f"the {budget} budget together, so this load never needed capacity to move")
-    assert held(c, y) > held(b, y), f"{y} did not regain capacity after the long phase: {grow}"
+    assert at.get(y, 0) < peak(a, y), f"{y} kept {at.get(y, 0)} while {x} peaked: {at}"
+    assert peak(c, y) > at.get(y, 0), f"{y} did not regain capacity after the long phase"
+    grow = {n_: at.get(n_, 0) - peak(a, n_) for n_ in names}
     return grow

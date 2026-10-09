@@ -110,7 +110,7 @@ def test_maintenance_runtime_budget_and_old_fields(svc):
     time.sleep(3)
     busy = c.rebuild({"runtime_cache_gib": 4}, timeout=1)
     wait_streams(ex, futures, 900)
-    assert (busy[0], busy[1].get("status")) == (409, "busy"), busy
+    assert busy[1].get("status") == "busy", busy  # HTTP 503 or 409 by the published configuration
     assert s.done and s.finish == "length" and s.usage["completion_tokens"] == 400, s.summary()
     c.wait_idle()
     log = {"busy": busy}

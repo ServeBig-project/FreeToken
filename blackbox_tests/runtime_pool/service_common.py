@@ -372,6 +372,7 @@ class Watch:
         self.client, self.interval = client, interval
         self.samples, self.violations, self.max_total = 0, [], 0
         self.max_component = {}
+        self.series = []  # per sample: {component: held_bytes}, for comparisons at one instant
         self.last = self.failure = None
         self._stop = threading.Event()
 
@@ -404,8 +405,9 @@ class Watch:
         self.samples += 1
         self.last = rt
         self.max_total = max(self.max_total, rt["held_bytes"])
-        if rt["held_bytes"] > rt["budget_bytes"]:
-            self.violations.append({"held": rt["held_bytes"], "budget": rt["budget_bytes"]})
+        if rt["held_bytes"] > rt["budget_bytes"] or not 0 <= rt["evictable_bytes"] <= rt["held_bytes"]:
+            self.violations.append({k: rt[k] for k in ("held_bytes", "budget_bytes", "evictable_bytes")})
+        self.series.append({name: c.get("held_bytes") or 0 for name, c in components(rt).items()})
         for name, c in components(rt).items():
             m = self.max_component.setdefault(name, {"held_bytes": 0, "used_bytes": 0})
             for k in m:
