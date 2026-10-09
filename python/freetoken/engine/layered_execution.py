@@ -730,6 +730,25 @@ class LayeredExecutionAdapter:
             decode_input.sample_args,
         )
 
+    def begin_verify(self, batch: Batch, start_stage: int) -> object | None:
+        """Verification rows beside a wave run the decode layer path as their own batch."""
+        return self._engine.begin_layer_group_decode(batch, start_stage) if start_stage else None
+
+    def advance_verify(self, batch: Batch, state: object | None, end_stage: int) -> object:
+        return self._engine.advance_layer_group_decode(batch, state, end_stage)
+
+    def finish_verify(self, batch: Batch, state: object, resident_stage_end: int):
+        """Complete target logits for every verification row."""
+        if resident_stage_end < self.num_stages:
+            state = self._engine.advance_layer_group_decode(batch, state, self.num_stages)
+        return self._engine.finish_layer_group_logits(batch, state)
+
+    @property
+    def retained_feature_bytes_per_token(self) -> int:
+        """Draft features a wave keeps per prefill token until its last layer."""
+        dflash = self._engine.dflash
+        return dflash.feature_bytes_per_token if dflash is not None else 0
+
     def finish_prefill(
         self,
         prefill_input: ForwardInput,

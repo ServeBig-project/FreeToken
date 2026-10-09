@@ -19,7 +19,7 @@ from freetoken.moe.expert_banks import load_expert_banks
 from freetoken.moe.offload_cache import OffloadMoeCache, attach_offload_moe_cache
 from freetoken.utils import align_ceil, init_logger, is_sm90_family, is_sm100_family, mem_GB, torch_dtype
 
-from .config import EngineConfig
+from .config import _LEGACY_SD_CONTROLS, EngineConfig
 from .graph import GraphRunner, get_free_memory
 from .sample import BatchSamplingArgs, Sampler
 from .model_forward import forward_model
@@ -650,11 +650,7 @@ class Engine:
                     f"num_pages={pages} (prefill_overlap={overlap})"
                 )
             batching_policy = getattr(config, "batching_policy", "legacy")
-            if (
-                batching_policy == "layered-pipeline"
-                and config.moe_cache_size < 2 * config.model_config.num_experts
-            ):
-                reason = f"{batching_policy} requires at least two expert layers of shared cache"
+            if batching_policy == "layered-pipeline" and (reason := _layered_cache_shortfall(config)):
                 if (self.execution_requested["batching_policy"] != "auto"
                         or (config.speculative_num_steps and config.speculative_phase != "outwave")):
                     raise ValueError(reason)
@@ -1593,6 +1589,12 @@ def _sd_state_shortfall(config: EngineConfig, draft_bytes: int = 0) -> str | Non
     return None
 
 
+def _layered_cache_shortfall(config: EngineConfig) -> str | None:
+    if config.moe_cache_size < 2 * config.model_config.num_experts:
+        return "layered-pipeline requires at least two expert layers of shared cache"
+    return None
+
+
 def _layered_pipeline_unsupported(config: EngineConfig, is_moe: bool) -> str | None:
     """Why layered-pipeline batching cannot serve this resolved configuration, if so."""
     from .layered_execution import LayeredExecutionAdapter
@@ -1602,12 +1604,10 @@ def _layered_pipeline_unsupported(config: EngineConfig, is_moe: bool) -> str | N
         return "layered-pipeline batching requires an offloaded MoE model (--moe-backend offload or hybrid)"
     if not config.moe_prefill_overlap:
         return "layered-pipeline batching requires MoE prefill overlap"
-    if config.speculative_num_steps != 0 and (
-            config.speculative_draft_residency != "off" or config.speculative_adaptive_cost
-            or config.speculative_draft_load_missing or config.speculative_verify_prefetch):
-        return "the requested SD residency, cost, missing-expert loading or prefetch control runs only with legacy batching"
-    if not config.moe_cache_auto and config.moe_cache_size < 2 * config.model_config.num_experts:
-        return "layered-pipeline requires at least two expert layers of shared cache"
+    if config.speculative_num_steps != 0 and config.legacy_sd_controls:
+        return _LEGACY_SD_CONTROLS
+    if not config.moe_cache_auto and (reason := _layered_cache_shortfall(config)):
+        return reason
     spec = get_model_spec(config.hf_config.architectures[0])
     model_cls = _load_attr(spec.module, spec.model_cls)
     if not hasattr(model_cls, "create_layered_execution_adapter") and not all(
@@ -1909,12 +1909,15 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
         )
 
     batching_policy = getattr(config, "batching_policy", "legacy")
-    if batching_policy == "auto":
+    if batching_policy in ("auto", "layered-pipeline"):
         reason = _layered_pipeline_unsupported(config, is_moe)
-        batching_policy = "legacy" if reason else "layered-pipeline"
-        override("batching_policy", batching_policy)
-        if reason:
-            fallbacks.append(dict(feature="batching", reason="layered_unsupported", detail=reason))
+        if reason and batching_policy == "layered-pipeline":
+            raise ValueError(reason)
+        if batching_policy == "auto":
+            batching_policy = "legacy" if reason else "layered-pipeline"
+            override("batching_policy", batching_policy)
+            if reason:
+                fallbacks.append(dict(feature="batching", reason="layered_unsupported", detail=reason))
     if batching_policy in (
         "layered",
         "joint",
@@ -1998,8 +2001,7 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
         # A draft model, an SD phase or an SD control asks for SD; without one the default is AR
         # because self-drafting measured slower than AR.
         asked = (config.speculative_draft_model_path or config.speculative_phase != "outwave"
-                 or config.speculative_draft_residency != "off" or config.speculative_adaptive_cost
-                 or config.speculative_draft_load_missing or config.speculative_verify_prefetch)
+                 or config.legacy_sd_controls)
         override("speculative_num_steps", 4 if asked else 0)
     if config.speculative_num_steps:
         config.__post_init__()  # re-check the SD constraints against the resolved components
@@ -2010,8 +2012,6 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
         # Never fall back silently: eager SD is far slower and would mislead comparisons.
         if not config.speculative_graphs:
             raise ValueError(_SD_GRAPH_UNSUPPORTED)
-        limit = min(config.cuda_graph_max_bs, config.max_running_req, 32)
-        override("cuda_graph_bs", list(range(1, limit + 1)))
     elif config.speculative_num_steps:
         override("cuda_graph_bs", [])
         override("cuda_graph_max_bs", 0)

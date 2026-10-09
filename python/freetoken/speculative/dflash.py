@@ -83,7 +83,7 @@ class DFlashRuntime:
         self.locations.fill_(self.engine.num_pages)
         self.inputs.fill_(self.model.mask_token_id)
         for batch in reversed(self.context.batch_sizes):
-            if batch not in runner.graph_bs_list or batch > self.logits.shape[0]:
+            if batch not in runner.speculative.batch_sizes or batch > self.logits.shape[0]:
                 continue
             sizes = sorted({min(batch * (n + 1), self.logits.shape[0]) for n in self.widths})
             self.sizes[batch] = sizes

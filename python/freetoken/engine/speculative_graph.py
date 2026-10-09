@@ -20,6 +20,8 @@ class SpeculativeGraphs:
         self.range_inputs = None
         self._prepared_range_batch = None
         self.verify_sizes: dict[int, list[int]] = {}  # captured verify token counts per batch size
+        # Every running batch size gets SD graphs; AR keeps its own sparser set.
+        self.batch_sizes = list(range(1, min(runner.max_graph_bs, config.max_running_req, 32) + 1))
         self.attention = runner.attn_backend.create_speculative_graphs(max_seq_len)
         ctx = get_global_ctx()
         kv = ctx.kv_cache
@@ -32,7 +34,8 @@ class SpeculativeGraphs:
         usable_tokens = stores[0][0].flatten(0, 1).shape[0] - 1
         if ctx.draft_context is not None:
             stores.extend(ctx.draft_context.capture_stores())
-        max_tokens = min(runner.max_graph_bs * (config.speculative_num_steps + 1), usable_tokens)
+        max_bs = self.batch_sizes[-1]
+        max_tokens = min(max_bs * (config.speculative_num_steps + 1), usable_tokens)
         self.max_tokens = max_tokens
         self.query_width = config.speculative_num_steps + 1
         # Admission is LRU up to this many query tokens and layer-distance above it, so
@@ -43,7 +46,7 @@ class SpeculativeGraphs:
         self.dummy_slot = ctx.page_table[runner.dummy_req.table_idx, 0]
         self.buffer = GraphCaptureBuffer.init(max_tokens, vocab_size, runner.device)
         state_pool = ctx.linear_state_pool
-        self.state = (state_pool.create_speculative_graphs(runner.max_graph_bs, self.query_width, runner.device)
+        self.state = (state_pool.create_speculative_graphs(max_bs, self.query_width, runner.device)
                       if state_pool is not None else None)
         self.available = (
             torch.ones(config.model_config.num_moe_layers, config.model_config.num_experts,
@@ -53,7 +56,7 @@ class SpeculativeGraphs:
         scratch = [storage.flatten(0, 1)[:max_tokens] for pair in stores for storage in pair]
         saved = [tensor.clone() for tensor in scratch]
         try:
-            for bs in reversed(runner.graph_bs_list):
+            for bs in reversed(self.batch_sizes):
                 if bs > max_tokens:
                     continue
                 if config.speculative_draft_model_path is None:
@@ -79,7 +82,7 @@ class SpeculativeGraphs:
                         remaining -= extra
                     self._capture(model, "verify", lengths)
             if config.speculative_phase != "outwave" and runner.layer_range_group_end_candidates:
-                self._capture_ranges(model, runner.graph_bs_list)
+                self._capture_ranges(model, self.batch_sizes)
         finally:
             for tensor, original in zip(scratch, saved, strict=True):
                 tensor.copy_(original)
@@ -136,8 +139,6 @@ class SpeculativeGraphs:
     def prepare_ranges(self, batch) -> None:
         if batch is self._prepared_range_batch:
             return
-        # An eager stage of this batch may have planned its verify path already.
-        batch.attn_metadata.prefill.initialized = False
         self._stage(batch, batch.positions.numel())
         self._prepared_range_batch = batch
 

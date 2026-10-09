@@ -785,10 +785,7 @@ class Scheduler(SchedulerIOMixin):
         # open waves; otherwise only the next prefill admission would.
         self.cache_manager.poll()
         self.stream.wait_stream(self.engine.stream)
-        # Without an open wave this iteration may run outwave SD or open a wave and
-        # draft beside it; with one, only an in-wave phase drafts.
-        if last_outputs and self.speculative is not None and (
-                not executor.active or self.speculative.phase != "outwave"):
+        if last_outputs and self.speculative is not None and self.speculative.may_run(executor.active):
             # SD reads the committed lengths and termination of every request, and
             # its output commits within this iteration. Drain the deferred AR first.
             self._process_last_outputs(last_outputs)

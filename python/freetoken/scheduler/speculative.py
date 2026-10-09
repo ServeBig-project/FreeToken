@@ -127,27 +127,35 @@ class SpeculativeDecoder:
         batch.input_ids = self.table.token_pool[forward_input.input_tuple]
         return self.engine.compute_logits(batch)
 
+    def allows(self, in_wave: bool) -> bool:
+        return self.phase in ("all", "inwave" if in_wave else "outwave")
+
+    def may_run(self, wave_active: bool) -> bool:
+        """Whether this iteration can speculate; without a wave one may still open."""
+        return self.allows(True) or (not wave_active and self.allows(False))
+
     def forward(self, forward_input: ForwardInput) -> ForwardOutput:
         """One decode step outside a prefill wave: SD when allowed, else AR."""
         batch = forward_input.batch
         round_ = None
-        if self.phase == "inwave":
+        if not self.allows(False):
             self._fallback("phase", batch)
         else:
-            round_ = self.begin(batch, full_width=False)
+            lengths = self.admit(batch, full_width=False)
+            round_ = self.start(batch, lengths) if lengths is not None else None
         if round_ is None:
             return self.engine.forward_batch(batch, forward_input.sample_args)
         return self.finish(round_, self.engine.compute_logits(round_.verify), "outwave")
 
-    def begin_inwave(self, batch: Batch) -> SpeculativeRound | None:
-        """Draft one same-width round beside a prefill wave, or None for AR."""
-        if self.phase == "outwave":
+    def admit_inwave(self, batch: Batch) -> list[int] | None:
+        """Draft lengths of one same-width round beside a prefill wave, or None for AR."""
+        if not self.allows(True):
             self._fallback("phase", batch)
             return None
-        return self.begin(batch, full_width=True)
+        return self.admit(batch, full_width=True)
 
-    def begin(self, batch: Batch, *, full_width: bool) -> SpeculativeRound | None:
-        """Draft and prepare verification; all limits are checked before any write.
+    def admit(self, batch: Batch, *, full_width: bool) -> list[int] | None:
+        """Draft lengths if this round can speculate; every limit is checked before any write.
 
         ``full_width`` admits only rounds where every request drafts the full
         window; otherwise each request keeps its own shorter legal window.
@@ -171,7 +179,10 @@ class SpeculativeDecoder:
             self._fallback(reason, batch)
             self._record_lengths([0] * batch.size)
             return None
+        return lengths
 
+    def start(self, batch: Batch, lengths: list[int]) -> SpeculativeRound:
+        """Draft the admitted lengths and prepare the verification batch."""
         starts = [req.device_len for req in batch.reqs]
         ends = [start + length for start, length in zip(starts, lengths, strict=True)]
         views = [copy(req) for req in batch.reqs]

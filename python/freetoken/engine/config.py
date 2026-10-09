@@ -13,6 +13,8 @@ if TYPE_CHECKING:
     from freetoken.models import ModelConfig
 
 
+_LEGACY_SD_CONTROLS = "SD residency, cost, missing-expert loading and prefetch require legacy batching"
+
 @dataclass(frozen=True)
 class EngineConfig:
     model_path: str
@@ -161,10 +163,8 @@ class EngineConfig:
             raise ValueError("speculative decoding requires --batching-policy legacy or layered-pipeline")
         if policy == "legacy" and self.speculative_phase != "outwave":
             raise ValueError(f"--speculative-phase {self.speculative_phase} requires layered-pipeline batching")
-        if policy == "layered-pipeline" and (
-                self.speculative_draft_residency != "off" or self.speculative_adaptive_cost
-                or self.speculative_draft_load_missing or self.speculative_verify_prefetch):
-            raise ValueError("SD residency, cost, missing-expert loading and prefetch require legacy batching")
+        if policy == "layered-pipeline" and self.legacy_sd_controls:
+            raise ValueError(_LEGACY_SD_CONTROLS)
         from freetoken.attention.base import AttnType
         from freetoken.moe.routing import ROUTERS
 
@@ -196,6 +196,12 @@ class EngineConfig:
         spec = get_model_spec(self.hf_config.architectures[0])
         parse_config = _load_attr(spec.module, spec.parse_config)
         return parse_config(self.hf_config)
+
+    @property
+    def legacy_sd_controls(self) -> bool:
+        """Whether an SD control that only legacy batching runs is requested."""
+        return bool(self.speculative_draft_residency != "off" or self.speculative_adaptive_cost
+                    or self.speculative_draft_load_missing or self.speculative_verify_prefetch)
 
     @property
     def speculative_graphs(self) -> bool:
