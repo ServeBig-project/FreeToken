@@ -36,7 +36,7 @@
 
 - 生成：`POST /v1/completions`、`POST /v1/chat/completions`（OpenAI 兼容：`stream`、`max_tokens`、`temperature`、`stop`、`ignore_eos`、`cache_group`）；`GET /v1/models`。
 - 状态：`GET /v1/cache/status`、`GET /v1/stats`。
-- 维护：`POST /v1/cache/rebuild`，JSON 体。共享模式接受 `runtime_cache_gib`（可同时给 `moe_cache_size`）；`num_pages`、`num_mamba_slots`、`num_swa_pages`、`swa_full_tokens_ratio` 在共享模式被拒绝。只支持 `mode="if_idle"`：调度器不空闲时立即拒绝，不等待；请求体的 `timeout`（默认 300 秒）只是等待调度器答复的上限。响应 `status` 为 `ok`（HTTP 200）、`rejected`（HTTP 503，`error` 为文本）或 `busy`：另一次重建或停机进行中为 HTTP 409，有请求在运行、暂停、保存或恢复中为 HTTP 503（沿用既有维护接口）。以 `status` 字段判断，不以状态码区分 busy 与 rejected。
+- 维护：`POST /v1/cache/rebuild`，JSON 体。共享模式接受 `runtime_cache_gib`（可同时给 `moe_cache_size`）；`num_pages`、`num_mamba_slots`、`num_swa_pages`、`swa_full_tokens_ratio` 在共享模式被拒绝。生效并发（启动时显式给出或自动推导的 `max_running_requests`）在服务生命周期内保持不变：新的 `runtime_cache_gib` 必须能让该并发数的请求各自以最小占用同时放下，否则以 `rejected`（文本含 `requests at their minimum; N are required`）拒绝且旧缓存继续服务；要允许更小的 runtime，需以更小的 `--max-running-requests` 启动。只支持 `mode="if_idle"`：调度器不空闲时立即拒绝，不等待；请求体的 `timeout`（默认 300 秒）只是等待调度器答复的上限。响应 `status` 为 `ok`（HTTP 200）、`rejected`（HTTP 503，`error` 为文本）或 `busy`：另一次重建或停机进行中为 HTTP 409，有请求在运行、暂停、保存或恢复中为 HTTP 503（沿用既有维护接口）。以 `status` 字段判断，不以状态码区分 busy 与 rejected。
 - 生成错误：非流式返回 OpenAI 风格错误体 `{"error": {"message", "type": "invalid_request_error", "code"}}`（HTTP 4xx）；流式先发一个带 `error` 的 SSE 块再发 `[DONE]`。超过公布的 `context_tokens`（prompt＋生成）的请求在准入前即以 `code` 为 `context_length_exceeded`、文本 `prompt is too long: N tokens > M maximum ...` 拒绝（沿用既有长度错误）；已准入但运行中放不下共享 runtime 的请求以同一 `code`、文本含 `does not fit the shared runtime` 或 `no longer fits the shared runtime even alone` 结束；共享模式的多模态请求以文本 `multimodal requests are not supported with --runtime-cache-gib` 拒绝。
 
 ## 共享模式的公开状态字段
