@@ -9,7 +9,7 @@ import os
 
 import pytest
 
-from service_common import COMMON, GIB, MODEL_CONTEXT, components, record, service
+from service_common import COMMON, GIB, MODEL_CONTEXT, assert_length, components, enum_prompt, record, service
 from service_scenarios import cancel_round, early_stop_round, over_context, pause_round, short_long_short
 
 NAME = "c_pressure"
@@ -60,3 +60,16 @@ def test_admission_does_not_reserve_max_tokens(svc):
 
 def test_request_beyond_context_tokens_gets_public_error(svc):
     over_context(svc, salt=40000)
+
+
+def test_runtime_budget_rebuild_with_explicit_concurrency(svc):
+    """Section 5: with an explicit concurrency the runtime budget is resized in place, the
+    concurrency and the expert capacity stay, and the service keeps generating."""
+    mrr = svc.rt()["max_running_requests"]
+    for gib in (1, 0.5):
+        code, j = svc.c.rebuild({"runtime_cache_gib": gib})
+        assert (code, j.get("status")) == (200, "ok"), (gib, code, j)
+        g, rt = svc.c.geometry(), svc.rt()
+        assert g["runtime_cache_bytes"] == int(gib * GIB) == rt["budget_bytes"], (g, rt)
+        assert g["moe_cache_size"] == 2048 and rt["max_running_requests"] == mrr, (g, rt)
+        assert_length(svc.c.complete(enum_prompt(60000, 12), 48), 48)

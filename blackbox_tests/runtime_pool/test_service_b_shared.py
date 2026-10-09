@@ -101,8 +101,8 @@ def _keys(g):
 
 def test_maintenance_runtime_budget_and_old_fields(svc):
     """Section 5: busy while a request runs; the old split-pool fields are rejected and the
-    service keeps serving; illegal budgets are rejected; a legal runtime budget change keeps the
-    expert capacity unless given; Graph coverage survives the rebuild."""
+    service keeps serving; illegal budgets and a budget too small for the derived concurrency are
+    rejected; a legal rebuild keeps the expert capacity unless given; Graph survives the rebuild."""
     c = svc.c
     g0 = _keys(c.geometry())
     s = c.stream(enum_prompt(50000, 12), 400, ignore_eos=True)
@@ -127,12 +127,12 @@ def test_maintenance_runtime_budget_and_old_fields(svc):
         assert (code, j.get("status")) == (503, "rejected") and j.get("error"), (value, code, j)
         assert _keys(c.geometry()) == g0
         assert_length(c.complete(enum_prompt(52000, 8), 8), 8)
+    # the derived concurrency stays for the service lifetime; a budget too small for it is refused
+    mrr = c.rt()["max_running_requests"]
     code, j = c.rebuild({"runtime_cache_gib": 3})
     log["runtime_cache_gib=3"] = (code, j)
-    assert (code, j.get("status")) == (200, "ok"), (code, j)
-    g, rt = c.geometry(), c.rt()
-    assert g["runtime_cache_bytes"] == 3 * GIB == rt["budget_bytes"], (g, rt)
-    assert g["moe_cache_size"] == 2048, g
+    assert j.get("status") == "rejected" and "requests at their minimum" in (j.get("error") or ""), (code, j)
+    assert _keys(c.geometry()) == g0 and c.rt()["max_running_requests"] == mrr
     assert_length(c.complete(enum_prompt(53000, 12), 48), 48)
     code, j = c.rebuild({"runtime_cache_gib": 4, "moe_cache_size": 1536})
     log["runtime_cache_gib=4,moe=1536"] = (code, j)
