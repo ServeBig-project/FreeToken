@@ -511,6 +511,9 @@ class CacheRebuildRequest(BaseModel):
     # (or requested) anchor. Internally only num_swa_pages flows to the engine.
     num_swa_pages: int | None = None
     swa_full_tokens_ratio: float | None = None
+    # A server started with --runtime-cache-gib: its new total in GiB (the fixed pool sizes
+    # above are rejected there).
+    runtime_cache_gib: float | None = None
     # Only "if_idle" (reject unless the scheduler is idle) is supported today. "drain" mode
     # is deferred (needs the drain-gate machinery); constraining the Literal makes an
     # unsupported value fail fast with a 422 at the API layer instead of a generic 503.
@@ -525,6 +528,7 @@ async def dispatch_rebuild(
     num_pages: int | None,
     num_mamba_slots: int | None = None,
     num_swa_pages: int | None = None,
+    runtime_cache_gib: float | None = None,
     mode: str = "if_idle",
     timeout: float = 300.0,
 ) -> Dict[str, Any]:
@@ -545,6 +549,7 @@ async def dispatch_rebuild(
                 num_pages=num_pages,
                 num_mamba_slots=num_mamba_slots,
                 num_swa_pages=num_swa_pages,
+                runtime_cache_gib=runtime_cache_gib,
                 mode=mode,
             )
         )
@@ -628,6 +633,7 @@ async def cache_rebuild(req: CacheRebuildRequest):
         num_pages=req.num_pages,
         num_mamba_slots=req.num_mamba_slots,
         num_swa_pages=_resolve_num_swa_pages(state, req),
+        runtime_cache_gib=req.runtime_cache_gib,
         mode=req.mode,
         timeout=req.timeout,
     )

@@ -53,4 +53,5 @@ class CacheRebuildBackendMsg(BaseBackendMsg):
     num_pages: int | None = None
     num_mamba_slots: int | None = None
     num_swa_pages: int | None = None
+    runtime_cache_gib: float | None = None  # a shared runtime's new total
     mode: str = "if_idle"  # only "if_idle" is supported; "drain" is deferred (rejected)
