@@ -238,6 +238,10 @@ class DeepseekV4ForCausalLM(BaseLLMModel):
 
         return DSV4LayeredExecutionAdapter(engine)
 
+    @property
+    def layer_group_state_width(self) -> int:
+        return self._args.hc_mult * self._args.dim
+
     def _ensure_bound(self) -> None:
         if self._bound:
             return

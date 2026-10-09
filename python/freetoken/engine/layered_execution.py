@@ -744,6 +744,12 @@ class LayeredExecutionAdapter:
         return self._engine.finish_layer_group_logits(batch, state)
 
     @property
+    def retained_bytes_per_token(self) -> int:
+        """Model state and draft features that survive between layer groups."""
+        return (self._engine.model.layer_group_state_width * self._engine.dtype.itemsize
+                + self.retained_feature_bytes_per_token)
+
+    @property
     def retained_feature_bytes_per_token(self) -> int:
         """Draft features a wave keeps per prefill token until its last layer."""
         dflash = self._engine.dflash

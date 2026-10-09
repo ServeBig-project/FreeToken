@@ -63,7 +63,7 @@ def create_kv_pool(config, num_pages: int, device: torch.device, dtype: torch.dt
     """Build the engine's KV pool for ``num_pages`` USABLE pages (the dummy page and every
     secondary tier -- window pool, index slab, state rings -- are derived here or inside
     the pool). Single factory entry for all pool families, DSV4 included. A shared
-    ``runtime`` backs the paged full-attention pool (the engine admits no other)."""
+    ``runtime`` backs pools that declare shared-runtime storage."""
     from .dsv4_cost_model import _dsv4_pool_sizes
     from .hybrid_swa_pool import _naive_swa_num_tokens, _swa_paged_num_tokens
     from .dsv4_paged_pool import DSV4PagedKVCache
@@ -197,6 +197,7 @@ def create_kvcache_pool(
             num_req_slots=num_req_slots,
             layer_ids=spec.layer_ids,
             kv_dtype=kv_dtype,
+            runtime=runtime,
         )
 
     if len(kv_specs) == 1 and kv_specs[0].mla:

@@ -107,9 +107,10 @@ class LinearStatePool:
         num_slots = conv[0][1]
         self._num_slots = num_slots
         self._free_slots: list[int] = list(range(self.padding_slot + 1, num_slots))
-        self.slot_states = self._alloc_slot_states(num_slots)
+        self.slot_states = {}
         self.units = None
         if runtime is None:
+            self.slot_states = self._alloc_slot_states(num_slots)
             self.conv_states = slot_major(*conv, self._device)
             self.recurrent_states = slot_major(*rec, self._device)
         else:
@@ -117,9 +118,20 @@ class LinearStatePool:
 
             self.conv_states, conv_bank = slot_rows(runtime, "gdn_conv", *conv)
             self.recurrent_states, rec_bank = slot_rows(runtime, "gdn_state", *rec)
-            self.units = Units([rec_bank, conv_bank])
+            banks = [rec_bank, conv_bank]
+            for spec in self._slot_specs:
+                tensor, bank = slot_rows(runtime, spec.name,
+                    (max(1, len(spec.layer_ids)), num_slots, *spec.shape),
+                    spec.dtype if spec.dtype is not None else self._conv_dtype)
+                self.slot_states[spec.name] = tensor
+                banks.append(bank)
+            self.units = Units(banks)
             # The padding sink stays mapped: every layer view starts inside it.
             self.units.pin([self.padding_slot])
+            # Live rows initialize from their component's fresh-input path; only the
+            # permanent padding row must be initialized before graph capture.
+            for spec in self._slot_specs:
+                self.slot_states[spec.name][:, self.padding_slot].fill_(spec.fill_value)
             self._free_slots.reverse()  # low slots first, so released memory is reused first
         if self._replay_shapes is not None and (self.replay is None or runtime is not None):
             from .gdn_replay import GdnReplay
@@ -374,9 +386,13 @@ def state_banks(config) -> list[tuple[int, int]]:
     if group is None:
         return []
     layers, conv_dim, v_heads, _ = _linear_local_dims(group, config.tp_info.size)
-    return [(1, layers * v_heads * group.key_head_dim * group.value_head_dim
+    banks = [(1, layers * v_heads * group.key_head_dim * group.value_head_dim
              * ssm_state_dtype().itemsize),
             (1, layers * conv_dim * (group.conv_kernel_dim - 1) * config.dtype.itemsize)]
+    banks += [(1, max(1, len(spec.layer_ids)) * math.prod(spec.shape)
+               * (spec.dtype if spec.dtype is not None else config.dtype).itemsize)
+              for spec in getattr(config.model_config, "slot_states", ())]
+    return banks
 
 
 def record_banks(config) -> list[tuple[int, int]]:

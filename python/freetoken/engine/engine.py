@@ -614,6 +614,7 @@ class Engine:
             granularity(self.device),
             pages=self._pool_cls.runtime_banks(config) + (draft.page_banks() if draft else []),
             windows=draft.window_banks() if draft else [],
+            scratch=self._pool_cls.runtime_scratch_banks(config),
             states=state_banks(config), rows=record_banks(config))
 
     def _runtime_page_bytes(self, config: EngineConfig) -> int:
@@ -645,9 +646,10 @@ class Engine:
         # the prompt-end checkpoint its prefix-cache handle keeps locked, its record row (rows
         # are handed out from 0), the window sentinel and its window.
         checkpoint = int(getattr(config, "cache_type", "naive") != "naive")  # a prefix cache
+        fixed_requests = prior.get("max_running_requests", 1)
         alone = lambda length: layout.blocks(
             pages=up(length + 1, ps) + 1, windows=1 + min(length + 1, window),
-            states=2 + checkpoint, rows=1) <= total
+            states=2 + checkpoint, rows=1, scratch=fixed_requests + 1) <= total
         asked = prior.get("requested_context_tokens", config.max_seq_len_override)
         model_max = prior.get("model_context_tokens", config.max_seq_len)
         context = largest(alone, model_max if asked is None else asked)
@@ -664,7 +666,8 @@ class Engine:
         executing = lambda c: ((c + 1) * row_bytes
                                + _graph_rows(config, c) * (4 * vocab + 4 * width))
         resource = largest(lambda c: layout.blocks(
-            pages=c + 1, windows=1 + c * window, states=c + 1, rows=c) <= total
+            pages=c + 1, windows=1 + c * window, states=c + 1, rows=c,
+            scratch=c + 1) <= total
             and executing(c) <= execution, _MAX_AUTO_RUNNING)
         requested = prior.get("requested_running_requests", config.max_running_req)
         effective = resource if requested is None else min(requested, resource)
@@ -675,6 +678,12 @@ class Engine:
                 + (" (the concurrency the server started with is kept; start it with a lower "
                    "--max-running-requests to allow a smaller runtime)" if prior else ""))
         effective = prior.get("max_running_requests", effective)
+        # Scratch for every table row stays mapped even when only one request runs.
+        fixed_requests = effective
+        context = largest(alone, context)
+        if context < 1 or (asked is not None and context < asked):
+            raise ValueError(f"{mem_GB(budget)} of runtime with {effective} request rows "
+                             f"holds one request of {context} tokens; {asked or 1} are required")
         return dict(context_tokens=context, max_running_requests=effective,
                     requested_running_requests=requested, resource_running_requests=resource,
                     requested_context_tokens=asked, model_context_tokens=model_max,
@@ -1791,8 +1800,7 @@ class Engine:
         if getattr(config, "batching_policy", "legacy") != "layered-pipeline":
             return 0
         adapter = self._layered_execution_adapter
-        return (2 * config.model_config.hidden_size * config.dtype.itemsize
-                + (adapter.retained_feature_bytes_per_token if adapter is not None else 0))
+        return adapter.retained_bytes_per_token
 
     def _synced_used_bytes(self) -> int:
         """Device bytes in use now (PyTorch's free cache counted as usable), the most of any
@@ -2082,10 +2090,8 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
             )
 
     if getattr(config, "runtime_cache_gib", None) is not None:
-        from freetoken.kvcache.mha_pool import MHAKVCache
-
         family = resolve_pool_class(model_config)
-        if family is not MHAKVCache:
+        if not family.shared_runtime:
             raise ValueError(f"--runtime-cache-gib: the {family.__name__} attention cache has no "
                              "shared runtime storage")
     elif config.max_running_req is None:

@@ -17,6 +17,7 @@ The slab is amortized into the per-token KV price; the scratch rows are the fixe
 
 from __future__ import annotations
 
+import math
 from typing import ClassVar, Sequence
 
 import torch
@@ -46,6 +47,7 @@ class QSAKVCache(MHAKVCache):
         num_req_slots: int,
         layer_ids: Sequence[int] | None = None,
         kv_dtype: str = "bf16",
+        runtime=None,
     ) -> None:
         if index_ratio < 1 or page_size % index_ratio:
             raise ValueError(
@@ -72,10 +74,14 @@ class QSAKVCache(MHAKVCache):
             dtype=torch.int8 if self._int8 else dtype,
             device=device,
             layer_ids=layer_ids,
+            runtime=runtime,
         )
-        self._alloc_side_buffers(num_pages)
+        self._alloc_side_buffers(num_pages, runtime)
 
-    def _alloc_side_buffers(self, num_pages: int) -> None:
+    def _alloc_side_buffers(self, num_pages: int, runtime=None) -> None:
+        if runtime is not None:
+            self._alloc_runtime_side_buffers(num_pages, runtime)
+            return
         # Index slab zero-initialized: the score kernel reads whole rows of blocks unmasked and
         # relies on never-written tail rows dotting to a finite 0; it clamps the visible blocks
         # to kvlen // index_ratio, so stale rows are never selected.
@@ -93,15 +99,65 @@ class QSAKVCache(MHAKVCache):
             if self._int8 else None
         )
 
-    def rebuild(self, num_pages: int) -> None:
+    def _alloc_runtime_side_buffers(self, num_pages: int, runtime) -> None:
+        from freetoken.utils import align_ceil
+
+        from .runtime_pool import Units, banked
+
+        rows = self._page_size // self._index_ratio
+        row_bytes = self._index_head_dim * self._index_dtype.itemsize
+        # Scratch starts on its own physical block so history reclamation cannot unmap it.
+        alignment = runtime.granularity // math.gcd(runtime.granularity, row_bytes)
+        self._cmp_scratch_base = align_ceil(num_pages * rows, alignment)
+        slab, banks = banked(runtime, "qsa_index", (
+            1, self._num_index_layers, self._cmp_scratch_base + self._num_req_slots,
+            self._index_head_dim), self._index_dtype)
+        self._cmp_k_buffer = slab[0]
+        self.banks += [(region, offset, stride * rows, length * rows)
+                       for region, offset, stride, length in banks]
+        scratch_bytes = self._num_req_slots * row_bytes
+        self._index_scratch = Units([
+            (region, offset + self._cmp_scratch_base * row_bytes, scratch_bytes, scratch_bytes)
+            for region, offset, _, _ in banks])
+        self._index_scratch.pin([0])
+        self._scale_buffer = None
+        if self._int8:
+            self._scale_buffer, scales = banked(
+                runtime, "kv_scale", self._kv_buffer.shape[:-1], _SCALE_DTYPE)
+            self.banks += scales
+
+    def rebuild(self, num_pages: int, runtime=None) -> None:
         self._cmp_k_buffer = self._scale_buffer = None
-        super().rebuild(num_pages)
+        self._index_scratch = None
+        super().rebuild(num_pages, runtime)
         try:
-            self._alloc_side_buffers(num_pages)
+            self._alloc_side_buffers(num_pages, runtime)
         except Exception:
             # a pool with a grown K/V slab and no index slab would mis-serve silently
             self._kv_buffer = self._k_buffer = self._v_buffer = None
             raise
+
+    @classmethod
+    def runtime_banks(cls, config) -> list[tuple[int, int]]:
+        from freetoken.utils import div_even
+
+        banks = []
+        int8 = config.kv_dtype == "int8"
+        for spec in config.model_config.kv_cache_group_specs():
+            heads = div_even(spec.num_kv_heads, config.tp_info.size, allow_replicate=True)
+            cells = config.page_size * heads
+            banks.append((2 * spec.num_layers, cells * spec.head_dim
+                          * (1 if int8 else config.dtype.itemsize)))
+            if int8:
+                banks.append((2 * spec.num_layers, cells * _SCALE_DTYPE.itemsize))
+            banks.append((spec.num_index_layers, config.page_size // spec.index_ratio
+                          * spec.index_head_dim * config.dtype.itemsize))
+        return banks
+
+    @classmethod
+    def runtime_scratch_banks(cls, config) -> list[tuple[int, int]]:
+        return [(spec.num_index_layers, spec.index_head_dim * config.dtype.itemsize)
+                for spec in config.model_config.kv_cache_group_specs()]
 
     @classmethod
     def kv_cost(cls, config) -> tuple[int, int, int, int]:
@@ -132,7 +188,7 @@ class QSAKVCache(MHAKVCache):
         tokens = int(self._kv_buffer.shape[2]) * int(self._kv_buffer.shape[3])
         slab = (
             self._num_index_layers
-            * self._cmp_scratch_base
+            * (tokens // self._index_ratio)
             * self._index_head_dim
             * self._index_dtype.itemsize
         )
@@ -147,9 +203,7 @@ class QSAKVCache(MHAKVCache):
         if self._scale_buffer is not None:
             views += [self._scale_buffer[:, layer].movedim(1, 0)
                       for layer in range(self._scale_buffer.shape[1])]
-        rows = self._page_size // self._index_ratio
-        views += [self._cmp_k_buffer[slot, : self._cmp_scratch_base].view(-1, rows, self._index_head_dim)
-                  for slot in range(self._num_index_layers)]
+        views += [self.cmp_k_pages(slot) for slot in range(self._num_index_layers)]
         return views
 
     def store_kv(self, k: torch.Tensor, v: torch.Tensor, out_loc: torch.Tensor, layer_id: int) -> None:
@@ -173,6 +227,12 @@ class QSAKVCache(MHAKVCache):
     def cmp_k_cache(self, slot: int) -> torch.Tensor:
         """Compressed index keys of one sparse layer (sparse-layer order): ``[rows, dim]``."""
         return self._cmp_k_buffer[slot]
+
+    def cmp_k_pages(self, slot: int) -> torch.Tensor:
+        """History pages only: shared-runtime alignment and permanent scratch are excluded."""
+        rows = self._page_size // self._index_ratio
+        pages = self._kv_buffer.shape[2]
+        return self._cmp_k_buffer[slot, :pages * rows].view(pages, rows, self._index_head_dim)
 
     @property
     def cmp_scratch_base(self) -> int:

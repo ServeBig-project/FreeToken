@@ -43,6 +43,12 @@ class BaseKVCachePool(ABC):
     needs_rebind_on_rebuild: ClassVar[bool] = False
     # K/V encodings this family can store (freetoken.quant.kv); the first is its native one.
     kv_codecs: ClassVar[tuple[str, ...]] = ("bf16",)
+    shared_runtime: ClassVar[bool] = False
+
+    @classmethod
+    def runtime_scratch_banks(cls, config) -> list[tuple[int, int]]:
+        """Permanent per-request scratch banks, separate from reclaimable history pages."""
+        return []
 
     # ---- sizing/cost classmethods: run BEFORE the pool exists (startup budget solve,
     # --moe-cache-auto). The engine measures memory and passes bytes in; each pool family

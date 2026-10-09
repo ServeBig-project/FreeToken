@@ -130,8 +130,7 @@ class QSASparseAttnBackend(BaseAttnBackend):
     def _cmp_pages(self, slot: int) -> torch.Tensor:
         """The compressed slab as ``[pages, page_size // ratio, 1, dim]`` (the score kernel's
         paged layout); the scratch rows past ``cmp_scratch_base`` stay out of the view."""
-        rows = self.kvcache.cmp_k_cache(slot)[: self.kvcache.cmp_scratch_base]
-        return rows.view(-1, self.cmp_page_size, 1, self.index_head_dim)
+        return self.kvcache.cmp_k_pages(slot).unsqueeze(2)
 
     def _pending(self, layer_id: int) -> torch.Tensor:
         """This layer's pending raw index keys: ``[num_state_slots, ratio, dim]``."""

@@ -152,6 +152,10 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
 
     # ----- layer groups -----------------------------------------------------------------
     @property
+    def layer_group_state_width(self) -> int:
+        return self._config.qwen4_args.stream_width
+
+    @property
     def layer_group_num_layers(self) -> int:
         return len(self.model.layers.op_list)
 

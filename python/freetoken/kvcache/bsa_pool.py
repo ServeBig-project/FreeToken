@@ -34,6 +34,8 @@ class BSAKVCache(MHAKVCache):
     page_size]`` -- serves K/V and index keys alike.
     """
 
+    shared_runtime = False
+
     def __init__(
         self,
         num_kv_heads: int,
