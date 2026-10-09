@@ -252,7 +252,15 @@ def parse_args(
         "--speculative-num-steps",
         type=int,
         default=ServerArgs.speculative_num_steps,
-        help="Maximum draft tokens per speculative round; 0 disables speculation (default).",
+        help="Maximum draft tokens per speculative round (1-8); 0 disables speculation and "
+             "ignores a draft model path. Omitted: 4 when a draft model path, a non-default "
+             "--speculative-phase or an SD control is given, else 0 (AR).",
+    )
+    parser.add_argument(
+        "--speculative-phase", choices=["outwave", "all", "inwave"],
+        default=ServerArgs.speculative_phase,
+        help="With layered-pipeline batching, where SD runs: outside prefill waves "
+             "(default; AR inside them), in both, or only inside them.",
     )
     parser.add_argument(
         "--speculative-draft-model-path", type=str,
@@ -401,6 +409,7 @@ def parse_args(
         "--batching-policy",
         type=str,
         choices=[
+            "auto",
             "legacy",
             "mixed",
             "layered",
@@ -409,7 +418,9 @@ def parse_args(
         ],
         default=ServerArgs.batching_policy,
         help=(
-            "Batch scheduling policy: legacy runs prefill before decode; mixed combines "
+            "Batch scheduling policy: auto (default) uses layered-pipeline when the model "
+            "and MoE backend support it, else legacy, and reports why; legacy runs prefill "
+            "before decode; mixed combines "
             "decode with chunked prefill in one forward; layered jointly schedules two "
             "independent forwards and advances prefill by layer group; joint keeps a "
             "whole layer group resident while one mixed decode/prefill state and its "
@@ -811,12 +822,17 @@ def parse_args(
     if kwargs["model_path"].startswith("~"):
         kwargs["model_path"] = os.path.expanduser(kwargs["model_path"])
     draft_path = kwargs.get("speculative_draft_model_path")
-    if draft_path:
+    # Explicitly off: a retained draft path is reported as requested, never downloaded.
+    if draft_path and kwargs["speculative_num_steps"] != 0:
         draft_path = os.path.expanduser(draft_path)
         if not os.path.isdir(draft_path):
             from huggingface_hub import snapshot_download
 
-            draft_path = snapshot_download(draft_path, allow_patterns=["config.json", "*.safetensors"])
+            try:
+                draft_path = snapshot_download(draft_path, allow_patterns=["config.json", "*.safetensors"])
+            except Exception as error:  # noqa: BLE001 -- name the flag, keep the cause
+                parser.error(f"--speculative-draft-model-path {draft_path!r} not found as a local "
+                             f"directory or a downloadable Hugging Face model: {error}")
         kwargs["speculative_draft_model_path"] = draft_path
 
     if kwargs["served_model_name"] is None:

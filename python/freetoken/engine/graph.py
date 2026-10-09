@@ -89,9 +89,10 @@ def _determine_cuda_graph_bs(
     cuda_graph_bs: List[int] | None,
     cuda_graph_max_bs: int | None,
     free_memory: int,
-) -> List[int]:
+) -> tuple[List[int], int]:
+    """Target-decode graph sizes and the configured size limit they are drawn from."""
     if cuda_graph_bs is not None:
-        return cuda_graph_bs
+        return cuda_graph_bs, max(cuda_graph_bs, default=0)
 
     free_memory_gb = free_memory / (1 << 30)
     if cuda_graph_max_bs is None:
@@ -101,10 +102,10 @@ def _determine_cuda_graph_bs(
             cuda_graph_max_bs = 160
 
     if cuda_graph_max_bs < 1:
-        return []
+        return [], 0
 
     candidates = [1, 2, 4] + list(range(8, cuda_graph_max_bs + 1, 8))
-    return [bs for bs in candidates if bs <= cuda_graph_max_bs]
+    return [bs for bs in candidates if bs <= cuda_graph_max_bs], cuda_graph_max_bs
 
 
 def get_free_memory(device: torch.device) -> int:
@@ -127,12 +128,15 @@ class GraphRunner:
         moe_offload_cache: OffloadMoeCache | None = None,
         layered_execution_adapter: LayeredExecutionAdapter | None = None,
         speculative_config=None,
+        graph_bs_limit: int | None = None,
     ) -> None:
-        cuda_graph_bs = _determine_cuda_graph_bs(
+        cuda_graph_bs, limit = _determine_cuda_graph_bs(
             cuda_graph_bs=cuda_graph_bs,
             cuda_graph_max_bs=cuda_graph_max_bs,
             free_memory=free_memory,
         )
+        # A rebuild passes the startup limit; the sparse set alone cannot recover it.
+        self.graph_bs_limit = graph_bs_limit if graph_bs_limit is not None else limit
         self.attn_backend = attn_backend
         self.max_graph_bs = max(cuda_graph_bs) if cuda_graph_bs else 0
         self.graph_bs_list = sorted(cuda_graph_bs)
@@ -150,15 +154,21 @@ class GraphRunner:
         self._layer_range_state_inputs: object | None = None
         self._prepared_layer_range_batch: Batch | None = None
         self.replay_counts: dict[tuple[str, int, int, int], int] = {}
+        # SD forwards that ran eagerly although SD graphs were captured: an uncovered
+        # shape, a draft beside a pinned resident group, or verify rows beside a wave.
+        self.eager_counts = {"draft": 0, "verify": 0, "verify_range": 0}
         self.speculative = None
         cost = get_global_ctx().speculative_cost
         cost_state = cost.before_capture() if cost is not None else None
         started = time.perf_counter()
         before = torch.cuda.memory_reserved(device)
         self._capture_graphs(max_seq_len, vocab_size, model)
+        self.speculative_reserved_bytes = 0
         if self.max_graph_bs and speculative_config is not None:
             from .speculative_graph import SpeculativeGraphs
+            sd_before = torch.cuda.memory_reserved(device)
             self.speculative = SpeculativeGraphs(self, model, speculative_config, max_seq_len, vocab_size)
+            self.speculative_reserved_bytes = max(0, torch.cuda.memory_reserved(device) - sd_before)
         if cost is not None:
             cost.after_capture(cost_state)
         torch.cuda.synchronize(device)
@@ -395,8 +405,9 @@ class GraphRunner:
 
     def stats_snapshot(self) -> dict:
         result = {"enabled": bool(self.max_graph_bs), "target_decode": 0, "draft": 0, "verify": 0,
+                  "verify_range": 0,
                   "capture_seconds": self.capture_seconds, "extra_reserved_bytes": self.extra_reserved_bytes,
-                  "replay_shapes": []}
+                  "replay_shapes": [], "speculative_eager": dict(self.eager_counts)}
         for (phase, batch_size, query_tokens, physical_query_tokens), count in sorted(self.replay_counts.items()):
             result[phase] += count
             result["replay_shapes"].append(dict(phase=phase, batch_size=batch_size,
@@ -405,6 +416,8 @@ class GraphRunner:
         return result
 
     def has_layer_range_graphs_for(self, batch: Batch) -> bool:
+        if batch.is_speculative_verify:
+            return self.speculative is not None and self.speculative.has_ranges(batch)
         return (
             batch.is_decode_only
             and batch.size == batch.padded_size
@@ -434,6 +447,8 @@ class GraphRunner:
         )
 
     def prepare_layer_range_replay(self, batch: Batch) -> None:
+        if batch.is_speculative_verify:
+            return self.speculative.prepare_ranges(batch)
         if not self.has_layer_range_graphs_for(batch):
             raise ValueError("batch is not eligible for a layer-range graph")
         if batch is self._prepared_layer_range_batch:
@@ -449,6 +464,11 @@ class GraphRunner:
         start_layer: int,
         end_layer: int,
     ) -> object:
+        if batch.is_speculative_verify:
+            tokens = batch.positions.numel()
+            shape = ("verify_range", batch.size, tokens, tokens)
+            self.replay_counts[shape] = self.replay_counts.get(shape, 0) + 1
+            return self.speculative.replay_range(batch, state, start_layer, end_layer)
         capture = self.layer_range_graph_map[(start_layer, end_layer, batch.size)]
         adapter = self.layered_execution_adapter
         if adapter is None:

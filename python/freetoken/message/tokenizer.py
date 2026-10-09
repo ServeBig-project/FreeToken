@@ -50,6 +50,7 @@ class DetokenizeMsg(BaseTokenizerMsg):
     gpu_mem_bytes: int = 0
     speculative: dict | None = None
     cuda_graph: dict | None = None
+    resources: dict | None = None
     gdn_replayssm: dict | None = None
     prefix_cache: dict | None = None
 
@@ -108,6 +109,7 @@ class CacheRebuildResultMsg(BaseTokenizerMsg):
     gdn_replayssm: dict | None = None  # GDN state geometry after the rebuild
     dflash: dict | None = None
     prefix_cache: dict | None = None
+    execution: dict | None = None  # Engine.execution_status after the rebuild
 
 
 @dataclass

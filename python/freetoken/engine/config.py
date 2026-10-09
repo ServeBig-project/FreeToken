@@ -13,13 +13,18 @@ if TYPE_CHECKING:
     from freetoken.models import ModelConfig
 
 
+_LEGACY_SD_CONTROLS = "SD residency, cost, missing-expert loading and prefetch require legacy batching"
+
 @dataclass(frozen=True)
 class EngineConfig:
     model_path: str
     tp_info: DistributedInfo
     dtype: torch.dtype
     max_running_req: int = 4
-    speculative_num_steps: int = 0
+    # None: try SD at 4 steps when the components and budgets support it, else AR.
+    speculative_num_steps: int | None = None
+    # Where layered batching may run SD: outside prefill waves, in both, or only inside.
+    speculative_phase: str = "outwave"
     speculative_draft_model_path: str | None = None
     speculative_draft_experts: int = 3
     speculative_draft_residency: str = "off"
@@ -112,7 +117,17 @@ class EngineConfig:
         if self.prefix_cache_host_gib < 0:
             raise ValueError(
                 f"--prefix-cache-host-gib must be >= 0, got {self.prefix_cache_host_gib}")
-        external_draft = self.speculative_draft_model_path is not None
+        if self.speculative_phase not in ("outwave", "all", "inwave"):
+            raise ValueError("--speculative-phase must be outwave, all or inwave")
+        ring = self.gdn_replay_buffer_len
+        if ring < 4 or ring & (ring - 1):
+            raise ValueError("--gdn-replay-buffer-len must be a power of two >= 4")
+        if self.gdn_state_budget_bytes is not None and self.gdn_state_budget_bytes <= 0:
+            raise ValueError("--gdn-state-budget-bytes must be positive")
+        if self.speculative_num_steps is None:
+            return  # the engine resolves it against the model's components, then validates
+        # An explicit 0 turns SD off even beside a draft path, which is then ignored.
+        external_draft = self.speculative_draft_model_path is not None and self.speculative_num_steps != 0
         if self.dflash_attention_window < 0:
             raise ValueError("--dflash-attention-window must be >= 0")
         if self.dflash_attention_window and not external_draft:
@@ -132,20 +147,15 @@ class EngineConfig:
             raise ValueError("speculative_draft_residency must be off or router")
         if self.speculative_draft_residency != "off" and self.speculative_num_steps <= 0:
             raise ValueError("--speculative-draft-residency requires SD enabled")
-        if self.speculative_num_steps < 0:
-            raise ValueError("speculative_num_steps must be >= 0")
+        if not 0 <= self.speculative_num_steps <= 8:
+            raise ValueError("--speculative-num-steps must be 0 (off) or 1..8")
         if self.speculative_draft_experts < 1:
             raise ValueError("speculative_draft_experts must be >= 1")
-        ring = self.gdn_replay_buffer_len
-        if ring < 4 or ring & (ring - 1):
-            raise ValueError("--gdn-replay-buffer-len must be a power of two >= 4")
         if self.enable_gdn_replayssm and ring < self.speculative_num_steps + 1:
             raise ValueError(
                 f"--gdn-replay-buffer-len {ring} cannot hold a verify window of "
                 f"{self.speculative_num_steps + 1} inputs"
             )
-        if self.gdn_state_budget_bytes is not None and self.gdn_state_budget_bytes <= 0:
-            raise ValueError("--gdn-state-budget-bytes must be positive")
         if (self.speculative_adaptive_cost or self.speculative_draft_load_missing
                 or self.speculative_verify_prefetch):
             if not 1 <= self.speculative_num_steps <= 8:
@@ -166,8 +176,13 @@ class EngineConfig:
             return
         if self.tp_info.size != 1:
             raise ValueError("self-speculative decoding requires a single GPU (tp_size=1)")
-        if getattr(self, "batching_policy", "legacy") != "legacy":
-            raise ValueError("self-speculative decoding requires --batching-policy legacy")
+        policy = getattr(self, "batching_policy", "legacy")
+        if policy not in ("auto", "legacy", "layered-pipeline"):
+            raise ValueError("speculative decoding requires --batching-policy legacy or layered-pipeline")
+        if policy == "legacy" and self.speculative_phase != "outwave":
+            raise ValueError(f"--speculative-phase {self.speculative_phase} requires layered-pipeline batching")
+        if policy == "layered-pipeline" and self.legacy_sd_controls:
+            raise ValueError(_LEGACY_SD_CONTROLS)
         from freetoken.attention.base import AttnType
         from freetoken.moe.routing import ROUTERS
 
@@ -184,10 +199,10 @@ class EngineConfig:
                 "speculative_draft_experts must not exceed the target's experts per token "
                 f"({self.model_config.num_experts_per_tok})"
             )
-        if self.moe_backend in ("cpu", "hybrid") or self.moe_cpu_layers:
+        if self.moe_backend == "cpu" or self.moe_cpu_layers:
             raise ValueError(
-                "self-speculative decoding requires GPU expert execution; use "
-                "--moe-backend offload or fused without --moe-cpu-layers"
+                "speculative decoding does not support all-CPU expert layers; use "
+                "--moe-backend offload, hybrid or fused without --moe-cpu-layers"
             )
 
     @cached_property
@@ -201,6 +216,12 @@ class EngineConfig:
         return parse_config(self.hf_config)
 
     @property
+    def legacy_sd_controls(self) -> bool:
+        """Whether an SD control that only legacy batching runs is requested."""
+        return bool(self.speculative_draft_residency != "off" or self.speculative_adaptive_cost
+                    or self.speculative_draft_load_missing or self.speculative_verify_prefetch)
+
+    @property
     def speculative_graphs(self) -> bool:
         from freetoken.attention import attention_backend_info
 
@@ -212,9 +233,9 @@ class EngineConfig:
             and self.dtype == torch.bfloat16
             and self.model_config.expert_quant in ("none", "nvfp4") and not self.nowag_expert_path
             and self.model_config.moe_weight_format in (None, "bf16")
-            and graph_attention and self.moe_backend == "offload"
+            and graph_attention and self.moe_backend in ("offload", "hybrid")
             and self.page_size == 1 and self.tp_info.size == 1
-            and getattr(self, "batching_policy", "legacy") == "legacy"
+            and getattr(self, "batching_policy", "legacy") in ("legacy", "layered-pipeline")
             and self.cuda_graph_max_bs != 0 and self.cuda_graph_bs != []
         )
 

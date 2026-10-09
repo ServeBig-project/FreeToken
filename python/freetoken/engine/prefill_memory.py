@@ -8,6 +8,8 @@ import torch
 @dataclass
 class PrefillMemoryBudget:
     device: torch.device
+    # Retained bytes that appear only after the first group (DFlash target-layer features).
+    later_state_bytes_per_token: int = 0
     workspace_bytes: int = field(default=0, init=False)
     state_bytes_per_token: int = field(default=0, init=False)
     measured_rows: int = field(default=0, init=False)
@@ -38,7 +40,8 @@ class PrefillMemoryBudget:
             free + torch.cuda.memory_reserved(self.device)
             - torch.cuda.memory_allocated(self.device)
         )
-        rows = (available - self.workspace_bytes) // self.state_bytes_per_token
+        rows = (available - self.workspace_bytes) // (
+            self.state_bytes_per_token + self.later_state_bytes_per_token)
         # The configured single tile must fit, just as for ordinary chunked prefill.
         rows = max(tile_tokens, rows // tile_tokens * tile_tokens)
         return min(rows, max_tokens)

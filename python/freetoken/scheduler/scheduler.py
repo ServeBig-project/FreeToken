@@ -119,6 +119,10 @@ class Scheduler(SchedulerIOMixin):
         self.adaptive_fast_path_gate: AdaptiveFastPathGate | None = None
         self.adaptive_fast_path_stats = AdaptiveFastPathStats()
         self._resident_decode_input: StableDecodeInput | None = None
+        self.speculative = (
+            SpeculativeDecoder(self.engine, self.cache_manager, self.table_manager, self._build_forward_input)
+            if config.speculative_num_steps else None
+        )
         if config.batching_policy == "legacy":
             composer_cls = LegacyBatchComposer
         elif config.batching_policy == "mixed":
@@ -159,6 +163,7 @@ class Scheduler(SchedulerIOMixin):
                 open_prefill_execution=self.cache_manager.open_prefill_execution,
                 report_prompt_admissions=self._report_prompt_admissions,
                 free_req_resources=self._free_req_resources,
+                speculative=self.speculative,
             )
             self.resident_executor = self.layered_pipeline_executor
             if adaptive_gate_enabled(
@@ -214,10 +219,6 @@ class Scheduler(SchedulerIOMixin):
             )
         self.token_pool = self.table_manager.token_pool
         self.config = config
-        self.speculative = (
-            SpeculativeDecoder(self.engine, self.cache_manager, self.table_manager, self._build_forward_input)
-            if config.speculative_num_steps else None
-        )
         self._refresh_prefill_budget("startup")
         self.status_reporter = SchedulerStatusReporter(
             log=logger.info_rank0,
@@ -785,7 +786,15 @@ class Scheduler(SchedulerIOMixin):
         ):
             self._execute_pending_rebuild()
 
+        # Publish finished host copies in every iteration, including pure decode and
+        # open waves; otherwise only the next prefill admission would.
+        self.cache_manager.poll()
         self.stream.wait_stream(self.engine.stream)
+        if last_outputs and self.speculative is not None and self.speculative.may_run(executor.active):
+            # SD reads the committed lengths and termination of every request, and
+            # its output commits within this iteration. Drain the deferred AR first.
+            self._process_last_outputs(last_outputs)
+            last_outputs = []
         outputs: list[ForwardData] = []
         if not executor.active:
             gate = self.adaptive_fast_path_gate
@@ -807,7 +816,7 @@ class Scheduler(SchedulerIOMixin):
                     self.engine.stream.wait_stream(self.stream)
                     self._restore_linear_states(batch)
                     data = (forward_input, self._forward(forward_input))
-                if self._resident_decode_input is not None:
+                if self._resident_decode_input is not None and data[1].speculative_ends is None:
                     # The engine has enqueued this graph and advanced request lengths. Reserve
                     # the next query pages now, before the scheduler stream is made to wait for
                     # the graph below, so disjoint future page-table writes overlap its compute.
@@ -860,7 +869,7 @@ class Scheduler(SchedulerIOMixin):
             if self.config.batching_policy == "layered-pipeline":
                 for data in outputs:
                     output_batch = data[0].batch
-                    if output_batch.is_decode_only:
+                    if output_batch.is_decode_only and data[1].speculative_ends is None:
                         # finish_decode has enqueued the sampled-token copy and advanced every
                         # request's lengths. Reserve a page-boundary-crossing next query now,
                         # on the scheduler stream, while the current group forward is still in
@@ -878,9 +887,10 @@ class Scheduler(SchedulerIOMixin):
         ready_outputs = list(last_outputs)
         deferred_outputs: list[ForwardData] = []
         for data in outputs:
-            if data[0].batch.has_prefill:
+            if data[0].batch.has_prefill or data[1].speculative_ends is not None:
                 # The prefill result is this request's first user-visible token. Publishing it
                 # now preserves TTFT; only steady-state decode benefits from a one-stage drain.
+                # SD lengths advance only when its accepted prefix commits.
                 ready_outputs.append(data)
             else:
                 deferred_outputs.append(data)
@@ -1111,6 +1121,7 @@ class Scheduler(SchedulerIOMixin):
         swa_tokens = self._swa_token_usage()
         if reply:
             reply[-1].cuda_graph = self.engine.graph_runner.stats_snapshot()
+            reply[-1].resources = self.engine.resource_status()
             reply[-1].prefix_cache = self.cache_manager.status()
             pool = self.engine.linear_state_pool
             if pool is not None and pool.replay is not None:
@@ -1376,6 +1387,7 @@ class Scheduler(SchedulerIOMixin):
                     gdn_replayssm=compute_gdn_state_geometry(self.engine),
                     dflash=compute_dflash_geometry(self.engine),
                     prefix_cache=self.cache_manager.status(),
+                    execution=self.engine.execution_status(),
                 )
             ]
         )

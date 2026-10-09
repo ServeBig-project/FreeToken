@@ -181,6 +181,8 @@ class FrontendManager:
     dflash_geometry: Dict[str, Any] | None = None
     # one {index, name, uuid, total_bytes} per TP rank, from the same ack; /v1/stats gpus
     gpus: List[Dict[str, Any]] = field(default_factory=list)
+    # Worker-resolved batching/SD settings from the ready ack (Engine.execution_status).
+    execution: Dict[str, Any] | None = None
     # Backend worker Process handles (TP schedulers + tokenizer/detokenizer), captured from the
     # BackendHandle after start_backend(). The orderly-shutdown path (lifespan / shell signal
     # handler) tears these down itself, AFTER setting _SHUTTING_DOWN, so the supervisor observes
@@ -295,6 +297,9 @@ class FrontendManager:
             self.dflash_geometry = msg.dflash
         if msg.prefix_cache is not None:
             self.stats.prefix_cache = msg.prefix_cache
+        if getattr(msg, "execution", None) is not None:
+            self.execution = msg.execution
+            self.stats.resources = None
         fut = self.rebuild_futures.pop(msg.request_id, None)
         if fut is not None and not fut.done():
             fut.set_result(self.last_rebuild)
@@ -1052,6 +1057,7 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
         _GLOBAL_STATE.swa_full_tokens_ratio = float(meta.pop("swa_full_tokens_ratio", 0.0) or 0.0)
         _GLOBAL_STATE.cache_budget_bytes = int(meta.pop("cache_budget_bytes", 0) or 0)
         _GLOBAL_STATE.gpus = list(meta.pop("gpus", None) or [])
+        _GLOBAL_STATE.execution = meta.pop("execution", None)
         _GLOBAL_STATE.unit_bytes = meta
 
     # Early-bind: supervise the backend on a daemon thread so uvicorn can bind

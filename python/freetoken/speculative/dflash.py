@@ -28,11 +28,18 @@ class DFlashRuntime:
         limit = engine.config.speculative_num_steps
         self.widths = sorted({1, limit, *(n for n in (2, 4, 8) if n <= limit)})
 
-    def record(self, layer, hidden, residual):
-        self.context.record(layer, hidden, residual)
+    @property
+    def feature_bytes_per_token(self):
+        return len(self.model.target_layer_ids) * self.model.hidden_size * self.engine.dtype.itemsize
 
-    def flush(self, batch):
-        self.context.flush(batch)
+    def feature_buffers(self, hidden):
+        return {layer: torch.zeros_like(hidden) for layer in self.model.target_layer_ids}
+
+    def record(self, layer, hidden, residual, features=None):
+        self.context.record(layer, hidden, residual, features)
+
+    def flush(self, batch, features=None):
+        self.context.flush(batch, features)
 
     def capture_stores(self):
         return self.context.full_stores()
@@ -74,12 +81,17 @@ class DFlashRuntime:
     def capture_graphs(self, runner):
         if runner.speculative is None:
             return
+        before = torch.cuda.memory_reserved(self.engine.device)
+        self._capture_graphs(runner)
+        runner.speculative_reserved_bytes += max(0, torch.cuda.memory_reserved(self.engine.device) - before)
+
+    def _capture_graphs(self, runner):
         self.logits = runner.speculative.buffer.logits
         dummy = self.engine.config.max_running_req
         self.locations.fill_(self.engine.num_pages)
         self.inputs.fill_(self.model.mask_token_id)
         for batch in reversed(self.context.batch_sizes):
-            if batch not in runner.graph_bs_list or batch > self.logits.shape[0]:
+            if batch not in runner.speculative.batch_sizes or batch > self.logits.shape[0]:
                 continue
             sizes = sorted({min(batch * (n + 1), self.logits.shape[0]) for n in self.widths})
             self.sizes[batch] = sizes
@@ -157,6 +169,8 @@ class DFlashRuntime:
             counters = self.engine.graph_runner.replay_counts
             counters[key] = counters.get(key, 0) + 1
         else:
+            if self.graphs:
+                self.engine.graph_runner.eager_counts["draft"] += 1
             result = self._forward(count, actual)[:actual]
         return result.index_select(0, staged[heads:used])
 

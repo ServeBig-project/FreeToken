@@ -348,6 +348,13 @@ def _linear_pool_num_slots(config) -> int:
     return slots
 
 
+def speculative_state_slots(config) -> int:
+    """Scratch states one request's full SD window needs beyond the live states."""
+    if not config.speculative_num_steps or replay_records(config) is not None:
+        return 0  # ReplaySSM records replace draft and verify slots
+    return config.speculative_num_steps + 1
+
+
 def _linear_pool_min_slots(config) -> int:
     """Keep the existing conservative rebuild floor while changing slot ownership only."""
     mr = config.max_running_req

@@ -42,9 +42,14 @@ class StatsTracker:
                                             "flushes", "flushed_records", "snapshot_exports"), 0)
         self.gdn_replayssm.update(flush_gpu_ms=0.0, export_gpu_ms=0.0)
         self.prefix_cache = None  # scheduler CacheManager.status() as of the latest reply
-        self.cuda_graph = {"enabled": False, "target_decode": 0, "draft": 0, "verify": 0,
+        self.resources = None  # Engine.resource_status() as of the latest reply
+        self.cuda_graph = {"enabled": False, "target_decode": 0, "draft": 0, "verify": 0, "verify_range": 0,
+                           "speculative_eager": {"draft": 0, "verify": 0, "verify_range": 0},
                            "replay_shapes": [], "capture_seconds": 0.0, "extra_reserved_bytes": 0}
         self.speculative = {"draft_tokens": 0, "accepted_draft_tokens": 0, "verify_steps": 0,
+                            "verify_rounds": {"inwave": 0, "outwave": 0},
+                            "verify_requests": {"inwave": 0, "outwave": 0},
+                            "fallback_requests": {},
                             "residency_stops": 0, "draft_expert_loads": 0,
                             "cost_ar_requests": 0, "cost_stopped_requests": 0,
                             "cost_probe_requests": 0, "cost_control_ms": 0.0,
@@ -80,6 +85,8 @@ class StatsTracker:
         t = time.monotonic() if now is None else now
         if getattr(reply, "cuda_graph", None) is not None:
             self.cuda_graph = reply.cuda_graph
+        if getattr(reply, "resources", None) is not None:
+            self.resources = reply.resources
         if getattr(reply, "speculative", None) is not None:
             self.speculative.update(reply.speculative)
         if getattr(reply, "gdn_replayssm", None) is not None:
@@ -176,6 +183,15 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
         if tr.mamba_total_slots > 0 else None
     )
     sps = _swa_page_size(config)
+    # SD fields describe what the worker resolved, never this process's unresolved request.
+    execution = getattr(state, "execution", None) or {
+        "requested": {name: getattr(config, name, None) for name in (
+            "batching_policy", "speculative_num_steps", "speculative_draft_model_path",
+            "speculative_phase")},
+        "effective": None,
+        "fallback_reasons": [],
+    }
+    steps = (execution["effective"] or {}).get("speculative_num_steps") or 0
     swa = (
         {"used_pages": tr.swa_used_tokens // sps, "total_pages": tr.swa_total_tokens // sps,
          "page_size": sps}
@@ -195,13 +211,15 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
             "active": bool((getattr(state, "gdn_geometry", None) or {}).get("active")),
             **tr.gdn_replayssm,
         },
+        # Ready and rebuild publish resources with execution; replies refresh them after.
+        "execution": {**execution, "resources": tr.resources or execution.get("resources")},
         "speculative": {
-            "enabled": bool(getattr(config, "speculative_num_steps", 0)),
+            "enabled": bool(steps),
             "adaptive_cost_enabled": config.speculative_adaptive_cost,
             "draft_load_missing_enabled": config.speculative_draft_load_missing,
             "verify_prefetch_enabled": config.speculative_verify_prefetch,
-            "max_draft_steps": config.speculative_num_steps,
-            "draft_length_histogram": [0] * (config.speculative_num_steps + 1),
+            "max_draft_steps": steps,
+            "draft_length_histogram": [0] * (steps + 1),
             **tr.speculative,
             "draft_residency": config.speculative_draft_residency,
             "draft_expert_loads": tr.speculative["draft_expert_loads"] if config.moe_collect_stats else None,

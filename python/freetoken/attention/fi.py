@@ -536,17 +536,7 @@ class FlashInferBackend(BaseAttnBackend):
 
         bs = batch.size
         assert bs in self.capture_bs and bs not in self.graph_wrappers and self.capture
-        capture = self.capture
-        self.graph_wrappers[bs] = CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
-            self.float_workspace_buffer,
-            kv_layout="NHD",
-            use_tensor_cores=self.use_tensor_cores,
-            indptr_buffer=capture.cu_seqlens_k[: bs + 1],
-            indices_buffer=capture.indices,
-            last_page_len_buffer=capture.one_tensor[:bs],
-        )
-        self.graph_wrappers[bs]._backend = "fa2"
-        self.graph_wrappers[bs]._int_workspace_buffer = self.int_workspace_buffer
+        self.graph_wrappers[bs] = self.create_decode_graph_wrapper(bs)
         self.prepare_metadata(batch)
         metadata = batch.attn_metadata
         assert isinstance(metadata, FIMetadata)
@@ -563,8 +553,39 @@ class FlashInferBackend(BaseAttnBackend):
         metadata.decode.wrapper = self.graph_wrappers[bs]
         self._ensure_metadata_plans(metadata)
 
-    def create_speculative_graphs(self, max_seq_len: int):
-        return FISpeculativeGraphs(self, max_seq_len)
+    @property
+    def supports_layer_range_graphs(self) -> bool:
+        return True
+
+    def prepare_for_layer_range_capture(self, batch: Batch) -> None:
+        # Reuse the solo capture's wrapper for this size rather than a second plan store.
+        self.prepare_metadata(batch)
+        self.prepare_for_replay(batch)
+
+    def prepare_for_layer_range_replay(self, batch: Batch) -> None:
+        # An eager stage may already have planned this batch's decode path. Replan it
+        # into the graph wrapper; the merged resident stage shares that decode path.
+        batch.attn_metadata.decode.initialized = False
+        self.prepare_for_replay(batch)
+
+    def create_speculative_graphs(self, max_seq_len: int, max_batch_size: int):
+        return FISpeculativeGraphs(self, max_seq_len, max_batch_size)
+
+    def create_decode_graph_wrapper(self, batch_size: int, capture: FICaptureData | None = None):
+        from flashinfer import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
+
+        capture = capture if capture is not None else self.capture
+        wrapper = CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
+            self.float_workspace_buffer,
+            kv_layout="NHD",
+            use_tensor_cores=self.use_tensor_cores,
+            indptr_buffer=capture.cu_seqlens_k[: batch_size + 1],
+            indices_buffer=capture.indices,
+            last_page_len_buffer=capture.one_tensor[:batch_size],
+        )
+        wrapper._backend = "fa2"
+        wrapper._int_workspace_buffer = self.int_workspace_buffer
+        return wrapper
 
     def create_verify_graph_wrapper(self, batch_size: int, max_seq_len: int):
         from flashinfer import BatchPrefillWithPagedKVCacheWrapper
@@ -598,13 +619,18 @@ class FlashInferBackend(BaseAttnBackend):
 
 
 class FISpeculativeGraphs:
-    def __init__(self, backend, max_seq_len):
+    def __init__(self, backend, max_seq_len, max_batch_size):
         self.backend, self.max_seq_len = backend, max_seq_len
-        self.verify = {}
+        self.draft, self.verify = {}, {}
+        # Draft wrappers share one plan store sized for SD, independent of target-decode sizes.
+        self.capture = FICaptureData.create(max_batch_size, max_seq_len, backend.device)
+        self.capture.page_table = self.capture.page_table.view(-1)
 
     def _wrapper(self, batch):
         if not batch.is_speculative_verify:
-            return self.backend.graph_wrappers[batch.size]
+            if batch.size not in self.draft:
+                self.draft[batch.size] = self.backend.create_decode_graph_wrapper(batch.size, self.capture)
+            return self.draft[batch.size]
         if batch.size not in self.verify:
             self.verify[batch.size] = self.backend.create_verify_graph_wrapper(batch.size, self.max_seq_len)
         return self.verify[batch.size]
@@ -613,4 +639,8 @@ class FISpeculativeGraphs:
         self.backend.prepare_speculative_graph(batch, self._wrapper(batch), page_table)
 
     def prepare_replay(self, batch):
+        if batch.is_speculative_verify:
+            # An eager layer-range stage may have planned this verify path; replan it into
+            # the graph wrapper.
+            batch.attn_metadata.prefill.initialized = False
         self.backend.prepare_speculative_graph(batch, self._wrapper(batch))

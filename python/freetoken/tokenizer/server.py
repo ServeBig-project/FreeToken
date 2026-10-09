@@ -200,6 +200,7 @@ def tokenize_worker(
                             gdn_replayssm=m.gdn_replayssm,
                             dflash=m.dflash,
                             prefix_cache=m.prefix_cache,
+                            execution=m.execution,
                         )
                     )
             n_control = sum(
@@ -234,6 +235,7 @@ def tokenize_worker(
                         gpu_mem_bytes=msg.gpu_mem_bytes,
                         speculative=msg.speculative,
                         cuda_graph=msg.cuda_graph,
+                        resources=msg.resources,
                         gdn_replayssm=msg.gdn_replayssm,
                         prefix_cache=msg.prefix_cache,
                     )

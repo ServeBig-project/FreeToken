@@ -1,12 +1,14 @@
 # Speculative CUDA graphs
 
 The existing `--cuda-graph-max-bs` controls this path. `0` keeps eager execution;
-`32` captures every real batch size from 1 through 32 when
+`32` captures draft and verify graphs for every real batch size from 1 through 32 when
 `--max-running-requests 32` is set, including all intermediate tail batches.
-The capture limit is the smaller of these two settings and 32. Supported SD
-configurations use the migrated Qwen3 or Qwen3.5/3.6 MoE components on a single GPU,
-BF16 experts with the offload backend, and FlashInfer attention,
-page size 1, legacy scheduling, any draft K, and at most eight proposed tokens. Draft
+The capture limit is the smaller of these two settings and 32. These SD graphs exist
+only while SD is on; target decode keeps the ordinary graph sizes either way.
+Supported SD configurations use the migrated Qwen3 or Qwen3.5/3.6 MoE components on a
+single GPU, BF16 or NVFP4 experts with the offload or hybrid backend, and FlashInfer
+attention, page size 1, legacy or layered-pipeline scheduling, any draft K, and at most
+eight proposed tokens. Draft
 residency may be `off` or `router`. With speculation enabled and CUDA Graph
 requested, any other configuration (for example fused or quantized experts)
 fails at startup instead of silently disabling graphs; pass
