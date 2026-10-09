@@ -1,0 +1,1437 @@
+{
+ "session": "nvfp4_adaptive",
+ "artifacts": {
+  "adaptive_policy": {
+   "low": {
+    "draft_tokens": 170,
+    "accepted_draft_tokens": 52,
+    "verify_steps": 11,
+    "emitted_tokens": 93,
+    "verify_positions": 211,
+    "verify_physical_positions": 229,
+    "dflash_draft_positions": 211,
+    "dflash_draft_physical_positions": 211,
+    "cost_ar_requests": 0,
+    "cost_stopped_requests": 0,
+    "cost_probe_requests": 0,
+    "histogram": [
+     2269,
+     0,
+     10,
+     2,
+     20,
+     0,
+     0,
+     0,
+     8
+    ],
+    "verify_rounds": {
+     "inwave": 0,
+     "outwave": 11
+    },
+    "verify_requests": {
+     "inwave": 0,
+     "outwave": 41
+    },
+    "fallback_requests": {
+     "draft_plan": 2265,
+     "tail": 3
+    },
+    "completion_tokens": 2373,
+    "requests": 12
+   },
+   "high": {
+    "draft_tokens": 1108,
+    "accepted_draft_tokens": 1108,
+    "verify_steps": 139,
+    "emitted_tokens": 1664,
+    "verify_positions": 1664,
+    "verify_physical_positions": 1664,
+    "dflash_draft_positions": 1664,
+    "dflash_draft_physical_positions": 1664,
+    "cost_ar_requests": 0,
+    "cost_stopped_requests": 0,
+    "cost_probe_requests": 0,
+    "histogram": [
+     732,
+     4,
+     552,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "verify_rounds": {
+     "inwave": 0,
+     "outwave": 139
+    },
+    "verify_requests": {
+     "inwave": 0,
+     "outwave": 556
+    },
+    "fallback_requests": {
+     "draft_plan": 732,
+     "tail": 0
+    },
+    "completion_tokens": 2400,
+    "requests": 4
+   },
+   "stats_paths": [
+    "enabled",
+    "adaptive_cost_enabled",
+    "draft_load_missing_enabled",
+    "verify_prefetch_enabled",
+    "max_draft_steps",
+    "draft_length_histogram",
+    "draft_tokens",
+    "accepted_draft_tokens",
+    "verify_steps",
+    "verify_rounds",
+    "verify_rounds.inwave",
+    "verify_rounds.outwave",
+    "verify_requests",
+    "verify_requests.inwave",
+    "verify_requests.outwave",
+    "fallback_requests",
+    "fallback_requests.draft_plan",
+    "fallback_requests.tail",
+    "residency_stops",
+    "draft_expert_loads",
+    "cost_ar_requests",
+    "cost_stopped_requests",
+    "cost_probe_requests",
+    "cost_control_ms",
+    "cost_samples",
+    "cost_samples.ar",
+    "cost_samples.draft",
+    "cost_samples.verify",
+    "cost_gpu_ms",
+    "cost_gpu_ms.ar",
+    "cost_gpu_ms.draft",
+    "cost_gpu_ms.verify",
+    "cost_gpu_ms.state",
+    "cost_gpu_ms.moe_compute",
+    "cost_gpu_ms.demand_copy",
+    "cost_gpu_ms.prefetch_copy",
+    "cost_gpu_ms.prefetch_wait",
+    "cost_transfer_predictions",
+    "cost_transfer_predictions.ar",
+    "cost_transfer_predictions.ar.predicted_experts",
+    "cost_transfer_predictions.ar.actual_experts",
+    "cost_transfer_predictions.ar.abs_error_experts",
+    "cost_transfer_predictions.draft",
+    "cost_transfer_predictions.draft.predicted_experts",
+    "cost_transfer_predictions.draft.actual_experts",
+    "cost_transfer_predictions.draft.abs_error_experts",
+    "cost_transfer_predictions.verify",
+    "cost_transfer_predictions.verify.predicted_experts",
+    "cost_transfer_predictions.verify.actual_experts",
+    "cost_transfer_predictions.verify.abs_error_experts",
+    "prefetch_predicted_experts",
+    "prefetch_loaded_experts",
+    "prefetch_used_experts",
+    "prefetch_evicted_unused_experts",
+    "prefetch_loaded_bytes",
+    "prefetch_used_bytes",
+    "prefetch_evicted_unused_bytes",
+    "drafter",
+    "phase",
+    "emitted_tokens",
+    "verify_positions",
+    "verify_physical_positions",
+    "clipped_requests",
+    "clipped_requests.tail",
+    "clipped_requests.capacity",
+    "state_slot_stops",
+    "dflash_control",
+    "dflash_draft_positions",
+    "dflash_draft_physical_positions",
+    "dflash_init_rounds",
+    "dflash_probe_rounds",
+    "dflash_selected_rounds",
+    "dflash_fixed_rounds",
+    "dflash_switches",
+    "dflash_clipped_requests",
+    "dflash_samples",
+    "dflash_compared_rounds",
+    "dflash_compared_candidates",
+    "dflash_decisions",
+    "dflash_round_ms",
+    "dflash_proposal_ms",
+    "dflash_verify_ms",
+    "dflash_init_ms",
+    "dflash_probe_ms",
+    "dflash_decision_us",
+    "dflash_rounds_dropped",
+    "dflash_executed_nominal",
+    "dflash_executed_nominal.0",
+    "dflash_executed_nominal.2",
+    "dflash_executed_nominal.4",
+    "dflash_executed_nominal.8",
+    "dflash_suggested_nominal",
+    "dflash_suggested_nominal.0",
+    "dflash_suggested_nominal.2",
+    "dflash_suggested_nominal.4",
+    "dflash_suggested_nominal.8",
+    "dflash_decision_us_histogram",
+    "dflash_decision_us_histogram.bucket_us",
+    "dflash_decision_us_histogram.counts",
+    "dflash_timing_scope",
+    "draft_residency"
+   ]
+  }
+ },
+ "impl_head": "e07fe484e43dd299ea3cd01cee8baa352e60f37e",
+ "cmd": [
+  "/home/nengneng/miniconda3/envs/freetoken-dev/bin/python",
+  "-m",
+  "freetoken",
+  "--gpu",
+  "GPU-b8a2a927-a7dd-4a70-5fca-aa2f74a142cd",
+  "--port",
+  "31781",
+  "--enable-cache-report",
+  "--model-path",
+  "/data1/lmcache_kv/models/Qwen3.6-35B-A3B-NVFP4",
+  "--moe-backend",
+  "offload",
+  "--moe-cache-size",
+  "2048",
+  "--batching-policy",
+  "legacy",
+  "--num-tokens",
+  "65536",
+  "--max-running-requests",
+  "4",
+  "--attention-backend",
+  "fi",
+  "--cuda-graph-max-bs",
+  "4",
+  "--max-seq-len-override",
+  "32768",
+  "--enable-gdn-replayssm",
+  "--gdn-state-budget-bytes",
+  "2000000000",
+  "--speculative-num-steps",
+  "8",
+  "--speculative-draft-model-path",
+  "/data2/servebig-envs/dflash_models/models--z-lab--Qwen3.6-35B-A3B-DFlash/snapshots/f181eece646affea2c38b2765f1aaa01a9734ccd",
+  "--speculative-adaptive-cost"
+ ],
+ "startup_seconds": 39.03681311599212,
+ "status0": {
+  "state": "serving",
+  "last_rebuild": null,
+  "geometry": {
+   "num_pages": 65536,
+   "page_size": 1,
+   "moe_cache_size": 2048,
+   "num_mamba_slots": 28,
+   "num_experts": 256,
+   "num_moe_layers": 40,
+   "moe_cache_policy": "lru",
+   "unit_bytes": {
+    "kv_per_token": 20480,
+    "moe_per_expert": 1775616,
+    "mamba_per_slot": 64389120,
+    "swa_per_token": 0
+   },
+   "swa_full_tokens_ratio": 0.0,
+   "swa_page_size": 0,
+   "num_swa_pages": 0,
+   "cache_budget_bytes": 18684425011,
+   "reasoning": {
+    "gears": [
+     "off",
+     "on"
+    ],
+    "default": "on",
+    "kwargs": {
+     "off": {
+      "enable_thinking": false,
+      "thinking_mode": "disabled"
+     },
+     "on": {
+      "enable_thinking": true,
+      "thinking_mode": "enabled"
+     }
+    }
+   },
+   "gdn_replayssm": {
+    "active": true,
+    "buffer_len": 32,
+    "request_capacity": 4,
+    "state_budget_bytes": 2000000000,
+    "checkpoint_bytes": 1867284480,
+    "record_bytes": 47677440,
+    "conv_workspace_bytes": 23592960,
+    "metadata_bytes": 84,
+    "state_workspace_bytes": 0,
+    "reserved_bytes": 1938554964
+   },
+   "dflash": {
+    "active": true,
+    "full_context_bytes": 268439552,
+    "window_context_bytes": 514641920,
+    "metadata_bytes": 2921800,
+    "workspace_bytes": 17827168,
+    "compact_kv": true,
+    "attention_window": 0,
+    "window_tokens": 4095,
+    "full_token_bytes": 4096,
+    "window_token_bytes": 20480,
+    "window_capacity_limit": 25128,
+    "window_slots": 25128,
+    "window_free_slots": 25128,
+    "weight_bytes": 771812352,
+    "context_bytes": 783081472,
+    "reserved_bytes": 1575642792
+   },
+   "limits": {
+    "kv_tokens": {
+     "min": 1,
+     "max": 738486
+    },
+    "moe_experts": {
+     "min": 256,
+     "max": 10070
+    },
+    "mamba_slots": {
+     "min": 16,
+     "max": 276
+    },
+    "swa_tokens": {
+     "min": 0,
+     "max": 0
+    }
+   }
+  },
+  "prefix_cache": {
+   "enabled": false,
+   "policy": "baseline",
+   "gpu_checkpoint_count": 0,
+   "active_state_count": 0,
+   "host_budget_bytes": 0,
+   "host_allocated_bytes": 0,
+   "host_used_bytes": 0,
+   "host_inflight_bytes": 0,
+   "transfer_device_bytes": 0,
+   "host_checkpoint_count": 0,
+   "restore_wait_ms": 0.0,
+   "h2d_bytes": 0,
+   "d2h_bytes": 0,
+   "h2d_batches": 0,
+   "d2h_batches": 0,
+   "h2d_time_ms": 0.0,
+   "d2h_time_ms": 0.0,
+   "checkpoint_created": 0,
+   "checkpoint_deduplicated": 0,
+   "checkpoint_pruned": 0,
+   "checkpoint_evicted": 0,
+   "gpu_checkpoint_peak": 0,
+   "host_checkpoint_peak": 0,
+   "gpu_reused_tokens": 0,
+   "host_reused_tokens": 0,
+   "recomputed_tokens": 0,
+   "window_slots": {
+    "total": 25128,
+    "free": 25128,
+    "tree_locked": 0,
+    "tree_evictable": 0,
+    "request_owned": 0,
+    "copy_inflight": 0
+   },
+   "components": [
+    {
+     "name": "paged_kv",
+     "storage_kind": "paged",
+     "device_allocated_bytes": 1342197760,
+     "host_used_bytes": 0,
+     "h2d_bytes": 0,
+     "d2h_bytes": 0
+    },
+    {
+     "name": "draft_kv",
+     "storage_kind": "paged",
+     "device_allocated_bytes": 268439552,
+     "host_used_bytes": 0,
+     "h2d_bytes": 0,
+     "d2h_bytes": 0
+    },
+    {
+     "name": "draft_window",
+     "storage_kind": "window",
+     "device_allocated_bytes": 514641920,
+     "host_used_bytes": 0,
+     "h2d_bytes": 0,
+     "d2h_bytes": 0
+    },
+    {
+     "name": "recurrent_state",
+     "storage_kind": "boundary_state",
+     "device_allocated_bytes": 1867284480,
+     "host_used_bytes": 0,
+     "h2d_bytes": 0,
+     "d2h_bytes": 0
+    }
+   ]
+  }
+ },
+ "stats0": {
+  "instance_id": "b3d6867d-e3e8-40e0-b186-b61dac35837a",
+  "model": {
+   "id": "Qwen3.6-35B-A3B-NVFP4",
+   "ctx": 32768,
+   "attn": "hybrid_linear",
+   "moe": true,
+   "sampling": {
+    "temperature": 1.0,
+    "top_k": 20,
+    "top_p": 0.95
+   }
+  },
+  "uptime_s": 2,
+  "kv": null,
+  "mamba": null,
+  "swa": null,
+  "vram_bytes": 0,
+  "gpus": [
+   {
+    "index": 1,
+    "name": "NVIDIA GeForce RTX 4090",
+    "uuid": "GPU-b8a2a927-a7dd-4a70-5fca-aa2f74a142cd",
+    "total_bytes": 25250627584
+   }
+  ],
+  "cuda_graph": {
+   "enabled": true,
+   "target_decode": 0,
+   "draft": 0,
+   "verify": 0,
+   "verify_range": 0,
+   "capture_seconds": 5.727942584984703,
+   "extra_reserved_bytes": 73400320,
+   "replay_shapes": [],
+   "speculative_eager": {
+    "draft": 0,
+    "verify": 0,
+    "verify_range": 0
+   }
+  },
+  "gdn_replayssm": {
+   "active": true,
+   "ar_tokens": 0,
+   "draft_tokens": 0,
+   "verify_tokens": 0,
+   "flushes": 0,
+   "flushed_records": 0,
+   "snapshot_exports": 0,
+   "flush_gpu_ms": 0.0,
+   "export_gpu_ms": 0.0
+  },
+  "execution": {
+   "requested": {
+    "batching_policy": "legacy",
+    "speculative_num_steps": 8,
+    "speculative_draft_model_path": "/data2/servebig-envs/dflash_models/models--z-lab--Qwen3.6-35B-A3B-DFlash/snapshots/f181eece646affea2c38b2765f1aaa01a9734ccd",
+    "speculative_phase": "outwave"
+   },
+   "effective": {
+    "batching_policy": "legacy",
+    "drafter": "dflash",
+    "speculative_num_steps": 8,
+    "speculative_phase": "outwave",
+    "cuda_graph": {
+     "batch_sizes": [
+      1,
+      2,
+      3,
+      4
+     ],
+     "layer_ranges": false,
+     "speculative": true,
+     "inwave_verify": false
+    }
+   },
+   "fallback_reasons": [],
+   "resources": {
+    "speculative_graph_reserved_bytes": 132120576,
+    "cpu_executor_pinned_io_bytes": 0
+   }
+  },
+  "speculative": {
+   "enabled": true,
+   "adaptive_cost_enabled": true,
+   "draft_load_missing_enabled": false,
+   "verify_prefetch_enabled": false,
+   "max_draft_steps": 8,
+   "draft_length_histogram": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "draft_tokens": 0,
+   "accepted_draft_tokens": 0,
+   "verify_steps": 0,
+   "verify_rounds": {
+    "inwave": 0,
+    "outwave": 0
+   },
+   "verify_requests": {
+    "inwave": 0,
+    "outwave": 0
+   },
+   "fallback_requests": {},
+   "residency_stops": 0,
+   "draft_expert_loads": null,
+   "cost_ar_requests": 0,
+   "cost_stopped_requests": 0,
+   "cost_probe_requests": 0,
+   "cost_control_ms": 0.0,
+   "cost_samples": {
+    "ar": 0,
+    "draft": 0,
+    "verify": 0
+   },
+   "cost_gpu_ms": {
+    "ar": 0.0,
+    "draft": 0.0,
+    "verify": 0.0,
+    "state": 0.0,
+    "moe_compute": 0.0,
+    "demand_copy": 0.0,
+    "prefetch_copy": 0.0,
+    "prefetch_wait": 0.0
+   },
+   "cost_transfer_predictions": {
+    "ar": {
+     "predicted_experts": 0.0,
+     "actual_experts": 0,
+     "abs_error_experts": 0.0
+    },
+    "draft": {
+     "predicted_experts": 0.0,
+     "actual_experts": 0,
+     "abs_error_experts": 0.0
+    },
+    "verify": {
+     "predicted_experts": 0.0,
+     "actual_experts": 0,
+     "abs_error_experts": 0.0
+    }
+   },
+   "prefetch_predicted_experts": 0,
+   "prefetch_loaded_experts": 0,
+   "prefetch_used_experts": 0,
+   "prefetch_evicted_unused_experts": 0,
+   "prefetch_loaded_bytes": 0,
+   "prefetch_used_bytes": 0,
+   "prefetch_evicted_unused_bytes": 0,
+   "draft_residency": "off"
+  },
+  "throughput": {
+   "decode_tps": 0.0,
+   "prefill_tps": 0.0
+  },
+  "requests": {
+   "active": 0,
+   "completed": 0,
+   "p95_ms": 0,
+   "ttft_mean_ms": 0,
+   "prompt_tokens_total": 0,
+   "completion_tokens_total": 0
+  }
+ },
+ "process_gpu_mib": 12170,
+ "stats_end": {
+  "instance_id": "b3d6867d-e3e8-40e0-b186-b61dac35837a",
+  "model": {
+   "id": "Qwen3.6-35B-A3B-NVFP4",
+   "ctx": 32768,
+   "attn": "hybrid_linear",
+   "moe": true,
+   "sampling": {
+    "temperature": 1.0,
+    "top_k": 20,
+    "top_p": 0.95
+   }
+  },
+  "uptime_s": 51,
+  "kv": {
+   "used_pages": 0,
+   "total_pages": 65536,
+   "page_size": 1
+  },
+  "mamba": {
+   "used_slots": 0,
+   "total_slots": 28
+  },
+  "swa": {
+   "used_pages": 0,
+   "total_pages": 25128,
+   "page_size": 1
+  },
+  "vram_bytes": 12591300608,
+  "gpus": [
+   {
+    "index": 1,
+    "name": "NVIDIA GeForce RTX 4090",
+    "uuid": "GPU-b8a2a927-a7dd-4a70-5fca-aa2f74a142cd",
+    "total_bytes": 25250627584
+   }
+  ],
+  "cuda_graph": {
+   "enabled": true,
+   "target_decode": 765,
+   "draft": 150,
+   "verify": 150,
+   "verify_range": 0,
+   "capture_seconds": 5.727942584984703,
+   "extra_reserved_bytes": 73400320,
+   "replay_shapes": [
+    {
+     "phase": "draft",
+     "batch_size": 2,
+     "query_tokens": 6,
+     "replays": 1,
+     "physical_query_tokens": 6
+    },
+    {
+     "phase": "draft",
+     "batch_size": 3,
+     "query_tokens": 9,
+     "replays": 1,
+     "physical_query_tokens": 9
+    },
+    {
+     "phase": "draft",
+     "batch_size": 4,
+     "query_tokens": 8,
+     "replays": 1,
+     "physical_query_tokens": 8
+    },
+    {
+     "phase": "draft",
+     "batch_size": 4,
+     "query_tokens": 12,
+     "replays": 140,
+     "physical_query_tokens": 12
+    },
+    {
+     "phase": "draft",
+     "batch_size": 4,
+     "query_tokens": 20,
+     "replays": 5,
+     "physical_query_tokens": 20
+    },
+    {
+     "phase": "draft",
+     "batch_size": 4,
+     "query_tokens": 36,
+     "replays": 2,
+     "physical_query_tokens": 36
+    },
+    {
+     "phase": "target_decode",
+     "batch_size": 1,
+     "query_tokens": 1,
+     "replays": 5,
+     "physical_query_tokens": 1
+    },
+    {
+     "phase": "target_decode",
+     "batch_size": 2,
+     "query_tokens": 2,
+     "replays": 9,
+     "physical_query_tokens": 2
+    },
+    {
+     "phase": "target_decode",
+     "batch_size": 3,
+     "query_tokens": 3,
+     "replays": 27,
+     "physical_query_tokens": 3
+    },
+    {
+     "phase": "target_decode",
+     "batch_size": 4,
+     "query_tokens": 4,
+     "replays": 724,
+     "physical_query_tokens": 4
+    },
+    {
+     "phase": "verify",
+     "batch_size": 2,
+     "query_tokens": 6,
+     "replays": 1,
+     "physical_query_tokens": 6
+    },
+    {
+     "phase": "verify",
+     "batch_size": 3,
+     "query_tokens": 9,
+     "replays": 1,
+     "physical_query_tokens": 27
+    },
+    {
+     "phase": "verify",
+     "batch_size": 4,
+     "query_tokens": 8,
+     "replays": 1,
+     "physical_query_tokens": 8
+    },
+    {
+     "phase": "verify",
+     "batch_size": 4,
+     "query_tokens": 12,
+     "replays": 140,
+     "physical_query_tokens": 12
+    },
+    {
+     "phase": "verify",
+     "batch_size": 4,
+     "query_tokens": 20,
+     "replays": 5,
+     "physical_query_tokens": 20
+    },
+    {
+     "phase": "verify",
+     "batch_size": 4,
+     "query_tokens": 36,
+     "replays": 2,
+     "physical_query_tokens": 36
+    }
+   ],
+   "speculative_eager": {
+    "draft": 0,
+    "verify": 0,
+    "verify_range": 0
+   }
+  },
+  "gdn_replayssm": {
+   "active": true,
+   "ar_tokens": 3000,
+   "draft_tokens": 0,
+   "verify_tokens": 1875,
+   "flushes": 147,
+   "flushed_records": 4572,
+   "snapshot_exports": 16,
+   "flush_gpu_ms": 19.192288152873516,
+   "export_gpu_ms": 2.658399999141693
+  },
+  "execution": {
+   "requested": {
+    "batching_policy": "legacy",
+    "speculative_num_steps": 8,
+    "speculative_draft_model_path": "/data2/servebig-envs/dflash_models/models--z-lab--Qwen3.6-35B-A3B-DFlash/snapshots/f181eece646affea2c38b2765f1aaa01a9734ccd",
+    "speculative_phase": "outwave"
+   },
+   "effective": {
+    "batching_policy": "legacy",
+    "drafter": "dflash",
+    "speculative_num_steps": 8,
+    "speculative_phase": "outwave",
+    "cuda_graph": {
+     "batch_sizes": [
+      1,
+      2,
+      3,
+      4
+     ],
+     "layer_ranges": false,
+     "speculative": true,
+     "inwave_verify": false
+    }
+   },
+   "fallback_reasons": [],
+   "resources": {
+    "speculative_graph_reserved_bytes": 132120576,
+    "cpu_executor_pinned_io_bytes": 0
+   }
+  },
+  "speculative": {
+   "enabled": true,
+   "adaptive_cost_enabled": true,
+   "draft_load_missing_enabled": false,
+   "verify_prefetch_enabled": false,
+   "max_draft_steps": 8,
+   "draft_length_histogram": [
+    3001,
+    4,
+    562,
+    2,
+    20,
+    0,
+    0,
+    0,
+    8
+   ],
+   "draft_tokens": 1278,
+   "accepted_draft_tokens": 1160,
+   "verify_steps": 150,
+   "verify_rounds": {
+    "inwave": 0,
+    "outwave": 150
+   },
+   "verify_requests": {
+    "inwave": 0,
+    "outwave": 597
+   },
+   "fallback_requests": {
+    "draft_plan": 2997,
+    "tail": 3
+   },
+   "residency_stops": 0,
+   "draft_expert_loads": null,
+   "cost_ar_requests": 0,
+   "cost_stopped_requests": 0,
+   "cost_probe_requests": 0,
+   "cost_control_ms": 0.0,
+   "cost_samples": {
+    "ar": 0,
+    "draft": 0,
+    "verify": 0
+   },
+   "cost_gpu_ms": {
+    "ar": 0.0,
+    "draft": 0.0,
+    "verify": 0.0,
+    "state": 0.0,
+    "moe_compute": 0.0,
+    "demand_copy": 0.0,
+    "prefetch_copy": 0.0,
+    "prefetch_wait": 0.0
+   },
+   "cost_transfer_predictions": {
+    "ar": {
+     "predicted_experts": 0.0,
+     "actual_experts": 0,
+     "abs_error_experts": 0.0
+    },
+    "draft": {
+     "predicted_experts": 0.0,
+     "actual_experts": 0,
+     "abs_error_experts": 0.0
+    },
+    "verify": {
+     "predicted_experts": 0.0,
+     "actual_experts": 0,
+     "abs_error_experts": 0.0
+    }
+   },
+   "prefetch_predicted_experts": 0,
+   "prefetch_loaded_experts": 0,
+   "prefetch_used_experts": 0,
+   "prefetch_evicted_unused_experts": 0,
+   "prefetch_loaded_bytes": 0,
+   "prefetch_used_bytes": 0,
+   "prefetch_evicted_unused_bytes": 0,
+   "drafter": "dflash",
+   "phase": "outwave",
+   "emitted_tokens": 1757,
+   "verify_positions": 1875,
+   "verify_physical_positions": 1893,
+   "clipped_requests": {
+    "tail": 17,
+    "capacity": 0
+   },
+   "state_slot_stops": 0,
+   "dflash_control": "adaptive",
+   "dflash_draft_positions": 1875,
+   "dflash_draft_physical_positions": 1875,
+   "dflash_init_rounds": 4,
+   "dflash_probe_rounds": 7,
+   "dflash_selected_rounds": 901,
+   "dflash_fixed_rounds": 0,
+   "dflash_switches": 3,
+   "dflash_clipped_requests": 7,
+   "dflash_samples": 912,
+   "dflash_compared_rounds": 99,
+   "dflash_compared_candidates": 198,
+   "dflash_decisions": 912,
+   "dflash_round_ms": 41642.734354019165,
+   "dflash_proposal_ms": 462.2095379829407,
+   "dflash_verify_ms": 15627.968420028687,
+   "dflash_init_ms": 362.0105972290039,
+   "dflash_probe_ms": 461.40839195251465,
+   "dflash_decision_us": 34752.377250697464,
+   "dflash_rounds_dropped": 0,
+   "dflash_executed_nominal": {
+    "0": 762,
+    "2": 142,
+    "4": 6,
+    "8": 2
+   },
+   "dflash_suggested_nominal": {
+    "0": 0,
+    "2": 0,
+    "4": 0,
+    "8": 0
+   },
+   "dflash_decision_us_histogram": {
+    "bucket_us": 5,
+    "counts": [
+     0,
+     0,
+     0,
+     0,
+     1,
+     4,
+     247,
+     415,
+     208,
+     22,
+     8,
+     5,
+     0,
+     0,
+     2,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ]
+   },
+   "dflash_timing_scope": "round_ms: engine stream from the decision to the queued replies, including host gaps; proposal_ms: draft forward, probabilities, sampling and candidate writes; verify_ms: target verification forward; round_ms contains both",
+   "draft_residency": "off"
+  },
+  "throughput": {
+   "decode_tps": 105.2,
+   "prefill_tps": 0.0
+  },
+  "requests": {
+   "active": 0,
+   "completed": 16,
+   "p95_ms": 25036,
+   "ttft_mean_ms": 0,
+   "prompt_tokens_total": 7237,
+   "completion_tokens_total": 4773
+  }
+ },
+ "status_end": {
+  "state": "serving",
+  "last_rebuild": null,
+  "geometry": {
+   "num_pages": 65536,
+   "page_size": 1,
+   "moe_cache_size": 2048,
+   "num_mamba_slots": 28,
+   "num_experts": 256,
+   "num_moe_layers": 40,
+   "moe_cache_policy": "lru",
+   "unit_bytes": {
+    "kv_per_token": 20480,
+    "moe_per_expert": 1775616,
+    "mamba_per_slot": 64389120,
+    "swa_per_token": 0
+   },
+   "swa_full_tokens_ratio": 0.0,
+   "swa_page_size": 0,
+   "num_swa_pages": 0,
+   "cache_budget_bytes": 18684425011,
+   "reasoning": {
+    "gears": [
+     "off",
+     "on"
+    ],
+    "default": "on",
+    "kwargs": {
+     "off": {
+      "enable_thinking": false,
+      "thinking_mode": "disabled"
+     },
+     "on": {
+      "enable_thinking": true,
+      "thinking_mode": "enabled"
+     }
+    }
+   },
+   "gdn_replayssm": {
+    "active": true,
+    "buffer_len": 32,
+    "request_capacity": 4,
+    "state_budget_bytes": 2000000000,
+    "checkpoint_bytes": 1867284480,
+    "record_bytes": 47677440,
+    "conv_workspace_bytes": 23592960,
+    "metadata_bytes": 84,
+    "state_workspace_bytes": 0,
+    "reserved_bytes": 1938554964
+   },
+   "dflash": {
+    "active": true,
+    "full_context_bytes": 268439552,
+    "window_context_bytes": 514641920,
+    "metadata_bytes": 2921800,
+    "workspace_bytes": 17827168,
+    "compact_kv": true,
+    "attention_window": 0,
+    "window_tokens": 4095,
+    "full_token_bytes": 4096,
+    "window_token_bytes": 20480,
+    "window_capacity_limit": 25128,
+    "window_slots": 25128,
+    "window_free_slots": 25128,
+    "weight_bytes": 771812352,
+    "context_bytes": 783081472,
+    "reserved_bytes": 1575642792
+   },
+   "limits": {
+    "kv_tokens": {
+     "min": 1,
+     "max": 738486
+    },
+    "moe_experts": {
+     "min": 256,
+     "max": 10070
+    },
+    "mamba_slots": {
+     "min": 16,
+     "max": 276
+    },
+    "swa_tokens": {
+     "min": 0,
+     "max": 0
+    }
+   }
+  },
+  "prefix_cache": {
+   "enabled": false,
+   "policy": "baseline",
+   "gpu_checkpoint_count": 20,
+   "active_state_count": 0,
+   "host_budget_bytes": 0,
+   "host_allocated_bytes": 0,
+   "host_used_bytes": 0,
+   "host_inflight_bytes": 0,
+   "transfer_device_bytes": 0,
+   "host_checkpoint_count": 0,
+   "restore_wait_ms": 0.0,
+   "h2d_bytes": 0,
+   "d2h_bytes": 0,
+   "h2d_batches": 0,
+   "d2h_batches": 0,
+   "h2d_time_ms": 0.0,
+   "d2h_time_ms": 0.0,
+   "checkpoint_created": 20,
+   "checkpoint_deduplicated": 0,
+   "checkpoint_pruned": 0,
+   "checkpoint_evicted": 0,
+   "gpu_checkpoint_peak": 20,
+   "host_checkpoint_peak": 0,
+   "gpu_reused_tokens": 0,
+   "host_reused_tokens": 0,
+   "recomputed_tokens": 7237,
+   "window_slots": {
+    "total": 25128,
+    "free": 13134,
+    "tree_locked": 0,
+    "tree_evictable": 11994,
+    "request_owned": 0,
+    "copy_inflight": 0
+   },
+   "components": [
+    {
+     "name": "paged_kv",
+     "storage_kind": "paged",
+     "device_allocated_bytes": 1342197760,
+     "host_used_bytes": 0,
+     "h2d_bytes": 0,
+     "d2h_bytes": 0
+    },
+    {
+     "name": "draft_kv",
+     "storage_kind": "paged",
+     "device_allocated_bytes": 268439552,
+     "host_used_bytes": 0,
+     "h2d_bytes": 0,
+     "d2h_bytes": 0
+    },
+    {
+     "name": "draft_window",
+     "storage_kind": "window",
+     "device_allocated_bytes": 514641920,
+     "host_used_bytes": 0,
+     "h2d_bytes": 0,
+     "d2h_bytes": 0
+    },
+    {
+     "name": "recurrent_state",
+     "storage_kind": "boundary_state",
+     "device_allocated_bytes": 1867284480,
+     "host_used_bytes": 0,
+     "h2d_bytes": 0,
+     "d2h_bytes": 0
+    }
+   ]
+  }
+ },
+ "checks": [
+  {
+   "session": "nvfp4_adaptive",
+   "check": "adaptive_whole_blocks:low",
+   "ok": true,
+   "histogram": [
+    2269,
+    0,
+    10,
+    2,
+    20,
+    0,
+    0,
+    0,
+    8
+   ]
+  },
+  {
+   "session": "nvfp4_adaptive",
+   "check": "adaptive_whole_blocks:high",
+   "ok": true,
+   "histogram": [
+    732,
+    4,
+    552,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "session": "nvfp4_adaptive",
+   "check": "adaptive_high_acceptance_drafts",
+   "ok": true,
+   "acceptance": 1.0,
+   "histogram": [
+    732,
+    4,
+    552,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ]
+  },
+  {
+   "session": "nvfp4_adaptive",
+   "check": "adaptive_recovers_after_ar",
+   "ok": true,
+   "low": {
+    "draft_tokens": 170,
+    "accepted_draft_tokens": 52,
+    "verify_steps": 11,
+    "emitted_tokens": 93,
+    "verify_positions": 211,
+    "verify_physical_positions": 229,
+    "dflash_draft_positions": 211,
+    "dflash_draft_physical_positions": 211,
+    "cost_ar_requests": 0,
+    "cost_stopped_requests": 0,
+    "cost_probe_requests": 0,
+    "histogram": [
+     2269,
+     0,
+     10,
+     2,
+     20,
+     0,
+     0,
+     0,
+     8
+    ],
+    "verify_rounds": {
+     "inwave": 0,
+     "outwave": 11
+    },
+    "verify_requests": {
+     "inwave": 0,
+     "outwave": 41
+    },
+    "fallback_requests": {
+     "draft_plan": 2265,
+     "tail": 3
+    },
+    "completion_tokens": 2373,
+    "requests": 12
+   },
+   "high": {
+    "draft_tokens": 1108,
+    "accepted_draft_tokens": 1108,
+    "verify_steps": 139,
+    "emitted_tokens": 1664,
+    "verify_positions": 1664,
+    "verify_physical_positions": 1664,
+    "dflash_draft_positions": 1664,
+    "dflash_draft_physical_positions": 1664,
+    "cost_ar_requests": 0,
+    "cost_stopped_requests": 0,
+    "cost_probe_requests": 0,
+    "histogram": [
+     732,
+     4,
+     552,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "verify_rounds": {
+     "inwave": 0,
+     "outwave": 139
+    },
+    "verify_requests": {
+     "inwave": 0,
+     "outwave": 556
+    },
+    "fallback_requests": {
+     "draft_plan": 732,
+     "tail": 0
+    },
+    "completion_tokens": 2400,
+    "requests": 4
+   }
+  },
+  {
+   "session": "nvfp4_adaptive",
+   "check": "stats_field:round_time",
+   "ok": true,
+   "found": [
+    [
+     "dflash_round_ms",
+     41642.734354019165
+    ]
+   ]
+  },
+  {
+   "session": "nvfp4_adaptive",
+   "check": "stats_field:proposal_time",
+   "ok": true,
+   "found": [
+    [
+     "dflash_proposal_ms",
+     462.2095379829407
+    ]
+   ]
+  },
+  {
+   "session": "nvfp4_adaptive",
+   "check": "stats_field:verify_time",
+   "ok": true,
+   "found": [
+    [
+     "dflash_verify_ms",
+     15627.968420028687
+    ]
+   ]
+  },
+  {
+   "session": "nvfp4_adaptive",
+   "check": "stats_field:timing_scope",
+   "ok": true,
+   "found": [
+    [
+     "dflash_timing_scope",
+     "round_ms: engine stream from the decision to the queued replies, including host gaps; proposal_ms: draft forward, probabilities, sampling and candidate writes; verify_ms: target verification forward; round_ms contains both"
+    ]
+   ]
+  },
+  {
+   "session": "nvfp4_adaptive",
+   "check": "stats_field:fixed_rounds",
+   "ok": true,
+   "found": [
+    [
+     "dflash_fixed_rounds",
+     0
+    ]
+   ]
+  },
+  {
+   "session": "nvfp4_adaptive",
+   "check": "stats_field:resource_clipped_requests",
+   "ok": true,
+   "found": [
+    [
+     "clipped_requests",
+     "{...}"
+    ],
+    [
+     "clipped_requests.tail",
+     17
+    ],
+    [
+     "clipped_requests.capacity",
+     0
+    ],
+    [
+     "dflash_clipped_requests",
+     7
+    ]
+   ]
+  },
+  {
+   "session": "nvfp4_adaptive",
+   "check": "stats_field:controller_cpu_time",
+   "ok": true,
+   "found": [
+    [
+     "cost_control_ms",
+     0.0
+    ],
+    [
+     "dflash_decisions",
+     912
+    ],
+    [
+     "dflash_decision_us",
+     34752.377250697464
+    ],
+    [
+     "dflash_decision_us_histogram",
+     "{...}"
+    ],
+    [
+     "dflash_decision_us_histogram.bucket_us",
+     5
+    ],
+    [
+     "dflash_decision_us_histogram.counts",
+     [
+      0,
+      0,
+      0,
+      0,
+      1,
+      4,
+      247,
+      415,
+      208,
+      22,
+      8,
+      5,
+      0,
+      0,
+      2,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    ]
+   ]
+  },
+  {
+   "session": "nvfp4_adaptive",
+   "check": "stats_field:cost_samples",
+   "ok": true,
+   "found": [
+    [
+     "cost_samples",
+     "{...}"
+    ],
+    [
+     "cost_samples.ar",
+     0
+    ],
+    [
+     "cost_samples.draft",
+     0
+    ],
+    [
+     "cost_samples.verify",
+     0
+    ],
+    [
+     "dflash_samples",
+     912
+    ]
+   ]
+  },
+  {
+   "session": "nvfp4_adaptive",
+   "check": "stats_field:dropped_samples",
+   "ok": true,
+   "found": [
+    [
+     "dflash_rounds_dropped",
+     0
+    ]
+   ]
+  },
+  {
+   "session": "nvfp4_adaptive",
+   "check": "stats_field:initialisation",
+   "ok": true,
+   "found": [
+    [
+     "dflash_init_rounds",
+     4
+    ],
+    [
+     "dflash_init_ms",
+     362.0105972290039
+    ]
+   ]
+  },
+  {
+   "session": "nvfp4_adaptive",
+   "check": "stats_field:probes",
+   "ok": true,
+   "found": [
+    [
+     "cost_probe_requests",
+     0
+    ],
+    [
+     "dflash_probe_rounds",
+     7
+    ],
+    [
+     "dflash_probe_ms",
+     461.40839195251465
+    ]
+   ]
+  },
+  {
+   "session": "nvfp4_adaptive",
+   "check": "stats_field:ar_fallback",
+   "ok": true,
+   "found": [
+    [
+     "fallback_requests",
+     "{...}"
+    ],
+    [
+     "fallback_requests.draft_plan",
+     2997
+    ],
+    [
+     "fallback_requests.tail",
+     3
+    ],
+    [
+     "cost_ar_requests",
+     0
+    ]
+   ]
+  }
+ ]
+}

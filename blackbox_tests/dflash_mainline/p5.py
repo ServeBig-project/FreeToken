@@ -67,10 +67,11 @@ def wave(server, tokenizer, prompts, max_tokens, concurrent):
             time.sleep(0.5)
     watcher = threading.Thread(target=poll)
     watcher.start()
-    before = server.stats()
+    before, pc0 = server.stats(), server.status()["prefix_cache"]
     calls = [lambda p=p: timed_stream(server, p, max_tokens) for p in prompts]
     results = server.parallel(calls) if concurrent else [call() for call in calls]
     after = server.wait_idle()
+    pc1 = server.status()["prefix_cache"]
     stop.set()
     watcher.join()
     rates = []
@@ -83,6 +84,8 @@ def wave(server, tokenizer, prompts, max_tokens, concurrent):
                                                                                           "target_decode")}
     return {"decode_tok_s": statistics.mean(rates), "acceptance": acceptance(delta), "delta": delta,
             "texts": [r["text"] for r in results],
+            "prefix_cache": {k: pc1[k] - pc0[k] for k in ("gpu_reused_tokens", "host_reused_tokens",
+                                                            "recomputed_tokens")},
             "graph_replays": graph, "peak_gpu_mib": max(peak)}
 
 
@@ -101,7 +104,8 @@ def perf_run(server, c):
         eager = [w["delta"]["verify_steps"] - w["graph_replays"]["verify"] for w in out[name]]
         c.note(f"perf:{name}", decode_tok_s=[round(w["decode_tok_s"], 2) for w in out[name]],
                acceptance=[round(w["acceptance"], 3) for w in out[name]],
-               peak_gpu_mib=max(w["peak_gpu_mib"] for w in out[name]), verify_rounds_not_on_graph=eager)
+               peak_gpu_mib=max(w["peak_gpu_mib"] for w in out[name]), verify_rounds_not_on_graph=eager,
+               prefix_cache=[w["prefix_cache"] for w in out[name]])
         c.check(f"perf_graph_used:{name}", all(w["graph_replays"]["verify"] > 0 for w in out[name]),
                 replays=[w["graph_replays"] for w in out[name]])
     out["status"] = server.status()["geometry"]["dflash"]

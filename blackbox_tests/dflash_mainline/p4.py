@@ -288,7 +288,7 @@ PLAN = {
     "nvfp4_n4": [quality, graph_ragged, fixed_stats_and_api],
     "nvfp4_n8_eager": [quality, graph_ragged],
     "nvfp4_n8_noreplay": [graph_ragged],
-    "nvfp4_adaptive": [quality],  # smoke
+    "nvfp4_adaptive": [quality, adaptive_policy],
     "nvfp4_observe": [quality, observe_only],
     "nvfp4_c16": [c16_matrix],
     "nvfp4_lp_inwave": [wave_overlap],  # smoke
