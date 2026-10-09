@@ -127,7 +127,7 @@ def over_context(svc, salt):
     assert t.n(big) > ctx
     code, j = svc.c.generate(big, 16, ignore_eos=True, timeout=300)
     assert 400 <= code < 500 and (j.get("error") or {}).get("code") == "context_length_exceeded", (code, j)
-    assert "shared runtime" in j["error"]["message"], j
+    assert j["error"]["message"].startswith("prompt is too long"), j  # the existing length error, before admission
     s = svc.c.stream(big, 16, ignore_eos=True)
     run_streams([s], 300)
     assert s.error and s.error.get("code") == "context_length_exceeded" and not s.text, s.summary()
@@ -140,7 +140,7 @@ def over_context(svc, salt):
         assert 0 < u["completion_tokens"] <= ctx - u["prompt_tokens"], u
         assert j["choices"][0]["finish_reason"] == "length", j["choices"][0]
     else:
-        assert 400 <= code < 500 and (j.get("error") or {}).get("code"), (code, j)
+        assert 400 <= code < 500 and (j.get("error") or {}).get("code") == "context_length_exceeded", (code, j)
     record(f"{svc.name}:over_context", ctx=ctx, big_tokens=t.n(big), near=(code, j.get("usage") or j))
     svc.c.wait_idle(60)
     assert_length(svc.c.complete(enum_prompt(salt, 12), 16), 16)
