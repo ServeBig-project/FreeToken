@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from service_common import (GIB, Watch, assert_enum, assert_length, cached_tokens, components, counter_delta,
+from service_common import (GIB, Watch, assert_enum, assert_length, cached_tokens, components, counter_delta, dump,
                             enum_prompt, graph_replays, overlap, record, run_streams, sd_num,
                             start_streams, tok, wait_streams)
 
@@ -50,6 +50,7 @@ def pause_round(svc, salt, out=1200, items=40, preamble="", probe_busy=True):
     delta = counter_delta(rt0, svc.rt())
     record(f"{svc.name}:pause_round", k=k, out=out, delta=delta, busy=busy, watch=w.report(),
            streams=[s.summary() for s in streams])
+    dump(f"{svc.name}_pause_texts", [s.text for s in streams])
     assert not w.violations, w.report()
     _check_enum_streams(streams, [s + items for s in starts], out)
     prompt_tokens = {s.usage["prompt_tokens"] for s in streams}
@@ -64,11 +65,13 @@ def pause_round(svc, salt, out=1200, items=40, preamble="", probe_busy=True):
 
 
 def cancel_round(svc, salt, out=1200, items=40, preamble=PREAMBLE):
-    """Same load with a shared prefix; once a pause is observed the two newest requests are
-    cancelled. The others finish intact, the cancelled ones are reclaimed, service continues."""
+    """Same load with a shared prefix; once a pause is observed the newest requests (two, or
+    one when only two run) are cancelled. The others finish intact, the cancelled ones are
+    reclaimed, service continues."""
     k = concurrency(svc)
-    if k < 3:
-        pytest.skip(f"effective concurrency {k} leaves no request to cancel beside two survivors")
+    if k < 2:
+        pytest.skip(f"effective concurrency {k} leaves no request to cancel beside a survivor")
+    n = min(2, k - 1)
     starts = [salt + 1000 * i for i in range(k)]
     streams = [svc.c.stream(enum_prompt(s, items, preamble), out, ignore_eos=True) for s in starts]
     rt0 = svc.rt()
@@ -77,7 +80,7 @@ def cancel_round(svc, salt, out=1200, items=40, preamble=PREAMBLE):
     end = time.monotonic() + 1800
     while cancelled_at is None and time.monotonic() < end and not all(f.done() for f in futures):
         if svc.rt()["paused"] > rt0["paused"]:
-            for s in streams[-2:]:
+            for s in streams[-n:]:
                 s.cancel()
             cancelled_at = time.monotonic()
         time.sleep(0.2)
@@ -87,8 +90,8 @@ def cancel_round(svc, salt, out=1200, items=40, preamble=PREAMBLE):
            streams=[s.summary() for s in streams])
     if cancelled_at is None:
         pytest.skip("no pause was observed in this round, so cancel-during-pause was not exercised")
-    _check_enum_streams(streams[:-2], [s + items for s in starts[:-2]], out)
-    for s in streams[-2:]:
+    _check_enum_streams(streams[:-n], [s + items for s in starts[:-n]], out)
+    for s in streams[-n:]:
         assert s.cancelled and not s.done, s.summary()
     svc.c.wait_idle(120)  # the cancelled requests are released as well
     assert_length(svc.c.complete(enum_prompt(salt + 777, 12), 32), 32)

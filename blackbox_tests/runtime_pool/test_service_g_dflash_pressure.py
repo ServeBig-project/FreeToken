@@ -13,6 +13,7 @@ from service_common import (COMMON, DFLASH_ARGS, assert_length, components, enum
                             sd_enabled, sd_num, service)
 from service_scenarios import cancel_round, pause_round
 
+
 NAME = "g_dflash_pressure"
 ARGS = COMMON + ["--runtime-cache-gib", "0.5", "--max-running-requests", "6", "--prefix-cache-host-gib", "4",
                  "--enable-gdn-replayssm", "--enable-cache-report"] + DFLASH_ARGS
@@ -38,11 +39,15 @@ def test_ready_sd_with_replay(svc):
 
 def test_paused_sd_requests_restore_and_complete(svc):
     before = sd_num(svc.c.stats(), "rounds")
-    r = pause_round(svc, salt=1000)
+    r = pause_round(svc, salt=1000, out=3000, items=600)  # ~3k-token private histories: two cannot both stay
     d = r["delta"]
     rounds = sd_num(svc.c.stats(), "rounds") - before
     record(f"{NAME}:pause_sd", delta=d, sd_rounds=rounds)
-    assert d["paused"] >= 1 and d["restored"] >= 1, d
+    # a request yielding during prefill is recomputed from its reusable prefix, a decoding one is
+    # saved to the host and restored (public configuration); either way the work is reported
+    assert d["paused"] >= 1 and d["restored"] + d["recompute"] >= 1, d
+    if d["recompute"]:
+        assert d["recomputed_tokens"] > 0, d
     assert rounds > 0, "no SD round during the pressure round"
     after = sd_num(svc.c.stats(), "rounds")
     assert_length(svc.c.complete(enum_prompt(90000, 12), 64), 64)
@@ -50,4 +55,4 @@ def test_paused_sd_requests_restore_and_complete(svc):
 
 
 def test_cancel_during_pause_others_continue(svc):
-    cancel_round(svc, salt=20000)
+    cancel_round(svc, salt=20000, out=3000, items=600, preamble="")
