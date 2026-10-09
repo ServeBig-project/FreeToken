@@ -430,7 +430,8 @@ class CacheManager:
         if self.host is not None:
             out.update(self.host.status())
         if self.page_units is not None:
-            out["runtime"] = dict(self.page_units.blocks.status(), **self.paused_stats)
+            out["runtime"] = dict(self.page_units.blocks.status(), **self.paused_stats,
+                                  evictable_bytes=self._evictable_bytes())
         if self.swa_paged:
             # Physical slots: free, held by the tree (locked by request handles or window
             # copies, else evictable), and the rest owned by running requests. Copies in
@@ -1000,6 +1001,13 @@ class CacheManager:
         if state.copies is not None:  # another TP rank keeps no copy: all recompute
             self.discard_paused(state)
         return None
+
+    def _evictable_bytes(self) -> int:
+        """Cached prefix data no request holds: claims reclaim it for any component."""
+        unit = lambda units: sum(length for *_, length in units.banks) if units else 0
+        pages = self._evictable("kv") // self.page_size * unit(self.page_units)
+        states = self._evictable("state") * unit(getattr(self.linear_state_pool, "units", None))
+        return pages + states
 
     def drop_cached(self) -> None:
         """Release every unlocked cached prefix from the GPU, so the next claims, taking the
