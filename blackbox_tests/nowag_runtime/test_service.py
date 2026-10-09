@@ -70,28 +70,31 @@ def test_execution_modes(backend):
 def test_offload_with_cpu_layers(cpu_layers):
     """CPU expert compute for part of the layers (§9: accepted via the service only)."""
     gpu = need_gpu()
+    ref = offload_reference()
     with Server(f"svc_cpu_layers_{cpu_layers}", qwen("--moe-cpu-layers", cpu_layers), gpu) as s:
-        cross_path(offload_reference(), run_prompts(s), f"--moe-cpu-layers {cpu_layers}")
+        cross_path(ref, run_prompts(s), f"--moe-cpu-layers {cpu_layers}")
         mixed_load(s)
 
 
 @pytest.mark.parametrize("cache", CACHE_SIZES)
 def test_cache_capacity(cache):
     gpu = need_gpu()
+    ref = offload_reference()
     with Server(f"svc_cache_{cache}", qwen(cache=cache), gpu) as s:
-        cross_path(offload_reference(), run_prompts(s), f"cache {cache}")
+        cross_path(ref, run_prompts(s), f"cache {cache}")
 
 
 @pytest.mark.parametrize("policy", ["legacy", "mixed", "layered", "joint", "layered-pipeline"])
 def test_batching_policy(policy):
     """Each policy either works with the same weights or is refused before ready."""
     gpu = need_gpu()
+    ref = offload_reference()
     try:
         server = Server(f"svc_policy_{policy}", qwen("--batching-policy", policy), gpu)
     except StartupFailed as refused:
         pytest.skip(f"{policy} refused before ready (exit {refused.code}); record as rejection")
     with server as s:
-        cross_path(offload_reference(), run_prompts(s), f"policy {policy}")
+        cross_path(ref, run_prompts(s), f"policy {policy}")
         mixed_load(s)
 
 
@@ -142,19 +145,21 @@ def test_http_semantics():
 @pytest.mark.parametrize("steps", [1, 2, 4, 8])
 def test_self_speculative(steps):
     gpu = need_gpu()
+    ref = offload_reference()
     with Server(f"svc_selfsd_{steps}", qwen("--speculative-num-steps", steps), gpu) as s:
-        cross_path(offload_reference(), run_prompts(s), f"self-SD N={steps}")
+        cross_path(ref, run_prompts(s), f"self-SD N={steps}")
         mixed_load(s)
 
 
 @pytest.mark.parametrize("steps", [2, 8])
 def test_dflash_speculative(steps):
     gpu = need_gpu()
+    ref = offload_reference()
     draft = need_path(DFLASH_DRAFT, "DFlash draft for Qwen3.6 (NOWAG_DFLASH_DRAFT)")
     args = qwen("--speculative-num-steps", steps, "--speculative-draft-model-path", draft,
                 *DFLASH_ARGS)
     with Server(f"svc_dflash_{steps}", args, gpu) as s:
-        cross_path(offload_reference(), run_prompts(s), f"DFlash N={steps}")
+        cross_path(ref, run_prompts(s), f"DFlash N={steps}")
         mixed_load(s)
 
 
@@ -238,11 +243,15 @@ def measure(s, tokens=128):
     s.greedy(["warm up the server please"], 8)
     rows = []
     for p, _ in PROMPTS:
-        r = s.stream(p, tokens)
-        n = max(len(r["chunks"]) - 1, 1)
+        r = s.stream(p, tokens, stream_options={"include_usage": True})
+        assert r["done"] and r["usage"] and r["ttft"] is not None, r
+        n = r["usage"]["completion_tokens"]
+        assert n > 1, "need at least two generated tokens to measure decode"
         rows.append({"ttft": r["ttft"], "e2e": r["seconds"],
-                     "decode_tps": n / max(r["seconds"] - r["ttft"], 1e-9)})
-    return {k: statistics.median(row[k] for row in rows) for k in rows[0]}
+                     "decode_tps": (n - 1) / max(r["seconds"] - r["ttft"], 1e-9),
+                     "completion_tokens": n})
+    return {"timings": {k: statistics.median(row[k] for row in rows)
+                        for k in ("ttft", "e2e", "decode_tps")}, "requests": rows}
 
 
 @pytest.mark.parametrize("config", sorted(PERF))
@@ -263,9 +272,13 @@ def test_paired_performance(config):
                     pytest.skip(f"{config} not supported before the feature; report absolute values")
                 raise
         blocks.append(block)
+        assert [r["completion_tokens"] for r in block["baseline"]["requests"]] == \
+            [r["completion_tokens"] for r in block["candidate"]["requests"]], \
+            "paired timings need the same generated token count"
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     (LOG_DIR / f"perf_{config}_{time.strftime('%H%M%S')}.json").write_text(json.dumps(blocks, indent=1))
-    med = {side: {k: statistics.median(b[side][k] for b in blocks) for k in blocks[0][side]}
+    med = {side: {k: statistics.median(b[side]["timings"][k] for b in blocks)
+                  for k in blocks[0][side]["timings"]}
            for side in ("baseline", "candidate")}
     b, c = med["baseline"], med["candidate"]
     assert c["ttft"] <= 1.05 * b["ttft"], med

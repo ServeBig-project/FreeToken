@@ -168,11 +168,13 @@ def stream(url, path, body, cancel_after=None, timeout=900):
                 done = True
                 break
             chunks.append(json.loads(data))
-            if first is None:
+            if first is None and any(c.get("text") for c in chunks[-1].get("choices", [])):
                 first = time.monotonic() - started
             if cancel_after is not None and len(chunks) >= cancel_after:
                 break
+    usage = next((c["usage"] for c in reversed(chunks) if c.get("usage")), None)
     return {"chunks": chunks, "done": done, "ttft": first, "seconds": time.monotonic() - started,
+            "usage": usage,
             "text": "".join(c["choices"][0].get("text", "") for c in chunks if c.get("choices"))}
 
 
