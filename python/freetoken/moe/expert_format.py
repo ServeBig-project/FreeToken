@@ -89,6 +89,9 @@ class ExpertMath:
     activation_alpha: float = 1.702
     activation_limit: float | None = None
     router_weight_on_input: bool = False
+    # The router weight scales the down projection's input (after the gated
+    # activation, before any down input rounding) instead of its output.
+    router_weight_on_down_input: bool = False
     gate_up_input_rounding: str | None = None
     down_input_rounding: str | None = None
 
@@ -129,6 +132,7 @@ def expert_math(layer) -> ExpertMath:
         activation_alpha=getattr(layer, "hidden_act_alpha", 1.702),
         activation_limit=getattr(layer, "swiglu_limit", None),
         router_weight_on_input=layer.apply_router_weight_on_input,
+        router_weight_on_down_input=getattr(layer, "router_weight_on_down_input", False),
         gate_up_input_rounding=getattr(layer, "gate_up_input_rounding", None),
         down_input_rounding=getattr(layer, "down_input_rounding", None),
     )
@@ -243,7 +247,8 @@ def _run_ds_fp4(math, resident, x, rows, weights, banks, shared, *, workspace=No
                 prefill=False, sort_rows=None, expert_map=None):
     # Grouped inline-dequant GEMM for streaming prefill chunks; per-route dequant GEMV
     # for decode and the sparse small-chunk slot path (sorting the whole slot cache
-    # would drown in padding).
+    # would drown in padding). These kernels apply the router weight to the down
+    # output, not to its input as DSV4 defines; kept as is.
     w = tuple(banks[name] for name in _BANK_SCHEMAS["ds_fp4"])
     if prefill and sort_rows is not None:
         from freetoken.moe.fused_ds_fp4 import routed_experts_fp4_prefill

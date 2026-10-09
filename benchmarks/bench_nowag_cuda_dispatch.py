@@ -375,6 +375,8 @@ def main() -> None:
                     middle_workspace=middle,
                     route_output_workspace=route_output,
                     swiglu_limit=activation_identity["swiglu_limit"],
+                    # DSV4 weights the Down input; only Triton implements that.
+                    router_weight_on_middle=dsv4,
                     gate_up_input_rounding=rounding,
                     down_input_rounding=rounding,
                     down_norm_placement=activation_identity["down_norm_placement"],

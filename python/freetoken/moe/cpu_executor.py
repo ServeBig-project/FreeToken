@@ -193,6 +193,7 @@ class CpuMoeExecutor:
         swiglu_limit: float | None = None,
         gate_up_input_rounding: str | None = None,
         down_input_rounding: str | None = None,
+        router_weight_on_down_input: bool = False,
     ) -> None:
         from freetoken.kernel import _cpu_moe
 
@@ -232,14 +233,19 @@ class CpuMoeExecutor:
         self.quant_format = fmt
         self.device = device
         self.max_tokens = int(max_tokens)
-        nowag_flags = (False, False, False)
+        nowag_flags = (False, False, False, False)
         if fmt == "nowag":
             from freetoken.moe.expert_format import ExpertMath
             from freetoken.moe.nowag.method import nowag_cpu_flags
 
             nowag_flags = nowag_cpu_flags(ExpertMath(
-                activation, swiglu_alpha, swiglu_limit, bool(apply_router_weight_on_input),
-                gate_up_input_rounding, down_input_rounding,
+                activation=activation,
+                activation_alpha=swiglu_alpha,
+                activation_limit=swiglu_limit,
+                router_weight_on_input=bool(apply_router_weight_on_input),
+                router_weight_on_down_input=router_weight_on_down_input,
+                gate_up_input_rounding=gate_up_input_rounding,
+                down_input_rounding=down_input_rounding,
             ))
         router_weight_on_input = bool(apply_router_weight_on_input)
         self.apply_router_weight_on_input = router_weight_on_input
@@ -295,6 +301,7 @@ class CpuMoeExecutor:
             nowag_round_input=nowag_flags[0],
             nowag_round_middle=nowag_flags[1],
             nowag_preapply_down_norm=nowag_flags[2],
+            nowag_weight_middle=nowag_flags[3],
             core_ids=core_ids,
             **ptrs,
         )

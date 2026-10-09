@@ -588,6 +588,7 @@ if triton is not None:
         down_input_norm_ptr,
         gate_bias_ptr,
         up_bias_ptr,
+        topk_weights_ptr,
         sorted_ticket_ids_ptr,
         expert_ids_ptr,
         num_tickets_post_padded_ptr,
@@ -633,6 +634,7 @@ if triton is not None:
         ACTIVATION: tl.constexpr,
         ACTIVATION_ALPHA: tl.constexpr,
         HAS_BIAS: tl.constexpr,
+        WEIGHT_MIDDLE: tl.constexpr,
         PREAPPLY_DOWN_NORM: tl.constexpr,
         SORTED_MIDDLE_LAYOUT: tl.constexpr,
         ALIGNMENT_BLOCK_RATIO: tl.constexpr,
@@ -850,6 +852,9 @@ if triton is not None:
             middle = gate_fp32 * tl.sigmoid(2.0 * inner) * up_fp32
         else:
             middle = gate_fp32 * tl.sigmoid(ACTIVATION_ALPHA * gate_fp32) * (up_fp32 + 1.0)
+        if WEIGHT_MIDDLE:
+            # The router weight scales the Down input before any Down rounding.
+            middle *= tl.load(topk_weights_ptr + tickets, mask=valid_ticket, other=0.0)[:, None]
         if PREAPPLY_DOWN_NORM:
             # Match the legacy sequence exactly: first round the SiLU*up
             # result as if it had been stored/reloaded, then multiply the
@@ -913,6 +918,7 @@ if triton is not None:
         PACKED_12_BLOCK_DECODE: tl.constexpr,
         PREAPPLIED_DOWN_NORM: tl.constexpr,
         HAS_BIAS: tl.constexpr,
+        APPLY_ROUTER_WEIGHT: tl.constexpr,
         SORTED_MIDDLE_LAYOUT: tl.constexpr,
         GROUPED_SCHEDULE: tl.constexpr,
         NUM_PID_N: tl.constexpr,
@@ -1052,7 +1058,8 @@ if triton is not None:
             accumulator += tl.load(
                 down_bias_ptr + expert * n_size + offsets_n, mask=valid_n, other=0.0
             )[None, :]
-        accumulator *= router_weight[:, None]
+        if APPLY_ROUTER_WEIGHT:
+            accumulator *= router_weight[:, None]
         tl.store(
             route_output_ptr
             + tickets[:, None] * stride_rom
@@ -1391,6 +1398,7 @@ def nowag_fused_moe(
     swiglu_limit: float | None = None,
     activation_kind: ActivationKind = SILU_MUL,
     activation_alpha: float = 1.702,
+    router_weight_on_middle: bool = False,
     gate_bias: torch.Tensor | None = None,
     up_bias: torch.Tensor | None = None,
     down_bias: torch.Tensor | None = None,
@@ -1461,7 +1469,8 @@ def nowag_fused_moe(
     ``swiglu_limit`` clamps gate (max) and up (both signs) before the
     activation.  ``activation_kind`` other than ``silu_mul`` and the optional
     contiguous ``[E, N]`` biases run on the Triton kernels only; ``auto``
-    resolves to Triton for them.  The two rounding fields describe
+    resolves to Triton for them.  So does ``router_weight_on_middle``, which
+    scales the Down input (before ``middle_transform``) instead of its output.  The two rounding fields describe
     optional storage round-trips around the expert math; their callables do
     the actual conversion without tying this kernel to one serving runtime.
     When Down is rounded, its normalizer belongs in ``down_prologue`` so the
@@ -1562,13 +1571,17 @@ def nowag_fused_moe(
         hidden_states = transformed_input
     if (gate_bias is None) != (up_bias is None):
         raise ValueError("gate_bias and up_bias must be provided together")
-    if activation_kind != SILU_MUL or gate_bias is not None or down_bias is not None:
+    if (activation_kind != SILU_MUL or gate_bias is not None or down_bias is not None
+            or router_weight_on_middle):
         if gate_up_backend == AUTO_GATE_UP_BACKEND:
             gate_up_backend = TRITON_GATE_UP_BACKEND
         if down_backend == AUTO_DOWN_BACKEND:
             down_backend = TRITON_DOWN_BACKEND
         if (gate_up_backend, down_backend) != (TRITON_GATE_UP_BACKEND, TRITON_DOWN_BACKEND):
-            raise ValueError("non-SiLU activations and expert biases require the Triton backends")
+            raise ValueError(
+                "non-SiLU activations, expert biases and Down-input router weights "
+                "require the Triton backends"
+            )
     if (align_routes is None) != (sum_routes is None):
         raise ValueError("align_routes and sum_routes must be provided together")
     if caller_owned_alignment_storage and align_routes is None:
@@ -2455,6 +2468,7 @@ def nowag_fused_moe(
             down_input_norm,
             gate_output_norm if gate_bias is None else gate_bias,
             up_output_norm if up_bias is None else up_bias,
+            topk_weights,
             sorted_tickets,
             expert_ids,
             num_tickets_post_padded,
@@ -2496,6 +2510,7 @@ def nowag_fused_moe(
             ACTIVATION=_ACTIVATION_IDS[activation_math.activation_kind],
             ACTIVATION_ALPHA=float(activation_math.activation_alpha),
             HAS_BIAS=gate_bias is not None,
+            WEIGHT_MIDDLE=router_weight_on_middle,
             PREAPPLY_DOWN_NORM=preapply_down_norm,
             SORTED_MIDDLE_LAYOUT=structural_down,
             ALIGNMENT_BLOCK_RATIO=alignment_block_ratio,
@@ -2610,6 +2625,7 @@ def nowag_fused_moe(
             PACKED_12_BLOCK_DECODE=use_block12_decoder,
             PREAPPLIED_DOWN_NORM=preapply_down_norm,
             HAS_BIAS=down_bias is not None,
+            APPLY_ROUTER_WEIGHT=not router_weight_on_middle,
             SORTED_MIDDLE_LAYOUT=structural_down,
             GROUPED_SCHEDULE=grouped_schedule,
             NUM_PID_N=down_num_pid_n,

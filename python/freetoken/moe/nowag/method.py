@@ -108,7 +108,8 @@ def bind_nowag_method(
     run = partial(_run, math, layout, state, kernel_backend)
     # Auto picks the CUDA Exact-K48 kernels from measured profiles, which exist only for
     # D6 SiLU experts.
-    exact = kernel_backend == "auto" and state.d == 6 and math.activation in ("silu", "swish")
+    exact = (kernel_backend == "auto" and state.d == 6 and math.activation in ("silu", "swish")
+             and not math.router_weight_on_down_input)
     return ExpertMethod(
         run=run,
         workspace_spec=partial(_workspace_spec, layout),
@@ -211,6 +212,7 @@ def _run(
             workspace["route_output"][: slots.numel()] if workspace else None
         ),
         swiglu_limit=math.activation_limit,
+        router_weight_on_middle=math.router_weight_on_down_input,
         activation_kind=_ACTIVATION_KINDS[math.activation],
         activation_alpha=math.activation_alpha,
         gate_bias=banks.get("gate_bias"),
@@ -242,10 +244,12 @@ def _run(
 
 
 def nowag_cpu_flags(math: ExpertMath) -> tuple[bool, bool, bool]:
-    """``(round_input, round_middle, preapply_down_norm)`` for the C++ NoWAG GEMV."""
+    """``(round_input, round_middle, preapply_down_norm, weight_middle)`` for the C++
+    NoWAG GEMV."""
     check_nowag_math(math)
     return (
         math.gate_up_input_rounding is not None,
         math.down_input_rounding is not None,
         math.down_input_rounding is None,
+        math.router_weight_on_down_input,
     )

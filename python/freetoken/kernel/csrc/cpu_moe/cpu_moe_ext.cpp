@@ -1486,6 +1486,8 @@ struct NowagMath {
   bool round_middle;
   bool preapply_down_norm;
   bool router_weight_on_input;
+  // Router weight scales the down input before its rounding (DSV4), not the output.
+  bool weight_middle;
 };
 
 struct NowagLayerBanks {
@@ -1651,7 +1653,8 @@ struct CpuMoeExecutor {
                  uintptr_t nowag_codebook_ptr, double swiglu_alpha_,
                  double swiglu_limit_, bool nowag_round_input_,
                  bool nowag_round_middle_, bool nowag_preapply_down_norm_,
-                 int nowag_group_size, std::vector<int> core_ids_)
+                 bool nowag_weight_middle_, int nowag_group_size,
+                 std::vector<int> core_ids_)
       : num_threads(num_threads_ > 0 ? num_threads_ : 1),
         num_layers(num_layers_),
         num_experts(num_experts_),
@@ -1673,7 +1676,7 @@ struct CpuMoeExecutor {
         nowag_codebook(reinterpret_cast<const bf16_t*>(nowag_codebook_ptr)),
         nowag_math{nowag_round_input_, nowag_round_middle_,
                    nowag_preapply_down_norm_,
-                   apply_router_weight_on_input != 0},
+                   apply_router_weight_on_input != 0, nowag_weight_middle_},
         swiglu_alpha(static_cast<float>(swiglu_alpha_)),
         swiglu_limit(static_cast<float>(swiglu_limit_)),
         core_ids(std::move(core_ids_)) {
@@ -2079,9 +2082,10 @@ struct CpuMoeExecutor {
       if (gv > lim) gv = lim;
       if (uv > lim) uv = lim;
       else if (uv < -lim) uv = -lim;
-      const bf16_t middle = f32_to_bf16(act == ACT_SWIGLUOAI
+      const float middle_scale = nowag_math.weight_middle ? t->w[r] : 1.0f;
+      const bf16_t middle = f32_to_bf16(middle_scale * (act == ACT_SWIGLUOAI
           ? gv / (1.0f + std::exp(-gv * swiglu_alpha)) * (uv + 1.0f)
-          : act_apply(act, gv) * uv);
+          : act_apply(act, gv) * uv));
       g_row[i] = nowag_math.preapply_down_norm
           ? f32_to_bf16(bf16_to_f32(middle) * bf16_to_f32(down_in_norm[i]))
           : middle;
@@ -2120,7 +2124,8 @@ struct CpuMoeExecutor {
       float part[HBLK];
       nowag_gemv(part, down_assign, g, nowag_codebook,
                  I, H, nowag_dn_words, h0, h1);
-      const float route_scale = nowag_math.router_weight_on_input ? 1.0f : t->w[r];
+      const float route_scale =
+          nowag_math.router_weight_on_input || nowag_math.weight_middle ? 1.0f : t->w[r];
       for (int h = h0; h < h1; ++h) {
         // GPU stores each route output in BF16 before the Top-K reduction.
         const float route = bf16_to_f32(f32_to_bf16(
@@ -2607,7 +2612,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::class_<CpuMoeExecutor>(m, "CpuMoeExecutor")
       .def(py::init<int, int, int, int, int, int, int, int, int, int, uintptr_t, uintptr_t,
                     uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t,
-                    uintptr_t, uintptr_t, double, double, bool, bool, bool, int,
+                    uintptr_t, uintptr_t, double, double, bool, bool, bool, bool, int,
                     std::vector<int>>(),
            py::arg("num_threads"), py::arg("num_layers"), py::arg("num_experts"),
            py::arg("top_k"), py::arg("hidden_size"), py::arg("inter_size"),
@@ -2620,7 +2625,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("nowag_codebook_ptr"), py::arg("swiglu_alpha"),
            py::arg("swiglu_limit"), py::arg("nowag_round_input"),
            py::arg("nowag_round_middle"), py::arg("nowag_preapply_down_norm"),
-           py::arg("nowag_group_size"), py::arg("core_ids"))
+           py::arg("nowag_weight_middle"), py::arg("nowag_group_size"), py::arg("core_ids"))
       .def("create_task", &CpuMoeExecutor::create_task, py::arg("layer_id"),
            py::arg("num_tokens"), py::arg("x_ptr"), py::arg("ids_ptr"), py::arg("w_ptr"),
            py::arg("y_ptr"))

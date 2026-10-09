@@ -88,9 +88,11 @@ class DSV4OffloadMoELayer(OffloadMoELayer):
             activation="silu",
         )
         self.swiglu_limit = args.swiglu_limit
-        # DSV4 experts compute on E4M3-rounded inputs (both GEMMs).
+        # DSV4 experts compute on E4M3-rounded inputs (both GEMMs), and the router
+        # weight scales the down input before its rounding.
         self.gate_up_input_rounding = E4M3_GROUP128_UE8M0
         self.down_input_rounding = E4M3_GROUP128_UE8M0
+        self.router_weight_on_down_input = True
 
     def _prefill_routed(
         self,

@@ -113,6 +113,7 @@ class Workload:
     swiglu_limit: float | None = None
     gate_up_input_rounding: str | None = None
     down_input_rounding: str | None = None
+    router_weight_on_down_input: bool = False
 
 
 @dataclass(frozen=True)
@@ -137,7 +138,7 @@ WORKLOADS: dict[str, Workload] = {
     "dsv4": Workload(
         "dsv4", 4096, 2048, 256, 6, ("ds_fp4", "nowag"),
         swiglu_limit=7.0, gate_up_input_rounding=E4M3_GROUP128_UE8M0,
-        down_input_rounding=E4M3_GROUP128_UE8M0,
+        down_input_rounding=E4M3_GROUP128_UE8M0, router_weight_on_down_input=True,
     ),
     "glm4.7-nvfp4": Workload("glm4.7-nvfp4", 5120, 1536, 160, 8, ("nvfp4",)),
     "minimax-m2.5": Workload("minimax-m2.5", 3072, 1536, 256, 8, ("nvfp4",)),
@@ -536,6 +537,7 @@ def _build_cpu_moe_executor(
         swiglu_limit=wl.swiglu_limit,
         gate_up_input_rounding=wl.gate_up_input_rounding,
         down_input_rounding=wl.down_input_rounding,
+        router_weight_on_down_input=wl.router_weight_on_down_input,
     )
 
 

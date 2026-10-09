@@ -960,6 +960,7 @@ class Engine:
             swiglu_limit=getattr(sample, "swiglu_limit", None),
             gate_up_input_rounding=getattr(sample, "gate_up_input_rounding", None),
             down_input_rounding=getattr(sample, "down_input_rounding", None),
+            router_weight_on_down_input=getattr(sample, "router_weight_on_down_input", False),
         )
         cache.set_cpu_executor(executor)
         self.cpu_moe_executor = executor
