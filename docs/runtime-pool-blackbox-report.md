@@ -4,7 +4,7 @@
 
 ## 结论
 
-被测实现 `feat/runtime-pool@65b7c48` 上，B–F 五个服务模块 25/25 通过。启动期 A 模块：6 项无需 GPU 的用例在 65b7c48 上通过；2 项需 GPU 的用例只在 793e48d 上跑过，结果为通过。TP、多模态和第 7 节性能对比本轮未验收。
+被测实现 `feat/runtime-pool@65b7c48` 上，B–F 五个服务模块 25/25 通过；合并前补充的功能组合模块 H 在 `e6f6d90` 上 8/8 通过，DFlash＋ReplaySSM 压力模块 G 在 `d3d13fb` 上 3/3 通过。启动期 A 模块：6 项无需 GPU 的用例在 65b7c48 上通过；2 项需 GPU 的用例只在 793e48d 上跑过，结果为通过。TP、多模态和第 7 节性能对比本轮未验收。
 
 ## 环境
 
@@ -73,6 +73,30 @@
 - 约 2991 token 的 prompt，max_tokens 160，单请求串行。两边 usage 相同，文本在第 242/582 字符处分叉，分叉后两边都通顺。
 - 按契约 §3 和协调者结论，两种模式是不同的执行计划，这里只记录分叉位置，不判为失败。
 
+## 补充模块 G、H
+
+**H 功能组合（e6f6d90，GPU2 容器，cpuset 0-7,16-23）**，每种组合起一次服务：
+
+| 服务 | 组合 | 观测 |
+|---|---|---|
+| H1 | legacy＋DFlash 非 compact（`--no-dflash-compact-kv`）＋Graph 关（`--cuda-graph-max-bs 0`），4 GiB，并发 4 | 生效 batching 为 legacy，组件为 `draft_kv`；4 条并发的 300 token 枚举完整，SD 跑了 60 轮，Graph 回放增量为 0 |
+| H2 | legacy＋AR＋Graph 开，0.5 GiB，并发 6，host 4 GiB | 4 条并发时 Graph 回放 299 次；压力轮 paused 8、restored 8，6×1200 token 全部完整连续，暂停中维护返回 busy |
+| H3 | 显式 layered-pipeline＋DFlash 非 compact＋Graph 开，0.5 GiB，并发 6，host 4 GiB | 组件为 `draft_kv`；并发时 SD 93 轮、Graph 回放 468 次；压力轮 paused 4、restored 4，全部完整 |
+
+三个服务的每次采样都满足 `held ≤ budget`。
+
+**G：DFlash＋ReplaySSM 压力（d3d13fb）**
+- 配置：`--runtime-cache-gib 0.5 --max-running-requests 6 --prefix-cache-host-gib 4 --enable-gdn-replayssm` 加 DFlash N4。
+- 就绪：生效并发为 2，context_tokens 为 8190，组件含 `draft_full`、`draft_swa`、`replay_*`。
+- 压力轮：2 条约 3000 token 的私有枚举历史，各输出 3000 token。
+  - 计数增量：paused 1、recompute 1、recomputed_tokens 3000、paused_ms 23 s。后到的一条在 prefill 阶段让路，按公开语义重算。
+  - 两条 usage 都是 3000/3000，输出完整连续，SD 跑了 1194 轮；之后的新请求 SD 照常执行。
+- 暂停期取消：取消正在让路的那条后，另一条完整完成，服务回到空闲。被取消的一条记为 recompute 1、recomputed_tokens 0，因为它在重新准入前就被取消了。
+- 修复前（e6f6d90）的公开问题：
+  - 让路后被重算的请求，`usage.prompt_tokens` 报成实际值的两倍（6400 对 3200，total 9400，超过 context_tokens）。
+  - 同时 `recomputed_tokens` 为 0。
+  - 两者都由 d3d13fb 修复。
+
 ## 过程中发现并已修复的公开问题
 
 | 首次发现 | 条件 | 观测 | 修复 |
@@ -82,6 +106,7 @@
 | dd8bf5e | 超过 `context_tokens` | HTTP 400，但 `code` 为 null | 849edc8 |
 | dd8bf5e | 重算路径暂停 | `paused_ms` 一直为 0 | 已修，D 已验证 |
 | dd8bf5e | DFlash 组件名 | 报告为 `full`/`swa`，无法辨认属于 drafter | 65b7c48 改为 `draft_*` |
+| e6f6d90 | DFlash＋Replay 压力下，prefill 阶段让路的请求 | usage.prompt_tokens 翻倍，recomputed_tokens 为 0 | d3d13fb |
 
 验收过程中，公开配置有 5 处按实际接口作了更正，判据随之调整，每处都已单独提交：
 - busy 状态码按 `status` 字段判断；
@@ -96,6 +121,5 @@
 
 - TP 路径（本轮只有单卡）。
 - 多模态拒绝。
-- 可选模块 G：DFlash + Replay 在压力下的暂停恢复。
-- layered/legacy、compact 开关、Graph 关闭等功能组合矩阵。
+- Self-SD、hybrid 专家后端、DFlash 自适应、有限窗口 cap 的组合。
 - 第 7 节性能对比。
