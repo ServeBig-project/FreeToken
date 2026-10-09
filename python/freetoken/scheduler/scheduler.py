@@ -1295,7 +1295,7 @@ class Scheduler(SchedulerIOMixin):
                     "Dropping request %d because its abort arrived before admission", msg.uid
                 )
                 return
-            if getattr(self, "pressure", None) is not None and msg.mm_embeds is not None:
+            if getattr(self, "pause_manager", None) is not None and msg.mm_embeds is not None:
                 # Paused requests are rebuilt from token ids, which do not carry image content.
                 self.send_result([ErrorReplyMsg(
                     uid=msg.uid, error="multimodal requests are not supported with "
