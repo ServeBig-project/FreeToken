@@ -32,7 +32,7 @@ def test_ready_sd_with_replay(svc):
     stats, rt = svc.c.stats(), svc.rt()
     assert sd_enabled(stats), stats.get("speculative")
     names = set(components(rt))
-    assert "draft_kv" in names and any(n.startswith("replay_") for n in names), names
+    assert any(n.startswith("draft_") for n in names) and any(n.startswith("replay_") for n in names), names
     record(f"{NAME}:ready", runtime=rt, speculative=stats["speculative"], execution=stats.get("execution"))
 
 

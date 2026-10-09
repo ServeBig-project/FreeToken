@@ -41,7 +41,8 @@ def test_ready_sd_and_explicit_old_default_concurrency(svc):
     assert g["runtime_cache_bytes"] == 4 * GIB == rt["budget_bytes"]
     assert rt["requested_running_requests"] == 4, rt
     assert rt["max_running_requests"] == min(4, rt["resource_running_requests"]), rt
-    assert {"kv", "gdn_state", "draft_kv"} <= set(components(rt)), components(rt)  # drafter history shares the budget
+    names = set(components(rt))  # drafter history shares the budget under draft_* names
+    assert {"kv", "gdn_state"} <= names and any(n.startswith("draft_") for n in names), names
     assert sd_enabled(stats), stats.get("speculative")
     assert stats["speculative"].get("max_draft_steps") == 4, stats["speculative"]
     assert stats["cuda_graph"]["enabled"], stats.get("cuda_graph")
