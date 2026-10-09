@@ -23,7 +23,8 @@
 - `--cache-type naive|radix`：默认 radix（本模型实际为 hybrid_radix）；naive 关闭公共前缀缓存。
 - SD：`--speculative-num-steps 4 --speculative-draft-model-path <草稿模型>`；可加 `--speculative-phase outwave|all|inwave`。
 - `--batching-policy auto|layered-pipeline|legacy`（auto 对本模型解析为 layered-pipeline）；`--max-extend-tokens`（默认 8192）。
-- 与共享模式冲突、启动前报错退出：`--num-pages`、`--num-tokens`、`--gdn-state-budget-bytes`、`--kv-reserve-tokens`、`--linear-state-cache-ratio`；`--runtime-cache-gib 0` 或负数同样报错。错误文本出现在进程输出中（例如 `--runtime-cache-gib shares one budget; it conflicts with the fixed pool sizes ...`、`--runtime-cache-gib must be > 0`）。
+- 与共享模式冲突、启动前报错退出：`--num-pages`、`--num-tokens`、`--gdn-state-budget-bytes`、`--kv-reserve-tokens`（以及只在 Python 配置里存在、没有 CLI 开关的 `linear_state_cache_ratio`）；`--runtime-cache-gib 0` 或负数同样报错。错误文本出现在进程输出中（例如 `--runtime-cache-gib shares one budget; it conflicts with the fixed pool sizes ...`、`--runtime-cache-gib must be > 0`）。
+- 总预算放不下（例如 24 GiB 卡上 `--runtime-cache-gib 30`）或显式 `--max-seq-len-override` 超过单请求可执行上限：在权重加载之后、ready 之前以可读文本报错退出（`needs ... a GPU has only ... left after weights and experts`、`... of runtime holds one request of N tokens; M are required`）。
 - 原模式对照：`--num-tokens 65536 --max-running-requests 4` 等旧参数，不带 `--runtime-cache-gib`。
 
 验证过的参考配置（单卡）：
@@ -35,14 +36,14 @@
 
 - 生成：`POST /v1/completions`、`POST /v1/chat/completions`（OpenAI 兼容：`stream`、`max_tokens`、`temperature`、`stop`、`ignore_eos`、`cache_group`）；`GET /v1/models`。
 - 状态：`GET /v1/cache/status`、`GET /v1/stats`。
-- 维护：`POST /v1/cache/rebuild`，JSON 体。共享模式接受 `runtime_cache_gib`（可同时给 `moe_cache_size`）；`num_pages`、`num_mamba_slots`、`num_swa_pages`、`swa_full_tokens_ratio` 在共享模式被拒绝。只支持 `mode="if_idle"`。响应 `status` 为 `ok`（HTTP 200）、`rejected`（HTTP 503，`error` 为文本）或 `busy`（HTTP 409）。
+- 维护：`POST /v1/cache/rebuild`，JSON 体。共享模式接受 `runtime_cache_gib`（可同时给 `moe_cache_size`）；`num_pages`、`num_mamba_slots`、`num_swa_pages`、`swa_full_tokens_ratio` 在共享模式被拒绝。只支持 `mode="if_idle"`：调度器不空闲时立即拒绝，不等待；请求体的 `timeout`（默认 300 秒）只是等待调度器答复的上限。响应 `status` 为 `ok`（HTTP 200）、`rejected`（HTTP 503，`error` 为文本）或 `busy`（HTTP 409）。
 - 生成错误：非流式返回 OpenAI 风格错误体 `{"error": {"message", "type": "invalid_request_error", "code"}}`（HTTP 4xx）；流式先发一个带 `error` 的 SSE 块再发 `[DONE]`。放不下共享 runtime 的请求以 `code` 为 `context_length_exceeded`、文本含 `does not fit the shared runtime` 或 `no longer fits the shared runtime even alone` 结束；共享模式的多模态请求以文本 `multimodal requests are not supported with --runtime-cache-gib` 拒绝。
 
 ## 共享模式的公开状态字段
 
 `GET /v1/cache/status`：
 - `geometry.runtime_cache_bytes`：共享预算；`geometry.address_pages`、`geometry.address_mamba_slots`：只是地址空间上限；`geometry.num_pages`、`geometry.num_mamba_slots` 在共享模式为 0；`geometry.moe_cache_size`：专家容量。
-- `prefix_cache.runtime`：物理占用 `budget_bytes`、`granularity_bytes`、`free_bytes`、`held_bytes`、`used_bytes`、`waste_bytes`、`idle_bytes`、`protected_bytes`、`components{<组件名>: held_bytes/used_bytes/waste_bytes/idle_bytes/protected_bytes/address_bytes}`、`map_count`、`unmap_count`、`map_ms`；生效上限 `context_tokens`（单请求可执行上限）、`max_running_requests`（生效并发）、`requested_running_requests`、`resource_running_requests`、`requested_context_tokens`、`model_context_tokens`、`execution_bytes`；暂停统计 `paused`、`restored`、`recompute`、`recomputed_tokens`、`paused_ms`、`short_decode`、`short_prefill`、`compactions`。
+- `prefix_cache.runtime`：物理占用 `budget_bytes`、`granularity_bytes`、`free_bytes`、`held_bytes`、`used_bytes`、`waste_bytes`、`idle_bytes`、`protected_bytes`、`components{<组件名>: held_bytes/used_bytes/waste_bytes/idle_bytes/protected_bytes/address_bytes}`（组件名：目标 KV `kv`，GDN 状态 `gdn_conv` 与 `gdn_state`，ReplaySSM 记录 `replay_*`，DFlash 历史 `draft_kv`）、`map_count`、`unmap_count`、`map_ms`；生效上限 `context_tokens`（单请求可执行上限）、`max_running_requests`（生效并发）、`requested_running_requests`（省略 `--max-running-requests` 时为 null）、`resource_running_requests`、`requested_context_tokens`、`model_context_tokens`、`execution_bytes`；暂停统计 `paused`、`restored`、`recompute`、`recomputed_tokens`、`paused_ms`、`short_decode`、`short_prefill`、`compactions`。
 - `prefix_cache.components[]`：各组件 `device_allocated_bytes` 与 host 字节；`prefix_cache.host_*`：host 预算与使用。
 - `GET /v1/stats`：既有字段（`kv.used_pages/total_pages`、`cuda_graph`、`speculative`、`throughput`、`requests` 等）。
 
