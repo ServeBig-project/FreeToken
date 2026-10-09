@@ -57,7 +57,7 @@ class GatedDeltaNet(BaseOP):
     def __init__(
         self, hidden_size, num_k_heads, num_v_heads, head_k_dim, head_v_dim,
         conv_kernel_size, rms_norm_eps, layer_id, expert_quant: str = "none",
-        attn_quant: str = "none", output_gate: str = "silu", dense_precision: str = "bf16",
+        attn_quant: str = "none", output_gate: str = "silu", dense_precision: str = "source",
     ):
         self.layer_id = layer_id
         # The fla chunk/decode kernels read+write the recurrent state and the per-chunk h as
@@ -83,11 +83,11 @@ class GatedDeltaNet(BaseOP):
         self._fp8 = self._block_fp8 or self._pertensor_fp8
 
         self._in_proj_split = [self.conv_dim, self.value_dim, num_v_heads, num_v_heads]
-        if dense_precision == "fp8":
-            # the public plan quantizes every GDN projection: one fused per-row-FP8 GEMM
+        if dense_precision != "source":
+            # an explicit plan decides every GDN projection: one fused GEMM, FP8 or BF16
             self._fp8 = False
             self.in_proj = make_col_merged_quant(
-                "none", "none", hidden_size, self._in_proj_split, dense_precision="fp8"
+                "none", "none", hidden_size, self._in_proj_split, dense_precision=dense_precision
             )
         elif self._fp8:
             ColMerged = Fp8BlockColMerged if self._block_fp8 else Fp8PerTensorColMerged

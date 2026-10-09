@@ -32,7 +32,7 @@ from freetoken.models.nvfp4_banks import (
     load_nvfp4_expert_source_banks_parallel,
 )
 from freetoken.moe.host_banks import HostBank, read_range_into
-from freetoken.quant.dense import quant_fp8_per_row
+from freetoken.quant.dense import plan_dense, quant_fp8_per_row
 from freetoken.utils import download_hf_weight
 from freetoken.utils.progress import byte_bar
 from tqdm import tqdm
@@ -78,9 +78,9 @@ _FUSIONS: dict[str, tuple[str, ...]] = {
     ),
 }
 _HC_WITH_INJECT = (".attn_hyper_connection.", ".mlp_hyper_connection.")
-# 2-D weights that are not dense projections: the token embedding and the routing / shared
-# expert selection gates keep their component precision under every dense plan.
-_NOT_PROJECTION = ("embed_tokens.weight", ".mlp.gate.weight", ".mlp.shared_expert_gate.weight")
+# Operator role of the 2-D weights, for the public dense plan: everything else is a projection.
+_ROLES = {"embed_tokens.weight": "embedding", ".mlp.gate.weight": "router",
+          ".mlp.shared_expert_gate.weight": "router"}
 
 
 def _rename(raw_name: str) -> str | None:
@@ -130,8 +130,8 @@ def _emit(name: str, tensor: torch.Tensor, dense_precision: str):
     """One model buffer: a projection under the fp8 plan becomes ``.weight`` (fp8) plus its
     per-row ``.weight_scale``. Per-row scales commute with the output-row fusion above, so
     quantizing the fused matrix equals quantizing each part; zero pad rows quantize to zero."""
-    if (dense_precision == "fp8" and tensor.dim() == 2 and tensor.is_floating_point()
-            and not name.endswith(_NOT_PROJECTION)):
+    role = next((r for suffix, r in _ROLES.items() if name.endswith(suffix)), "projection")
+    if tensor.dim() == 2 and tensor.is_floating_point() and plan_dense(dense_precision, role) == "fp8":
         q, scale = quant_fp8_per_row(tensor)
         yield name, q
         yield name[: -len(".weight")] + ".weight_scale", scale
@@ -145,7 +145,7 @@ def iter_weights(
     *,
     include_moe_experts: bool,
     include_non_moe: bool,
-    dense_precision: str = "bf16",
+    dense_precision: str = "source",
 ) -> Iterator[tuple[str, torch.Tensor]]:
     """Yield the dense (non-expert) weights, prefix-stripped and fused to the model's buffers,
     at the resolved ``dense_precision`` (``freetoken.quant.dense``). Zero-centered norms are

@@ -316,10 +316,11 @@ class ModelConfig:
     qwen4_args: Any | None = None
     # Extra per-request tensors riding the LinearStatePool slots; () for models without any.
     slot_states: Tuple[SlotStateSpec, ...] = ()
-    # Resolved public dense-projection precision ("bf16" | "fp8", freetoken.quant.dense);
-    # injected from EngineConfig.dense_quantization. Models built from the quant_linear
-    # factories follow it; a checkpoint's own quant config still applies under "bf16".
-    dense_precision: str = "bf16"
+    # Resolved public dense-projection plan ("source" | "bf16" | "fp8", freetoken.quant.dense);
+    # injected from EngineConfig.dense_quantization. Under "source" every operator keeps the
+    # scheme its checkpoint declares; an explicit value overrides it in the quant_linear
+    # factories and the loaders of models whose ModelSpec declares dense_plan.
+    dense_precision: str = "source"
     # Generic execution-path capability flags (set by a model's parse_config) so the engine and
     # factories stay model-agnostic instead of branching on dsv4_args:
     single_stream_only: bool = False  # model runs one sequence at a time -> force bs=1

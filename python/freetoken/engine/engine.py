@@ -1312,6 +1312,8 @@ class Engine:
 
     def execution_status(self) -> dict:
         """Requested versus resolved batching/SD settings, and why an auto choice fell back."""
+        from freetoken.quant.dense import effective_dense_precision
+
         config, runner = self.config, self.graph_runner
         steps = config.speculative_num_steps
         layered = getattr(config, "batching_policy", "legacy") == "layered-pipeline"
@@ -1319,7 +1321,7 @@ class Engine:
             requested=dict(self.execution_requested),
             effective=dict(
                 batching_policy=getattr(config, "batching_policy", "legacy"),
-                dense_quant=config.model_config.dense_precision,
+                dense_quant=effective_dense_precision(config.model_config),
                 kv_dtype=config.kv_dtype,
                 drafter=("dflash" if config.speculative_draft_model_path else "self") if steps else None,
                 speculative_num_steps=steps,
