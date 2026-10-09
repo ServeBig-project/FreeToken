@@ -63,11 +63,10 @@ class PauseManager:
         for req in sorted(self.decode.held - set(self.victims), key=lambda r: r.arrival):
             self.decode.unhold(req)  # parked last round: try again
         running = sorted(self.decode.running_reqs, key=lambda r: r.arrival)
-        inflight = self.inflight()
-        # A wave mid-model must reach its safe boundary first; so must a launched chunk.
+        inflight = {r.uid for r in self.inflight()}
+        # A prompt with a chunk inside an open wave or a launched batch is read until it drains.
         chunked = sorted((p for p in self.prefill.pending_list if p.chunked_req is not None
-                          and p.layered_cached_len is None and p.chunked_req not in inflight),
-                         key=lambda p: p.arrival)
+                          and p.uid not in inflight), key=lambda p: p.arrival)
         stalled, self.prefill.stalled = self.prefill.stalled, False
         while len(running) + len(chunked) > 1:
             if self.cache.reserve(running) and not stalled:
@@ -80,7 +79,10 @@ class PauseManager:
             stalled = False  # one prompt gives way per pass; the next pass retries
             self.protected = min(running + [p.chunked_req for p in chunked],
                                  key=lambda r: r.arrival).uid
-        alone = not self.decode.held and not (self.unsaved or self.saving or self.restoring)
+        # Alone: nothing else holds runtime memory, not even a batch still draining (a chunk
+        # mid-wave, a request that just finished): that gives way or goes next pass instead.
+        alone = (not self.decode.held and not (self.unsaved or self.saving or self.restoring)
+                 and not (inflight - {r.uid for r in running}))
         if running and not self.cache.reserve(running):
             if len(running) == 1 and not chunked and alone:
                 self._compact(running[0], lambda: self._hold(running[0]))
@@ -90,11 +92,10 @@ class PauseManager:
         elif stalled and not running and len(chunked) == 1 and alone:
             pending = chunked[0]
             self._compact(pending.chunked_req, lambda: self._drop_chunk(pending), pending)
-        elif (alone and not running and not chunked and not self.cache.copies_inflight
-              and self.prefill.blocked_head is not None):
+        elif alone and not running and not chunked and self.prefill.blocked_head is not None:
             # The queue's head could not even start in an otherwise empty runtime (its cached
             # prefix plus one page is already too much): it cannot be served.
-            pending = self.prefill.blocked_head
+            pending, self.prefill.blocked_head = self.prefill.blocked_head, None
             self.prefill.pending_list.remove(pending)
             self.fail(pending.uid, "request does not fit the shared runtime", pending.paused)
         if self.protected is not None and not self._active(self.protected):
@@ -102,6 +103,8 @@ class PauseManager:
         # New and paused requests wait for the protected one; restores keep arrival order.
         oldest = self.waiting[0].req.arrival if self.waiting else None
         self.prefill.admit_before = 0 if self.protected is not None else oldest
+        self.prefill.empty = (alone and not running and not chunked
+                              and not self.cache.copies_inflight)
 
     def _compact(self, req: Req, give_way, pending: PendingReq | None = None) -> None:
         """A request alone in the runtime cannot get its next page: fragmentation, so it gives

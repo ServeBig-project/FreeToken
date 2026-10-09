@@ -245,8 +245,9 @@ class PrefillAdder:
                 chunk_size = align_down(cached_len + chunk_size // 2, ps) - cached_len
                 if chunk_size <= 0:
                     # A new arrival waits; a continuation already holds state older requests
-                    # may be asked to make room for.
-                    self.stalled = not new
+                    # may be asked to make room for. Cached data under a host copy cannot be
+                    # evicted yet: that is not a shortage.
+                    self.stalled = not new and not cm.copies_inflight
                     return None
             tokens, slots, row = got
             if new:
@@ -337,6 +338,7 @@ class PrefillManager:
     # may start (continuations always may), set by the pause policy.
     stalled: bool = False
     blocked_head: PendingReq | None = None
+    empty: bool = False  # shared runtime: nothing else holds or copies memory this pass
     admit_before: int | None = None
 
     def add_one_req(self, req: UserMsg) -> None:
@@ -427,8 +429,8 @@ class PrefillManager:
                 elif pending_req.paused is not None:
                     self.cache_manager.paused_stats["recomputed_tokens"] += req.extend_len
             else:
-                if not reqs and pending_req.chunked_req is None:
-                    self.blocked_head = pending_req
+                if not reqs and pending_req.chunked_req is None and self.empty:
+                    self.blocked_head = pending_req  # could not start in an empty runtime
                 break  # We cannot add more requests
         self.stalled = adder.stalled
         if len(reqs) == 0:
