@@ -151,7 +151,7 @@ Graph与SD的实际执行继续由既有配置、Graph／speculative统计和独
 
 以下回答黑盒作者提出的公开问题，与上文同等有效。
 
-- **取得 bind 输入**：`cfg = freetoken.engine.config.EngineConfig(model_path=BASE, nowag_expert_path=SIDE, tp_info=DistributedInfo(0, 1))`；`banks = freetoken.moe.expert_banks.load_expert_banks(BASE, cfg.model_config, device=..., dtype=torch.bfloat16)`。`banks.sources[name][l]` 是第 `l` 个 MoE 层的 `[E, ...]` 主机张量，行号即逻辑专家号；`l = 解码器层号 − first_k_dense_replace`。`banks.shared` 是共享张量（`codebook`），`banks.format_state` 传给 bind。`layout = ExpertLayout("nowag", H, I, E)`；`backend` 为 `--moe-backend` 取值（`offload`、`cpu`、`hybrid`、`fused`）。bank 名：九个基础 bank（`{gate,up,down}_{assignments,input_norm,output_norm}`），模型有专家 bias 时另有 `gate_bias`、`up_bias`、`down_bias`（`[E, I]`/`[E, H]`）。
+- **取得 bind 输入**：先 `freetoken.distributed.set_tp_info(rank=0, size=1)`（每进程一次；engine 启动时由它设置），再 `cfg = freetoken.engine.config.EngineConfig(model_path=BASE, nowag_expert_path=SIDE, tp_info=DistributedInfo(0, 1))`；`banks = freetoken.moe.expert_banks.load_expert_banks(BASE, cfg.model_config, device=..., dtype=torch.bfloat16)`。`banks.sources[name][l]` 是第 `l` 个 MoE 层的 `[E, ...]` 主机张量，行号即逻辑专家号；`l = 解码器层号 − first_k_dense_replace`。`banks.shared` 是共享张量（`codebook`），`banks.format_state` 传给 bind。`layout = ExpertLayout("nowag", H, I, E)`；`backend` 为 `--moe-backend` 取值（`offload`、`cpu`、`hybrid`、`fused`）。bank 名：九个基础 bank（`{gate,up,down}_{assignments,input_norm,output_norm}`），模型有专家 bias 时另有 `gate_bias`、`up_bias`、`down_bias`（`[E, I]`/`[E, H]`）。
 - **布局**：manifest 的 `assignment_layout` 为 `row_major`（缺省，每专家 `[N, W]`）或 `word_major`（每专家 `[W, N]`）。
 - **层覆盖**：sidecar 必须恰好覆盖基座的全部 MoE 解码器层 `[first_k_dense_replace, num_layers)`，层号为解码器层号；部分覆盖拒绝。MTP 层不在其中。
 - **状态**：NoWAG 的 `format` 为 `"nowag"`，`format_parameters` 为 `{"d", "assignment_bits"}`；其他格式报实际绑定格式名（如 `bf16`、`fp8_block`、`nvfp4_marlin`、`ds_fp4`），`format_parameters` 为 `{}`。专家临时空间目前由内核按次分配，`workspace_device_bytes` 如实为 0，待共享 runtime 集成后改为预留量。
@@ -161,3 +161,6 @@ Graph与SD的实际执行继续由既有配置、Graph／speculative统计和独
 - **padding**：CUDA Graph 补齐行的路由 id 为 `-1`，`run` 对其贡献为零；这是公共调度实际产生的输入。
 - **合成 gpt-oss sidecar**：沿用通用 v1 键（`format="nowag_expert_sidecar_v1"`、`model_type="gpt_oss"`、`hidden_size`、`moe_intermediate_size`、`num_experts`、`num_moe_layers`）；sidecar 不含 bias，bias 取自基座。
 - **无公开手段**：强制 SD 零接受、观测 collective 执行均无公开入口；不能构造时如实记为未覆盖。
+- **设备**：FreeToken 需要可见的 CUDA 设备。加载会把主机 bank 锁页（需要 CUDA），`method.run` 在 CUDA 张量上计算。CPU 上的专家计算由 engine 的 CPU 执行器完成，只经 `--moe-backend cpu`／`hybrid`／`--moe-cpu-layers` 的公开服务验收，不通过 `run` 调用。无 GPU 时这些测试记为未运行。
+- **activation 字符串**：`silu`、`gelu`、`gelu_tanh`（或 `gelu_pytorch_tanh`）、`swigluoai`（或 `gpt_oss_swiglu`）。clamp 不是单独的激活名，由 `activation_limit` 表达。
+- **DSV4 的 `ExpertMath`**：`activation="silu"`、`activation_limit` 取基座 config 的 `swiglu_limit`、`router_weight_on_down_input=True`，两处舍入均为 `E4M3_GROUP128_UE8M0`。
