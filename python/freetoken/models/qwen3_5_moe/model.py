@@ -114,9 +114,9 @@ class Qwen3_5MoEForCausalLM(ResidualLayerGroupCausalLM):
         super().__init__()
 
     def create_layered_execution_adapter(self, engine):
-        from .layered_execution import Qwen3_5LayeredExecutionAdapter
+        from freetoken.engine.layered_execution import LinearStateLayeredExecutionAdapter
 
-        return Qwen3_5LayeredExecutionAdapter(engine)
+        return LinearStateLayeredExecutionAdapter(engine)
 
     def forward(self) -> torch.Tensor:
         output = self.model.forward(get_global_ctx().batch.input_ids)

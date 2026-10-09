@@ -431,6 +431,17 @@ class QSASparseAttnBackend(BaseAttnBackend):
         assert batch.active_table_idx is not None, "decode batch is missing its page-table rows"
         self._stage_decode(md, batch.padded_size, batch.active_table_idx.to(torch.int64))
 
+    # Layer-range graphs replay exact-size decode batches through the same static buffers.
+    @property
+    def supports_layer_range_graphs(self) -> bool:
+        return True
+
+    def prepare_for_layer_range_capture(self, batch: Batch) -> None:
+        self.prepare_for_capture(batch)
+
+    def prepare_for_layer_range_replay(self, batch: Batch) -> None:
+        self.prepare_for_replay(batch)
+
     def reset_capture(self) -> None:
         super().reset_capture()
         self._graph = {}

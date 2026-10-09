@@ -8,10 +8,14 @@ There is no input/post layernorm and no final ``model.norm``::
     R  = R + ple(R, batch)                 # the PLE layer only
     x, s = attn_hc.mix(R); y = (GDN | QSA)(x); R = attn_hc.combine(R, y, s)
     x, s = mlp_hc.mix(R);  y = MoE(x);        R = mlp_hc.combine(R, y, s)
+
+Layer-group execution (layered pipeline, decode layer-range graphs) carries ``R`` and the
+next layer as its opaque state; the plain forward is the same path over all layers.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
@@ -30,6 +34,14 @@ from .ple import PLELayer
 if TYPE_CHECKING:
     from freetoken.core import Batch
     from freetoken.models.config import ModelConfig
+
+
+@dataclass
+class StreamState:
+    """Layer-group state: the four residual streams of every row and the next layer to run."""
+
+    streams: torch.Tensor  # [rows, hc_count*hidden]
+    next_layer: int = 0
 
 
 class Qwen4ExpDecoderLayer(BaseOP):
@@ -79,21 +91,19 @@ class Qwen4ExpModel(BaseOP):
         )
         self.hyper_connection_mixer = GatedResidual(config, use_combine=False)
 
-    def forward(self, input_ids: torch.Tensor, batch: Batch) -> torch.Tensor:
-        R = self.embed_tokens.forward(input_ids).repeat(1, self.hc_count)
+    def embed(self, input_ids: torch.Tensor, batch: Batch) -> torch.Tensor:
+        """The streams before layer 0; also the moment a capture at a chunk start keeps the
+        state before this forward (the GDN layers copy their own, the declared slot states
+        are copied once here)."""
         if batch.fla_metadata is None:  # direct-op callers; the engine builds it before forward
             from freetoken.attention.linear import build_fla_metadata
 
             batch.fla_metadata = build_fla_metadata(batch, input_ids.device)
         prefill = batch.fla_metadata.prefill
         if prefill is not None and prefill.track_start_dst is not None:
-            # a capture at a chunk start keeps the state before this forward; the GDN layers
-            # copy their own, the declared slot states are copied once here
             for t in get_global_ctx().linear_state_pool.slot_states.values():
                 t.index_copy_(1, prefill.track_start_dst, t.index_select(1, prefill.track_start_src))
-        for layer in self.layers.op_list:
-            R = layer.forward(R, batch)
-        return self.hyper_connection_mixer.mix(R)[0]
+        return self.embed_tokens.forward(input_ids).repeat(1, self.hc_count)
 
 
 class Qwen4ExpForCausalLM(BaseLLMModel):
@@ -135,9 +145,84 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
                 PinnedUVATable(table.bank.tensor, float(table.weight_scale), device)
             )
 
-    def forward(self) -> torch.Tensor:
+    def create_layered_execution_adapter(self, engine):
+        from freetoken.engine.layered_execution import LinearStateLayeredExecutionAdapter
+
+        return LinearStateLayeredExecutionAdapter(engine)
+
+    # ----- layer groups -----------------------------------------------------------------
+    @property
+    def layer_group_num_layers(self) -> int:
+        return len(self.model.layers.op_list)
+
+    def begin_layer_group_prefill(self, input_ids: torch.Tensor) -> StreamState:
+        return StreamState(self.model.embed(input_ids, get_global_ctx().batch))
+
+    @staticmethod
+    def layer_group_state_layer(state: StreamState) -> int:
+        return state.next_layer
+
+    @staticmethod
+    def layer_group_merge_states(decode: StreamState, prefill: StreamState) -> StreamState:
+        if decode.next_layer != prefill.next_layer:
+            raise RuntimeError("decode and prefill states are at different layers")
+        return StreamState(torch.cat((decode.streams, prefill.streams), dim=0), decode.next_layer)
+
+    @staticmethod
+    def layer_group_split_state(state: StreamState, decode_rows: int) -> tuple[StreamState, StreamState]:
+        return (
+            StreamState(state.streams[:decode_rows], state.next_layer),
+            StreamState(state.streams[decode_rows:], state.next_layer),
+        )
+
+    @staticmethod
+    def create_layer_range_graph_inputs(seed: StreamState) -> StreamState:
+        return StreamState(torch.zeros_like(seed.streams))
+
+    @staticmethod
+    def make_layer_range_graph_state(inputs: StreamState, start_layer: int, rows: int) -> StreamState:
+        return StreamState(inputs.streams[:rows], start_layer)
+
+    @staticmethod
+    def stage_layer_range_graph_inputs(
+        inputs: StreamState, state: StreamState, rows: int, start_layer: int
+    ) -> None:
+        if state.next_layer != start_layer:
+            raise ValueError(f"layer-range replay expected state at layer {start_layer}")
+        inputs.streams[:rows].copy_(state.streams)
+
+    @staticmethod
+    def finish_layer_range_graph_replay(captured: StreamState, rows: int, end_layer: int) -> StreamState:
+        return StreamState(captured.streams[:rows], end_layer)
+
+    def advance_layer_group_prefill(self, state: StreamState, end_layer: int) -> StreamState:
+        if not state.next_layer < end_layer <= self.layer_group_num_layers:
+            raise ValueError(
+                f"invalid layer-group range [{state.next_layer}, {end_layer}) for "
+                f"{self.layer_group_num_layers} layers"
+            )
         batch = get_global_ctx().batch
-        return self.lm_head.forward(self.model.forward(batch.input_ids, batch))
+        for layer_id in range(state.next_layer, end_layer):
+            state.streams = self.model.layers.op_list[layer_id].forward(state.streams, batch)
+        state.next_layer = end_layer
+        return state
+
+    def finish_layer_group_prefill(
+        self, state: StreamState, output_indices: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if state.next_layer != self.layer_group_num_layers:
+            raise ValueError("cannot finish layer-group prefill before every decoder layer ran")
+        if output_indices is None:
+            hidden = self.model.hyper_connection_mixer.mix(state.streams)[0]
+            return self.lm_head.forward(hidden)
+        hidden = self.model.hyper_connection_mixer.mix(state.streams[output_indices].contiguous())[0]
+        return self.lm_head.forward_selected(hidden)
+
+    def forward(self) -> torch.Tensor:
+        state = self.begin_layer_group_prefill(get_global_ctx().batch.input_ids)
+        return self.finish_layer_group_prefill(
+            self.advance_layer_group_prefill(state, self.layer_group_num_layers)
+        )
 
 
-__all__ = ["Qwen4ExpDecoderLayer", "Qwen4ExpForCausalLM", "Qwen4ExpModel"]
+__all__ = ["Qwen4ExpDecoderLayer", "Qwen4ExpForCausalLM", "Qwen4ExpModel", "StreamState"]
