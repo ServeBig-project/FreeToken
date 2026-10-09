@@ -522,7 +522,7 @@ class CacheManager:
                 self._free_swa(self.page_table[req.table_idx, start:new_evicted])
                 req.swa_evicted_seqlen = new_evicted
 
-    def free_swa_out_of_window_extend(self, reqs: List[Req]) -> None:
+    def free_swa_out_of_window_extend(self, reqs: List[Req], *, before: int | None = None) -> None:
         """Prefill sibling of ``maybe_free_swa_out_of_window``: before allocating a chunk, return
         each request's now-out-of-window SWA slots so a chunked prompt's live swa stays ~one window
         regardless of prompt length (else a prompt longer than the swa pool exhausts alloc_swa).
@@ -533,13 +533,16 @@ class CacheManager:
         freed, floored at the tree-owned reused prefix. Overlap-safe by the same scheduler stream
         gate + ``window + page_size`` margin the decode driver relies on; ``free_swa`` is idempotent
         over the sentinel, so re-freeing an earlier chunk's range is a no-op. The pool is always
-        sized > one window (see the swa-pool floor), so a chunk can always make forward progress."""
+        sized > one window (see the swa-pool floor), so a chunk can always make forward progress.
+        ``before`` frees less: only below it."""
         if not self.swa_paged:
             return
         window = self.sliding_window_size
         for req in reqs:
             floor = req.cache_handle.cached_len   # reused prefix -> its swa is tree-owned, not ours
-            new_evicted = align_down(req.cached_len - window - self.page_size, self.page_size)
+            frontier = req.cached_len - window - self.page_size
+            new_evicted = align_down(frontier if before is None else min(before, frontier),
+                                     self.page_size)
             start = max(req.swa_evicted_seqlen, floor)
             if new_evicted > start:
                 self._free_swa(self.page_table[req.table_idx, start:new_evicted])
@@ -760,11 +763,16 @@ class CacheManager:
             self._free_decode_reservation(reservation)
 
     def cache_req(self, req: Req, *, finished: bool) -> None:
+        if not finished and self.draft_block:
+            # The drafter's pool is sized per running request, but a layered wave can prefill
+            # far more than one window and decode's own release skips a request's first step:
+            # return what lies a window before the first resume point now. Holding it would
+            # also stop the commit at a shared node whose window another request released.
+            bounds = self._commit_boundaries(req, finished=False)
+            if bounds:
+                self.free_swa_out_of_window_extend(
+                    [req], before=bounds[0][0] - self.sliding_window_size - _SWA_RETAIN_GAP)
         self._commit_req(req, finished=finished)
-        if not finished:
-            # A layered wave can prefill far more than one window, and decode's own release
-            # skips a request's first step: return the prompt's out-of-window part now.
-            self.free_swa_out_of_window_extend([req])
 
     def _commit_req(self, req: Req, *, finished: bool) -> None:
         """Publish the request's committed prefix; on finish also release what it owns.
