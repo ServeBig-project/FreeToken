@@ -644,6 +644,19 @@ def parse_args(
         ),
     )
 
+    from freetoken.quant.kv import KV_OPTIONS
+
+    parser.add_argument(
+        "--kv-dtype",
+        default=ServerArgs.kv_dtype,
+        choices=KV_OPTIONS,
+        help=(
+            "K/V cache encoding. auto keeps the attention pool's native format; int8 stores "
+            "K and V as int8 with one BF16 scale per token and KV head (pools that implement "
+            "the codec only); bf16 forces the plain format."
+        ),
+    )
+
     parser.add_argument(
         "--nvfp4-backend",
         default=ServerArgs.nvfp4_backend,

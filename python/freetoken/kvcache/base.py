@@ -41,6 +41,8 @@ class BaseKVCachePool(ABC):
     # Pools whose buffers are bound into per-forward model scratch (DSV4's tiers) need the
     # model re-bound after a rebuild; the engine asks before it resizes.
     needs_rebind_on_rebuild: ClassVar[bool] = False
+    # K/V encodings this family can store (freetoken.quant.kv); the first is its native one.
+    kv_codecs: ClassVar[tuple[str, ...]] = ("bf16",)
 
     # ---- sizing/cost classmethods: run BEFORE the pool exists (startup budget solve,
     # --moe-cache-auto). The engine measures memory and passes bytes in; each pool family

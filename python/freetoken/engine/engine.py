@@ -2074,6 +2074,7 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
         object.__setattr__(model_config, "moe_backend", config.moe_backend)
     object.__setattr__(model_config, "nvfp4_backend", config.nvfp4_backend)
     from freetoken.quant.dense import resolve_dense_precision
+    from freetoken.quant.kv import resolve_kv_dtype
 
     object.__setattr__(
         model_config, "dense_precision",
@@ -2081,6 +2082,8 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
             getattr(config, "dense_quantization", "auto"), getattr(config, "model_path", None)
         ),
     )
+    override("kv_dtype", resolve_kv_dtype(getattr(config, "kv_dtype", "auto"),
+                                          resolve_pool_class(model_config)))
 
     if config.speculative_num_steps == 0:
         override("speculative_draft_model_path", None)
