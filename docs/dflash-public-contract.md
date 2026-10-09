@@ -61,10 +61,11 @@
 `/v1/stats` 至少可区分：
 
 - drafter 类型、配置最大步数、实际每请求草稿长度分布、accepted 和最终 emitted。
-- 实际/物理 draft、verify 位置；请求尾部和资源裁剪，不能只报告最大宽度。verify 位置只计 prefill 波次外的轮次；波次内外的验证轮数与请求数分别报告，退 AR 按原因报告。
+- 实际/物理 draft、verify 位置；请求尾部和资源裁剪，不能只报告最大宽度（`clipped_requests` 按 tail/capacity 统计执行了 SD 但草稿被缩短的请求）。verify 位置只计 prefill 波次外的轮次；波次内外的验证轮数与请求数分别报告，退 AR 按原因报告。
 - 固定执行、成本选择、初始化、探测、退 AR 次数；观察模式下“建议选择”与“实际执行”分别报告。
 - 完整轮累计时间、完整 proposal 时间（包括采样/候选准备）、verify forward 与接受/修正部分；所有计时说明是否重叠，不能无条件相加。
 - 控制器 CPU 决策时间、有效成本样本数、丢样数、初始化与探测实耗；空闲时已结束样本最终可见。
+- 上两项（计时与控制器计数）只在 `--speculative-adaptive-cost`（含观察模式）下提供；固定模式不采集每轮 GPU 计时，不增加额外开销。
 
 原 `dflash_block_gpu_ms` 若改为完整 proposal 口径，必须显式标明 timing_scope，不能直接与旧 forward-only 数字相比。完整轮时间也不等于端到端请求延迟，后者另测。
 

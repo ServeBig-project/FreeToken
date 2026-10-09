@@ -186,7 +186,9 @@ state pool or take memory from experts or KV.
 
 `state_slot_stops` counts whole-batch fallbacks due to state capacity.
 `draft_length_histogram` records actual request-round draft lengths, after all
-resource and cost decisions. The default state budget is not a guarantee that
+resource and cost decisions. `clipped_requests` counts requests that ran SD with a
+shorter draft, by cause: `tail` (their own remaining output) or `capacity` (KV
+pages, window slots, forward width or state slots). The default state budget is not a guarantee that
 full concurrency can draft: protected prefixes also consume it. The existing idle
 cache rebuild can explicitly resize `num_mamba_slots`.
 
