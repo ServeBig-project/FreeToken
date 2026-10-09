@@ -203,6 +203,7 @@ def main():
     parser.add_argument("--replay", help="Exact requests.json from another run, or the same public phase format")
     parser.add_argument("--timeout", type=float, default=900)
     parser.add_argument("--output-tokens", type=int, default=128)
+    parser.add_argument("--pressure-output", type=int, default=1200)
     parser.add_argument("--long-paragraphs", type=int, default=160)
     args = parser.parse_args()
     run = Run(args)
@@ -214,7 +215,7 @@ def main():
                 run.phase(phase["name"], phase["requests"], phase.get("first_token_gate", False))
         elif args.case == "pressure":
             run.phase("reference", [body(history(0, 4), 64, "pressure-reference")])
-            run.phase("pressure", [body(history(i, 4), 1200, f"pressure-{i}") for i in range(6)])
+            run.phase("pressure", [body(history(i, 4), args.pressure_output, f"pressure-{i}") for i in range(6)])
             run.phase("after", [body(history(0, 4), 64, "pressure-reference")])
         elif args.case == "sequence":
             prompts = [history(i, 4) for i in range(4)]
