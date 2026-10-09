@@ -292,8 +292,6 @@ def server_command(
         "--enable-cache-report",
         "--batching-policy",
         mode["batching_policy"],
-        "--speculative-num-steps",  # these A/B arms compare AR schedulers
-        "0",
     ]
     if "prefill_layer_group_size" in mode:
         command += ["--prefill-layer-group-size", str(mode["prefill_layer_group_size"])]

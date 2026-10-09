@@ -27,7 +27,7 @@ Qwen3 MoE 与 Qwen3.6-35B-A3B 使用公共 SD 验证、提交和缓存流程。�
 - ReplaySSM计算核心此前在`f184217`上通过24项独立数值验收，包含环满场景重复1600次无错误；记录见PR #3，后续DFlash接入未修改该计算核心。
 - 六组服务验收90/90通过：DFlash固定N8／自适应＋Replay、DFlash关闭Replay、Qwen3.6原self-SD、Qwen3原self-SD固定／自适应。覆盖C1/C4/C16、尾批、前缀、停止／取消、重建；DFlash实际执行C16×144位置Graph。
 - 同一台4090、相同专家/KV/状态＋drafter预算：DFlash固定N4的C16为35.02 token/s，当前self-SD自适应30.11，PR原路径29.83；C1暂无收益。
-- offload AR两次25.30／26.38，hybrid AR两次45.83／64.86，hybrid＋Replay两次65.48／65.06。不能将首轮hybrid差异归因于Replay；目前DFlash仍慢于hybrid AR。现有SD不支持hybrid专家执行。
+- offload AR两次25.30／26.38，hybrid AR两次45.83／64.86，hybrid＋Replay两次65.48／65.06。不能将首轮hybrid差异归因于Replay；目前DFlash仍慢于hybrid AR（当时SD尚不支持hybrid）。
 - 当前主要成本是目标验证时的专家传输；DFlash固定N4的草稿logits准备与模型计算累计约占端到端时间0.35%（不含后续采样）。8步和当前按块自适应均未超过固定4步。
 - Qwen3验收的无GDN参数和长输入样本问题已在独立测试中修复；生产代码无需因此改变。测试最终版本`c6e5bcc`。
 
@@ -53,8 +53,6 @@ Qwen3 MoE 与 Qwen3.6-35B-A3B 使用公共 SD 验证、提交和缓存流程。�
 ## Harness 下一轮基座与任务
 
 - PR3与PR4已合入 `main@c3b637f`。新一轮从该基座固定提交、新建campaign并重新标定；入口、历史线索及对照要求见[Harness交接](harness-handoff.md)。测量用的上游AR对照与候选起点分别记录，保留真实agent trace、相同输入和工作量约束。
-- 原harness候选`9eb44ab`的hybrid／layered-pipeline耦合仅作为参考。它基于早期公共SD，未包含Replay与SelfDrafter／DFlashDrafter拆分，不整体合回新版。
-- 耦合是源码适配任务，不只是开关搜索：复用公共draft／verify／提交和状态管理，适配CPU/GPU专家执行及分层调度，覆盖已有SelfDrafter与DFlashDrafter。不得恢复模型名白名单或退回旧的内联起草流程。
-- 当前验收范围是legacy／offload SD；CPU/GPU hybrid只测过AR。新组合需独立黑盒和真实trace A/B，报告实际draft／verify执行、接受量、专家传输和内存；不能以静默退回AR代替耦合完成。工具调用特殊检查点及其他调度组合不由现有短测证明。
+- hybrid专家执行与layered-pipeline调度的SD已接入，复用公共draft／verify／提交与状态管理；配置与阶段规则见[自投机解码](self-speculative-decoding.md)。工具调用特殊检查点不由现有短测证明。
 
 公开边界见 [DFlash 公开契约](dflash-public-contract.md)和 [Replay 公开契约](replayssm-public-contract.md)。旧 Replay 配对实验、窗口算法证据保留在 `/data2/servebig-envs/replayssm_ab_20260929b_gpu2/`；本轮原始结果在 `/data2/servebig-envs/dflash_integration_20260930/remote-results/`。完整长上下文 agent 任务质量不由64-token性能短测证明。

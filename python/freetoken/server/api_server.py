@@ -295,7 +295,7 @@ class FrontendManager:
             self.dflash_geometry = msg.dflash
         if msg.prefix_cache is not None:
             self.stats.prefix_cache = msg.prefix_cache
-        if getattr(msg, "execution", None) is not None:
+        if msg.execution is not None:
             self.execution = msg.execution
             self.stats.resources = None
         fut = self.rebuild_futures.pop(msg.request_id, None)
