@@ -189,7 +189,9 @@ def short_long_short(svc, salt):
         return w.max_component.get(name, {}).get("held_bytes", 0)
 
     grow = {name: held(b, name) - held(a, name) for name in names}
-    record(f"{svc.name}:short_long_short", k=k, n=n, plen=plen, budget=budget, grow=grow,
+    x, y = max(grow, key=grow.get), min(grow, key=grow.get)
+    # identified by behaviour; the published names (kv grows, gdn_state/gdn_conv shrink) are reported
+    record(f"{svc.name}:short_long_short", k=k, n=n, plen=plen, budget=budget, grow=grow, grew=x, shrank=y,
            phases={p: w.report() for p, w in (("short", a), ("long", b), ("short_again", c))},
            geometry_after=svc.c.geometry())
     for w in (a, b, c):
@@ -197,7 +199,6 @@ def short_long_short(svc, salt):
     assert svc.c.geometry()["moe_cache_size"] == g0["moe_cache_size"] == 2048
     assert svc.c.status().get("last_rebuild") == rebuild0
     assert names, "runtime.components is empty"
-    x, y = max(grow, key=grow.get), min(grow, key=grow.get)
     assert grow[x] > 0 > grow[y], f"no complementary change between the short and long phases: {grow}"
     assert held(b, x) + held(a, y) > budget, (
         f"{x} at its long-phase peak {held(b, x)} plus {y} at its short-phase peak {held(a, y)} fit "

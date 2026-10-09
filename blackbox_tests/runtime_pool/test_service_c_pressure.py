@@ -9,7 +9,7 @@ import os
 
 import pytest
 
-from service_common import COMMON, GIB, MODEL_CONTEXT, record, service
+from service_common import COMMON, GIB, MODEL_CONTEXT, components, record, service
 from service_scenarios import cancel_round, early_stop_round, over_context, pause_round, short_long_short
 
 NAME = "c_pressure"
@@ -33,6 +33,7 @@ def test_ready_publishes_limits(svc):
     assert rt["requested_running_requests"] == 6, rt
     assert rt["max_running_requests"] == min(6, rt["resource_running_requests"]) >= 1, rt
     assert 1 <= rt["context_tokens"] <= MODEL_CONTEXT, rt
+    assert {"kv", "gdn_state", "gdn_conv"} <= set(components(rt)), components(rt)
     assert pc["host_budget_bytes"] == 4 * GIB, pc
     record(f"{NAME}:ready", runtime=rt, geometry=g, host={k: v for k, v in pc.items() if k.startswith("host")})
 

@@ -10,8 +10,8 @@ import time
 import pytest
 
 from service_common import (COMMON, GIB, MODEL_CONTEXT, Watch, assert_length, cached_tokens,
-                            enum_prompt, graph_replays, record, sd_enabled, service, start_streams,
-                            tok, wait_streams)
+                            components, enum_prompt, graph_replays, record, sd_enabled, service,
+                            start_streams, tok, wait_streams)
 from service_scenarios import early_stop_round
 
 NAME = "b_shared"
@@ -34,7 +34,8 @@ def test_ready_publishes_shared_mode_and_derived_concurrency(svc):
     assert g["address_pages"] > 0 and g["address_mamba_slots"] > 0, g
     assert g["moe_cache_size"] == 2048
     assert 0 <= rt["used_bytes"] <= rt["held_bytes"] <= rt["budget_bytes"], rt
-    assert rt.get("requested_running_requests") in (None, 0), rt  # omitted, not the old default
+    assert {"kv", "gdn_state", "gdn_conv"} <= set(components(rt)), components(rt)
+    assert rt["requested_running_requests"] is None, rt  # omitted, not the old default
     assert rt["max_running_requests"] == rt["resource_running_requests"] >= 1, rt
     assert rt["model_context_tokens"] == MODEL_CONTEXT
     assert 1 <= rt["context_tokens"] <= MODEL_CONTEXT, rt

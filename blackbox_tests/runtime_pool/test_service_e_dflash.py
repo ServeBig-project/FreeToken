@@ -10,8 +10,8 @@ import os
 
 import pytest
 
-from service_common import (COMMON, DFLASH_ARGS, GIB, Watch, assert_enum, assert_length, dump,
-                            enum_prompt, graph_replays, record, run_streams, sd_enabled, sd_num,
+from service_common import (COMMON, DFLASH_ARGS, GIB, Watch, assert_enum, assert_length, components,
+                            dump, enum_prompt, graph_replays, record, run_streams, sd_enabled, sd_num,
                             service, tok)
 
 NAME = "e_dflash"
@@ -41,6 +41,7 @@ def test_ready_sd_and_explicit_old_default_concurrency(svc):
     assert g["runtime_cache_bytes"] == 4 * GIB == rt["budget_bytes"]
     assert rt["requested_running_requests"] == 4, rt
     assert rt["max_running_requests"] == min(4, rt["resource_running_requests"]), rt
+    assert {"kv", "gdn_state", "draft_kv"} <= set(components(rt)), components(rt)  # drafter history shares the budget
     assert sd_enabled(stats), stats.get("speculative")
     assert stats["speculative"].get("max_draft_steps") == 4, stats["speculative"]
     assert stats["cuda_graph"]["enabled"], stats.get("cuda_graph")

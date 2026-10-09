@@ -9,7 +9,8 @@ import os
 
 import pytest
 
-from service_common import COMMON, DFLASH_ARGS, assert_length, enum_prompt, record, sd_enabled, sd_num, service
+from service_common import (COMMON, DFLASH_ARGS, assert_length, components, enum_prompt, record,
+                            sd_enabled, sd_num, service)
 from service_scenarios import cancel_round, pause_round
 
 NAME = "g_dflash_pressure"
@@ -28,9 +29,11 @@ def svc():
 
 
 def test_ready_sd_with_replay(svc):
-    stats = svc.c.stats()
+    stats, rt = svc.c.stats(), svc.rt()
     assert sd_enabled(stats), stats.get("speculative")
-    record(f"{NAME}:ready", runtime=svc.rt(), speculative=stats["speculative"], execution=stats.get("execution"))
+    names = set(components(rt))
+    assert "draft_kv" in names and any(n.startswith("replay_") for n in names), names
+    record(f"{NAME}:ready", runtime=rt, speculative=stats["speculative"], execution=stats.get("execution"))
 
 
 def test_paused_sd_requests_restore_and_complete(svc):

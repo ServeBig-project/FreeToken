@@ -18,11 +18,7 @@ CONFLICTS = {
     "num_tokens": (["--num-tokens", "65536"], ("conflict", "num-tokens")),
     "gdn_state_budget": (["--gdn-state-budget-bytes", "3000000000"], ("conflict", "gdn-state-budget")),
     "kv_reserve_tokens": (["--kv-reserve-tokens", "8192"], ("conflict", "kv-reserve")),
-    # the acceptance configuration lists this flag; `--help` does not. Either a conflict message or
-    # an argument error is a startup failure with text; the report says which one appeared.
-    "linear_state_cache_ratio": (["--linear-state-cache-ratio", "0.5"],
-                                 ("conflict", "linear-state-cache-ratio", "unrecognized")),
-}
+}  # linear_state_cache_ratio is a Python-only configuration field without a CLI switch
 
 
 @pytest.mark.parametrize("case", list(CONFLICTS))

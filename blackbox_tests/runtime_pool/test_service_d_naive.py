@@ -9,7 +9,8 @@ import os
 
 import pytest
 
-from service_common import COMMON, GIB, MODEL_CONTEXT, assert_length, cached_tokens, enum_prompt, record, service
+from service_common import (COMMON, GIB, MODEL_CONTEXT, assert_length, cached_tokens, components,
+                            enum_prompt, record, service)
 from service_scenarios import cancel_round, early_stop_round, over_context, pause_round
 
 NAME = "d_naive"
@@ -36,6 +37,7 @@ def test_ready_bounds_a_large_explicit_concurrency(svc):
     assert rt["requested_running_requests"] == 64, rt
     assert rt["max_running_requests"] == min(64, rt["resource_running_requests"]) >= 1, rt
     assert 1 <= rt["context_tokens"] <= MODEL_CONTEXT, rt
+    assert {"kv", "gdn_state", "gdn_conv"} <= set(components(rt)), components(rt)
     assert pc.get("host_budget_bytes", 0) == 0 and pc.get("host_allocated_bytes", 0) == 0, _host(pc)
     record(f"{NAME}:ready", runtime=rt, geometry=g, host=_host(pc), enabled=pc.get("enabled"))
 
