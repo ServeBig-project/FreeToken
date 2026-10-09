@@ -41,6 +41,7 @@ def rejections(checks):
         "cpu_experts": (qwen36(backend="cpu") + dflash(8), ["cpu", "expert"]),
         "cpu_expert_layers": (base + ["--moe-cpu-layers", "4"], ["cpu", "expert"]),
         "window_without_drafter": (qwen36() + ["--dflash-attention-window", "256"], ["window", "draft"]),
+        "observe_only_without_drafter": (qwen36() + ["--dflash-adaptive-observe-only"], ["observe", "draft", "adaptive"]),
         "adaptive_under_layered": (qwen36(policy="layered-pipeline") + dflash(8, "--speculative-adaptive-cost"),
                                    ["adaptive", "legacy"]),
         "inwave_under_legacy": (base + ["--speculative-phase", "inwave"], ["phase", "legacy", "layered"]),
@@ -70,6 +71,9 @@ CONFIGS = {
     # SD off ignores the draft path and DFlash-only settings
     "nvfp4_off_with_drafter": qwen36() + ["--speculative-num-steps", "0", "--speculative-draft-model-path", DRAFTER,
                                           "--dflash-attention-window", "256", "--no-dflash-compact-kv"],
+    # explicit SD off ignores DFlash-only settings even without a draft path
+    "nvfp4_off_dflash_flags": qwen36() + ["--speculative-num-steps", "0", "--dflash-attention-window", "256",
+                                          "--dflash-adaptive-observe-only"],
     "nvfp4_lp_n8": qwen36(policy="layered-pipeline") + dflash(8),
     # representative hybrid config: default phase, draft-step count omitted (contract: 4 with a draft path)
     "nvfp4_hybrid": qwen36(policy="layered-pipeline", backend="hybrid")
@@ -230,6 +234,7 @@ ALIASES = {"nvfp4_lp_n8": "nvfp4_n8"}
 
 PLAN = {
     "nvfp4_off_with_drafter": [sd_off_ignores_drafter],
+    "nvfp4_off_dflash_flags": [sd_off_ignores_drafter],
     "nvfp4_hybrid": [default_steps, quality],  # smoke
     "nvfp4_ar": [geometry, quality, long_window_ab],
     "nvfp4_n8": [geometry, quality, long_window_ab, invalid_rebuild],
