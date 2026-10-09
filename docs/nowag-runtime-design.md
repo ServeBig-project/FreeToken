@@ -54,10 +54,12 @@ checkpoint → 格式读取 ───┘              │
 | 记录 | 必需内容 | 所有者 |
 | --- | --- | --- |
 | 专家数学描述 | H／I／E／top-k、真实 MoE 层编号、激活及参数、bias、路由权重作用位置、输入／中间值舍入语义、TP 分区 | 模型的专家组件 |
-| 专家权重记录 | 格式、D／B、逻辑与物理形状、bank dtype／stride、每专家字节、共享张量、checkpoint 来源 | 格式加载器；公共存储持有分配 |
+| 专家权重记录 | 公共几何、bank dtype／stride、每专家字节、共享张量；编码细节由格式私有记录承载 | 格式加载器；公共存储持有分配 |
 | 已绑定执行方法 | GPU／CPU 入口、实际布局、支持的执行模式、workspace 需求、输出写入约定 | 格式模块，初始化时绑定 |
 
 模型类型仍可用于检查 checkpoint 是否属于目标模型，但不能用来决定“允许 NoWAG 的模型名单”。输入属于错误模型时仍须拒绝，不能以移除白名单为由忽略权重对应关系。
+
+公共记录不定义D／B、codeword lane或normalizer放置等NoWAG专属字段；模型只声明原有计算语义。NoWAG模块解释自己的编码并决定如何满足该数学，公共层只认识可搬运数据、资源需求和计算契约。
 
 ### 3.2 最小调用面
 
@@ -65,7 +67,7 @@ checkpoint → 格式读取 ───┘              │
 
 1. `load_expert_banks`：读取／切片／准备布局，返回专家权重记录；转换时支持逐层写出。
 2. 启动时绑定执行方法：根据数学描述、实际权重格式、设备与配置检查能力；不靠模型名或路径名选择。
-3. 空间请求：给定物理 token 行数、top-k 和执行模式，报告共享参数与 workspace 的真实大小／布局，由 engine 分配。
+3. 空间请求：给定物理token行数、top-k和实际bank行数，报告workspace的真实大小／布局，由engine计价和分配；不能把模型专家数误当成缓存槽数。
 4. 专家执行：输入 x、当前层、有效路由、权重视图、预分配 workspace 和 out；返回写入后的 out。
 
 执行方法不拥有 batch 调度、CUDA stream 选择、缓存淘汰或资源预算。CPU 使用既有 executor／线程池，格式模块提供布局描述与计算入口。不存在热路径 import、模型实例 monkey patch 或按专家逐个 Python 调度。
@@ -102,7 +104,7 @@ NoWAG 每个投影的实数含义为 `y = ((x * input_norm) @ C[A].T) * output_n
 
 ### 5.2 沿用所有既有搬运入口
 
-decode miss 按需 H2D、整层 prefill streaming、双缓冲预取、命中 D2D、joint／layered／layered-pipeline 驻留组均使用同一权重记录。逻辑专家 id 到物理 slot 的转换只发生一次；格式模块声明消费哪种 id，不能根据某个硬编码格式列表猜测。
+decode miss 按需H2D、整层prefill streaming、双缓冲预取、命中D2D、joint／layered／layered-pipeline驻留组均使用同一权重记录。统一计算入口只接受当前bank的行号；公共存储路径将逻辑专家id转换一次，格式模块无需猜当前是slot还是逻辑id。若内部kernel需要按逻辑专家排序，由格式方法局部整理，不能把该要求泄露成公共格式名单。
 
 并发复制的源、目的、映射、out／workspace 必须保留至完成事件。缓存槽、执行缓冲和 codebook 各有清楚的所有者；格式模块不另加全设备同步。继续复用公共输入存活期、取消、重建及流间依赖协议。
 
@@ -115,7 +117,7 @@ CPU／hybrid 补齐 D4/B12 与 D6/B12；保留原 CPU 队列、flag 握手及 hy
 ## 6. CUDA Graph 与投机解码
 
 - AR 完整图、已有范围图、self-SD draft／verify 图和 DFlash target verify 图都调用相同专家执行方法；NoWAG 不新增自己的图管理器。
-- 编译、profile 读取、kernel 选择及最大 workspace 建立在 capture 前完成。根据 batch 形状选择已有准备好的 kernel 可以保留；不能在 replay 中作主机取数、动态分配或离线调优。
+- 编译、profile读取、最终kernel计划及workspace建立在capture前完成。公共预算先结合物理token行数与bank容量确定几何，再完成kernel准备；不能先按逻辑专家数准备，再靠replay临时补空间。根据batch形状选择已有准备好的kernel可以保留；不能在replay中作主机取数、动态分配或离线调优。
 - 物理行数按实际 Graph padding 和 `batch × query_width` 计算；尾批、无效专家 id、零权重路由写确定结果，不能读取未初始化或越界槽。
 - self-SD 起草缓存命中、补缺加载和 verify 预取使用原缓存接口。按真实压缩行字节测量搬运成本，不能沿用 BF16 成本常数；不改控制器的政策、启用条件或默认值。
 - fixed／adaptive SD 的接受、回滚、GDN／KV 快照以及 DFlash drafter 数学不变。NoWAG 只替换 target 专家；DFlash 自己的权重方案不跟随 target 改变。

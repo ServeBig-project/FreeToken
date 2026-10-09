@@ -80,14 +80,16 @@ TP1/TP2 输出与各自独立参考在冻结容差内一致，无遗漏、重复
 
 ## 5. 输出缓冲、并发与资源
 
-除CLI／HTTP外，engine实际使用的公共专家计算入口固定为 `freetoken.moe.expert_format.bind_expert_method(math, layout, device=..., backend=...)`，返回对象提供：
+除CLI／HTTP外，engine实际使用的公共专家计算入口固定为 `freetoken.moe.expert_format.bind_expert_method(math, layout, format_state, device=..., backend=...)`，返回对象提供：
 
 ```python
-method.workspace_spec(rows, top_k)  # dict: name -> (shape_tuple, torch.dtype)
+method.workspace_spec(rows, top_k, bank_rows=...)  # dict: name -> (shape_tuple, torch.dtype)
 method.run(x, expert_rows, route_weights, banks, shared, workspace=..., out=...)
 ```
 
-`math`是组件数学记录：activation、alpha／limit、router_weight_on_input、gate/up与down输入舍入以及down normalizer位置。`layout`由公开权重加载入口返回，含格式、D/B、逻辑／物理几何、MoE层编号及TP分区。独立作者可通过合法模型和上文权重文件取得这两个公开记录，不读取私有实现状态。
+`math`是原组件数学记录：activation、alpha／limit、router_weight_on_input以及gate/up与down输入舍入。`layout`含公共几何、bank形状／dtype、MoE层编号及TP逻辑分区；`format_state`由权重加载入口返回，具体格式负责解释。独立作者通过合法模型和上文权重文件取得这些公开输出，不读取实现私有对象字段；参考数学直接来自本契约的权重定义。
+
+`rows`包含Graph padding；`bank_rows`是本次kernel实际可寻址的专家行数，缓存模式取实际槽数，全驻／整层通常取逻辑专家数。空间查询没有分配、编译和文件读取副作用；改变缓存容量后必须使用与新几何对应的workspace及图。
 
 `x`为连续BF16 `[T,H]`；`expert_rows`为连续int32 `[T,K]`，直接索引当前传入bank；`route_weights`为连续float32 `[T,K]`。`banks`是当前层或缓存的具名权重tensor，`shared`包含当前设备codebook；workspace按返回规格分配。`out`为连续BF16 `[T,H]`，不与其他实参重叠。TP调用返回本rank贡献，公共通信归约；仅rank0贡献down bias。格式绑定和workspace建立在Graph捕获之前。
 
@@ -106,7 +108,7 @@ method.run(x, expert_rows, route_weights, banks, shared, workspace=..., out=...)
 
 保留流式／非流式、stop／EOS／max_tokens、usage、温度与采样、取消、cache_group和多轮会话语义。正常 stop、长度截断与错误必须正确区分。
 
-`/v1/cache/status`在原有geometry中增加 `experts`，含 `format`、`d`、`assignment_bits` 和 `ranks`。每个rank记录 `rank`、`device`、`compute_backend`、`kernel_backend`、`storage_mode`、`expert_host_bytes`、`expert_device_bytes`、`shared_host_bytes`、`shared_device_bytes`、`workspace_device_bytes`；按实际存储计量，不把共享codebook重复算进每个专家。多种kernel时 `kernel_backend`为实际已绑定名称的列表。
+`/v1/cache/status`在原有geometry中增加 `experts`，含 `format`、`format_parameters` 和 `ranks`。NoWAG的 `format_parameters`包含 `d`、`assignment_bits`，由格式模块提供，公共状态层只转发。每个rank记录 `rank`、`device`、`compute_backend`、`kernel_backend`、`storage_mode`、`expert_host_bytes`、`expert_device_bytes`、`shared_host_bytes`、`shared_device_bytes`、`workspace_device_bytes`；按实际存储计量，不把共享codebook重复算进每个专家。多种kernel时 `kernel_backend`为实际已绑定名称的列表。
 
 Graph与SD的实际执行继续由既有配置、Graph／speculative统计和独立profiler证据判定；仅发布“支持”不证明本轮使用。上述状态在初始化／重建后更新，读取状态不改变执行。不要求逐token日志或新性能分析服务。
 

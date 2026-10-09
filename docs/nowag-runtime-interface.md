@@ -6,9 +6,11 @@
 
 在 `moe/expert_format.py` 定义小型数据记录，不建立类继承树或自动发现系统：
 
-- `ExpertMath`：`activation`、`activation_alpha`、`activation_limit`、`router_weight_on_input`、`gate_up_input_rounding`、`down_input_rounding`、`down_norm_placement`。字段来自真实组件，模型没有的参数使用None，不推测模型名字。
-- `ExpertLayout`：`format`、`d`、`assignment_bits`、`assignment_layout`、全局H/I/E、`moe_layer_ids`、`tp_rank`、`tp_size`；每个投影的全局／局部形状、全局分片起点、首组有效lane及物理bank布局。非NoWAG记录只带其实际使用的格式参数。
-- 继续使用 `ExpertBanks` 表达 `sources`，增加 `layout` 和 `shared`。`shared` 是具名只读张量，例如NoWAG的 `codebook`；所有者和设备副本由公共初始化负责。现有NVFP4 alpha也通过实际作用域明确归属，迁移时保持其逐专家索引语义。
+- `ExpertMath`：`activation`、`activation_alpha`、`activation_limit`、`router_weight_on_input`、`gate_up_input_rounding`、`down_input_rounding`。只表达原模型计算语义；NoWAG normalizer的放置与融合方式不由模型声明。
+- `ExpertLayout`：`format`、全局H/I/E、`moe_layer_ids`、模型提供的TP逻辑分片范围，以及各bank的逻辑／物理shape、dtype、stride和每专家字节。公共代码据此分配和搬运，不解释编码。
+- 继续使用 `ExpertBanks` 表达 `sources`，增加 `layout`、`shared` 和 `format_state`。`shared`是具名只读张量，所有者和设备副本由公共初始化负责；`format_state`由具体格式定义，公共代码只传递，不读取字段。NoWAG的D／B、assignment布局、首组有效lane和normalizer执行位置都放在这里。
+
+NoWAG方法根据自己的权重数学和 `ExpertMath` 的舍入要求确定normalizer顺序：存在down输入舍入时必须先舍入再乘down input normalizer；不存在时可以使用保持既定数值契约的融合实现。其他格式不需要认识这些概念。现有NVFP4 alpha仍明确保留其逐专家索引语义，不能因使用共同记录就变成每模型一个标量。
 
 `sources` 是具名bank到逐MoE层tensor的映射；每个tensor以expert为最外维。bank表只描述物理布局，不决定router、调度或预算。bias作为逐专家数据与对应权重一起索引。
 
@@ -19,12 +21,14 @@
 共同入口：
 
 ```python
-bind_expert_method(math, layout, *, device, backend) -> method
-method.workspace_spec(rows, top_k) -> dict[str, tuple[tuple[int, ...], torch.dtype]]
+bind_expert_method(math, layout, format_state, *, device, backend) -> method
+method.workspace_spec(rows, top_k, *, bank_rows) -> dict[str, tuple[tuple[int, ...], torch.dtype]]
 method.run(x, expert_rows, route_weights, banks, shared, *, workspace, out) -> out
 ```
 
 这里的 `method` 是三个操作的已绑定实现，不要求每个格式写一个类。`backend` 使用FreeToken原有后端选择结果；NoWAG GPU具体kernel由设备／layout／math和batch形状决定，CPU走既有C++ executor。
+
+`rows`是本次执行的物理token行数（含Graph padding），`bank_rows`是kernel可寻址的实际专家bank行数，不是模型逻辑专家数。全驻／整层执行通常为E，slot-cache执行为实际槽数；两者都须用于路由元数据与临时空间计价。该查询是无分配、无编译、无文件读取的纯几何计算。
 
 各实参含义：
 
@@ -46,10 +50,10 @@ TP时 `run`返回本rank的局部贡献；仅rank0贡献down bias，公共调用
 
 1. 解析模型组件、原权重元数据和用户配置；检查NoWAG产物的模型对应关系。
 2. 读取共享codebook与专家布局，解析TP切片；读取／重排压缩bank并保留必要bias。
-3. 绑定实际kernel和数学能力；准备编译与已存在的实测profile。不可用组合在ready前报错。
-4. 报告每专家物理字节、共享参数大小、workspace需求。公共预算确定槽数／执行形状，不能反向由格式模块抢占预算。
-5. 公共管理器建立resident或offload存储，分配每个实际并发执行域的workspace；安装共享参数。
-6. warmup、捕获相应Graph，再发布ready与实际状态。
+3. 绑定格式方法及其数学能力，读取已存在的实测profile；此时不将尚未确定的缓存容量当成最终kernel计划。
+4. 公共预算用候选执行形状和bank行数查询workspace，加上专家行及共享参数，按原政策确定最终槽数／形状。方法只回答空间需求，不能改变预算或偷偷追加内存；无需创建模型或反复试跑才知道基本大小。
+5. 公共管理器建立resident或offload存储，分配每个实际并发执行域的workspace；安装共享参数。以最终几何完成实际kernel计划和编译准备。
+6. warmup、捕获相应Graph，再发布ready与实际状态。真实几何超出已准备范围时走公共重新准备／重建流程，不在replay里扩容。
 
 重建沿用同一顺序中的资源准备／重绑／重新捕获步骤；不重新读取离线模型或训练codebook。异步旧资源必须在公共完成点后释放。
 
@@ -78,8 +82,21 @@ TP时 `run`返回本rank的局部贡献；仅rank0贡献down bias，公共调用
 
 ## 6. FTW与对外状态
 
-FTW新增的NoWAG数据使用现有tensor存储和metadata机制：`quant_format="nowag"`、`expert_layout`记录逻辑编码／层映射，`expert_shared`列出具名共享tensor条目；bank继续逐层保存。codebook只写一次，必要bias不遗漏。旧非NoWAG FTW的字段语义不改变。
+FTW新增的NoWAG数据使用现有tensor存储和metadata机制：`quant_format="nowag"`、`expert_layout`记录通用几何／层映射，`expert_shared`列出具名共享tensor条目，`expert_format_state`由格式模块编码／解析；通用writer只写出这些记录和tensor。bank继续逐层保存，codebook只写一次，必要bias不遗漏。旧非NoWAG FTW的字段语义不改变。
 
 NoWAG FTW存全局编码，不存转换时的TP局部切片；运行时按目标TP生成layout。`BASE`配置／tokenizer／非专家权重一并保留，源NoWAG绝对路径只可作来源说明，不能成为加载依赖。
 
 状态接口固定见公开契约。状态里的物理字节来自实际分配，不能把逻辑压缩率换算值当实际显存；多rank分别报告，不能用某rank乘TP假定所有rank相同。
+
+## 7. 判断边界是否成立的实际变化
+
+| 变化 | 应修改的位置 | 不应产生的连带修改 |
+| --- | --- | --- |
+| 离线换训练方法，只改变codebook／assignment／normalizer值 | 离线仓库与输出权重 | FreeToken在线代码 |
+| 新模型复用已有专家数学族 | 模型映射／组件描述及匹配权重 | NoWAG模型名单、调度器、缓存政策 |
+| 模型引入新的专家激活数学 | 模型描述和缺失的计算能力 | 每条streaming／Graph路径各写一份实现 |
+| NoWAG换kernel、需要不同workspace | NoWAG方法／kernel及其空间查询 | 公共调度添加格式分支 |
+| 从offload切到全驻或hybrid | 公共存储／执行模式选择 | 重新量化、复制一套NoWAG计算逻辑 |
+| 改缓存容量／TP大小／Graph物理batch | 公共规划调用已有布局／空间接口并重新准备 | 热路径猜D/B、重训codebook或复用过期地址 |
+
+这些是实现审查的具体判据，不以“文件已搬进独立目录”代替模块化。新数学能力仍需新增kernel；泛化不意味着任何未来模型都无需实现工作。
