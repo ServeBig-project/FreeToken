@@ -9,6 +9,8 @@ from typing import Any, Callable
 import pytest
 import torch
 
+pytest.importorskip("triton")
+
 
 @dataclass
 class _PublicModules:
@@ -22,8 +24,8 @@ class _PublicModules:
 def public_modules() -> _PublicModules:
     return _PublicModules(
         fused=importlib.import_module("freetoken.moe.nowag.method"),
-        cuda_ops=importlib.import_module("nowag_vllm.cuda_ops"),
-        moe_ops=importlib.import_module("nowag_vllm.moe_ops"),
+        cuda_ops=importlib.import_module("freetoken.kernel.nowag.cuda_ops"),
+        moe_ops=importlib.import_module("freetoken.kernel.nowag.moe_ops"),
         legacy_align=importlib.import_module("freetoken.kernel.triton.moe_align"),
     )
 
@@ -61,7 +63,6 @@ def _install_runtime_stubs(
     monkeypatch: pytest.MonkeyPatch,
     modules: _PublicModules,
     *,
-    capability: Callable[..., bool],
     sparse_align: Callable[..., Any],
     legacy_align: Callable[..., Any],
 ):
@@ -78,12 +79,6 @@ def _install_runtime_stubs(
     monkeypatch.setattr(modules.moe_ops, "nowag_fused_moe", plugin_stub)
     monkeypatch.setattr(modules.fused, "nowag_fused_moe", plugin_stub, raising=False)
 
-    monkeypatch.setattr(
-        modules.cuda_ops, "has_moe_sparse_route_align", capability, raising=False
-    )
-    monkeypatch.setattr(
-        modules.fused, "has_moe_sparse_route_align", capability, raising=False
-    )
     monkeypatch.setattr(
         modules.cuda_ops, "moe_sparse_route_align", sparse_align, raising=False
     )
@@ -104,14 +99,12 @@ def _capture_align_callback(
     modules: _PublicModules,
     *,
     m: int,
-    capability: Callable[..., bool],
     sparse_align: Callable[..., Any],
     legacy_align: Callable[..., Any],
 ):
     captured = _install_runtime_stubs(
         monkeypatch,
         modules,
-        capability=capability,
         sparse_align=sparse_align,
         legacy_align=legacy_align,
     )
@@ -166,101 +159,80 @@ def _assert_public_call(call, ids, block_size: int, num_experts: int):
     assert actual_num_experts == num_experts
 
 
-def test_r256_uses_sparse_route_align_when_capability_present(
-    monkeypatch, public_modules
-):
+def test_r256_uses_sparse_route_align(monkeypatch, public_modules):
     sparse_calls = []
     legacy_calls = []
-    capability_calls = []
     expected = (
         torch.tensor([1], dtype=torch.int32),
         torch.tensor([2], dtype=torch.int32),
         torch.tensor([3], dtype=torch.int32),
     )
 
-    def capability():
-        capability_calls.append(True)
-        return True
-
     callback, ids = _capture_align_callback(
         monkeypatch,
         public_modules,
         m=32,
-        capability=capability,
         sparse_align=_recording_stub(expected, sparse_calls),
         legacy_align=_recording_stub(None, legacy_calls),
     )
     result = callback(ids, 16, 4)
 
     assert result is expected
-    assert capability_calls == [True]
     assert len(sparse_calls) == 1
     assert not legacy_calls
     _assert_public_call(sparse_calls[0], ids, 16, 4)
 
 
-def test_r264_delegates_to_legacy_even_when_capability_present(
-    monkeypatch, public_modules
-):
+def test_r264_delegates_to_legacy(monkeypatch, public_modules):
     sparse_calls = []
     legacy_calls = []
-    capability_calls = []
     expected = (
         torch.tensor([4], dtype=torch.int32),
         torch.tensor([5], dtype=torch.int32),
         torch.tensor([6], dtype=torch.int32),
     )
 
-    def capability():
-        capability_calls.append(True)
-        return True
-
     callback, ids = _capture_align_callback(
         monkeypatch,
         public_modules,
         m=33,
-        capability=capability,
         sparse_align=_recording_stub(None, sparse_calls),
         legacy_align=_recording_stub(expected, legacy_calls),
     )
     result = callback(ids, 32, 4)
 
     assert result is expected
-    assert not capability_calls
     assert not sparse_calls
     assert len(legacy_calls) == 1
     _assert_public_call(legacy_calls[0], ids, 32, 4)
 
 
-def test_capability_false_delegates_r256_to_legacy(monkeypatch, public_modules):
+def test_r256_with_alignment_storage_delegates_to_legacy(monkeypatch, public_modules):
+    # The in-tree extension always has the sparse aligner; only caller-owned
+    # alignment storage sends a small route set to the legacy aligner.
     sparse_calls = []
     legacy_calls = []
-    capability_calls = []
     expected = (
         torch.tensor([7], dtype=torch.int32),
         torch.tensor([8], dtype=torch.int32),
         torch.tensor([9], dtype=torch.int32),
     )
-
-    def capability():
-        capability_calls.append(True)
-        return False
+    storage = torch.empty(1, dtype=torch.int32)
 
     callback, ids = _capture_align_callback(
         monkeypatch,
         public_modules,
         m=32,
-        capability=capability,
         sparse_align=_recording_stub(None, sparse_calls),
         legacy_align=_recording_stub(expected, legacy_calls),
     )
-    result = callback(ids, 64, 4)
+    result = callback(ids, 64, 4, alignment_storage=storage)
 
     assert result is expected
-    assert capability_calls == [True]
     assert not sparse_calls
     assert len(legacy_calls) == 1
     _assert_public_call(legacy_calls[0], ids, 64, 4)
+    assert legacy_calls[0][1]["alignment_storage"] is storage
 
 
 def test_sparse_route_align_error_propagates_unchanged(monkeypatch, public_modules):
@@ -277,7 +249,6 @@ def test_sparse_route_align_error_propagates_unchanged(monkeypatch, public_modul
         monkeypatch,
         public_modules,
         m=32,
-        capability=lambda: True,
         sparse_align=sparse_align,
         legacy_align=_recording_stub(None, legacy_calls),
     )

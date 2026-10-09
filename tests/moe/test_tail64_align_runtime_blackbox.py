@@ -7,6 +7,8 @@ from typing import Any
 import pytest
 import torch
 
+pytest.importorskip("triton")
+
 
 @dataclass(frozen=True)
 class _Modules:
@@ -19,7 +21,7 @@ def _load_modules() -> _Modules:
     return _Modules(
         fused=importlib.import_module("freetoken.moe.nowag.method"),
         align=importlib.import_module("freetoken.kernel.triton.moe_align"),
-        moe_ops=importlib.import_module("nowag_vllm.moe_ops"),
+        moe_ops=importlib.import_module("freetoken.kernel.nowag.moe_ops"),
     )
 
 
