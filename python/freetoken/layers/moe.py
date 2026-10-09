@@ -1,3 +1,4 @@
+import math
 import os
 from typing import TYPE_CHECKING, Tuple
 
@@ -426,7 +427,16 @@ class OffloadMoELayer(MoELayer):
         cache = self.offload_cache
         assert cache is not None
         resident = cache.has_resident_prefill_layer(self.layer_id)
-        if resident or cache.prefill_group_size:
+        # A chunk whose routes leave some expert of the layer untouched moves strictly fewer
+        # bytes through the on-demand slot path than streaming the whole layer (an agent
+        # turn's short continuation after a prefix hit), and keeps the rest of the decode
+        # working set resident. One host sync per layer; this path is eager anyway.
+        short_chunk = (
+            not resident and not cache.prefill_group_size
+            and hidden_states.shape[0] * self.top_k < self.num_experts * math.log(2 * self.num_experts)
+            and int(torch.unique(topk_ids).numel()) < self.num_experts
+        )
+        if resident or cache.prefill_group_size or short_chunk:
             expert_map = (
                 cache.slot_for_id[self.layer_id]
                 if cache.quant_format in ("bf16", "nvfp4", "fp8_block", "mxfp4_triton", "ds_fp4")
@@ -437,7 +447,7 @@ class OffloadMoELayer(MoELayer):
                 cache.map_prefill_experts(self.layer_id, topk_ids)
                 alphas = cache.alphas_for_resident_layer_slots(self.layer_id)
             else:
-                # Warmup has no resident group; load only the routed experts.
+                # No resident group (warmup, or a short chunk): load only the routed experts.
                 cache.ensure_experts(self.layer_id, topk_ids)
                 cache.copy_missing()
                 alphas = cache.alphas_for_slots(self.layer_id)

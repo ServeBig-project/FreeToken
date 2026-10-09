@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from typing import TYPE_CHECKING, List, NoReturn, Set, Tuple
 
@@ -802,12 +803,12 @@ class Scheduler(SchedulerIOMixin):
                 pending_depth = pending_complete_prefill_depth(
                     self.prefill_manager.pending_list, self.prefill_budget
                 )
-                continuation_uids = {
-                    pending.uid
-                    for pending in self.prefill_manager.pending_list
-                    if pending.chunked_req is not None
-                    or pending.layered_cached_len is not None
-                }
+            continuation_uids = {
+                pending.uid
+                for pending in self.prefill_manager.pending_list
+                if pending.chunked_req is not None
+                or pending.layered_cached_len is not None
+            }
             batch = executor.schedule_first_batch(self.prefill_budget)
             if batch is not None and not batch.has_prefill:
                 forward_input = self._prepare_resident_decode_batch(batch)
@@ -824,9 +825,12 @@ class Scheduler(SchedulerIOMixin):
                 outputs = [data]
             elif batch is not None:
                 self._resident_decode_input = None
-                use_fast_path = False
+                # A short prefill (its rows route to fewer experts than one full layer holds)
+                # runs eagerly on the on-demand expert path: staging whole layers for a wave
+                # would move more bytes than the routed experts and set the TTFT floor.
+                use_fast_path = self._short_prefill(batch)
                 if gate is not None:
-                    use_fast_path, blocked_by = gate.should_use_fast_path(
+                    gated, blocked_by = gate.should_use_fast_path(
                         running_decode_count=len(self.decode_manager.running_reqs),
                         pending_complete_prefill_depth=pending_depth,
                         wave_active=executor.active,
@@ -838,11 +842,12 @@ class Scheduler(SchedulerIOMixin):
                         self.adaptive_fast_path_stats.gate_blocks_by_queue += 1
                     elif blocked_by == "cooldown":
                         self.adaptive_fast_path_stats.gate_blocks_by_cooldown += 1
-                    use_fast_path = use_fast_path and direct_prefill_batch_is_eligible(
-                        batch,
-                        token_budget=self.prefill_budget,
-                        continuation_uids=continuation_uids,
-                    )
+                    use_fast_path = use_fast_path or gated
+                use_fast_path = use_fast_path and direct_prefill_batch_is_eligible(
+                    batch,
+                    token_budget=self.prefill_budget,
+                    continuation_uids=continuation_uids,
+                )
                 if use_fast_path:
                     pipeline_executor = self.layered_pipeline_executor
                     if pipeline_executor is None:
@@ -897,6 +902,16 @@ class Scheduler(SchedulerIOMixin):
         self._process_last_outputs(ready_outputs)
         self._resident_last_outputs = deferred_outputs
         self._flush_abort_acks()
+
+    def _short_prefill(self, batch: Batch) -> bool:
+        """Whether the batch's prefill rows are expected to leave some expert of a layer
+        unrouted (uniform routes: E * (1 - (1 - 1/E)^(rows*top_k)) < E - 1/2), so the eager
+        on-demand expert path moves fewer bytes than staging whole layers for a wave."""
+        if self.layered_pipeline_executor is None or self.engine.moe_offload_cache is None:
+            return False
+        mc = self.engine.config.model_config
+        rows = sum(req.extend_len for req in batch.prefill_reqs)
+        return rows * mc.num_experts_per_tok < mc.num_experts * math.log(2 * mc.num_experts)
 
     def _forward_direct_resident_batch(self, batch: Batch) -> list[ForwardData]:
         """Run one eager resident-loop batch and retain resident drain timing."""

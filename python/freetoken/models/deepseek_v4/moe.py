@@ -89,43 +89,6 @@ class DSV4OffloadMoELayer(OffloadMoELayer):
         self.swiglu_limit = args.swiglu_limit
         self.nowag_model_type = "deepseek_v4"
 
-    def _prefill_routed(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        cache = self.offload_cache
-        assert cache is not None
-        if cache.has_resident_prefill_layer(self.layer_id):
-            return super()._prefill_routed(
-                hidden_states,
-                topk_weights,
-                topk_ids,
-            )
-        # Whole-layer streaming moves all num_experts rows per layer; a small
-        # chunk touches at most T*top_k of them, so below that crossover the
-        # decode-style on-demand slot path strictly moves fewer bytes (and
-        # keeps short-prompt slot residency -- hence hybrid decode's GPU/CPU
-        # route split -- unchanged). Mixing modes across chunks is safe: the
-        # streaming buffers disown their borrowed slots on invalidation.
-        if hidden_states.shape[0] * self.top_k >= self.num_experts:
-            return super()._prefill_routed(hidden_states, topk_weights, topk_ids)
-        cache.ensure_experts(self.layer_id, topk_ids)  # in-place expert-id -> slot
-        cache.copy_missing()
-        if cache.collect_stats:
-            cache.record_decode_stats(self.layer_id)
-        return self._expert_gemm(
-            cache,
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            views=cache.bank_views(),
-            n=None,
-            alphas=cache.alphas_for_slots(self.layer_id),
-            is_prefill=True,
-        )
-
 
 class MoE(nn.Module):
     """Sparse MoE: hash/score router -> offloaded FP4 routed experts + shared expert."""
