@@ -15,6 +15,7 @@ from freetoken.gpu_select import gpu_identity
 from freetoken.layers import set_rope_device
 from freetoken.models import create_model, load_weight
 from freetoken.moe import create_moe_backend, is_offload_moe_backend
+from freetoken.moe.expert_format import ExpertLayout, bind_expert_method, expert_math
 from freetoken.moe.expert_banks import load_expert_banks
 from freetoken.moe.offload_cache import OffloadMoeCache, attach_offload_moe_cache
 from freetoken.utils import align_ceil, init_logger, is_sm90_family, is_sm100_family, mem_GB, torch_dtype
@@ -745,7 +746,7 @@ class Engine:
             )
             cache.set_bank_sources(banks.sources, layer_residency=banks.layer_residency)
             cache.set_alphas(banks.gate_up_alpha, banks.down_alpha)
-            cache.set_codebook(banks.codebook)
+            cache.set_shared(banks.shared)
             if getattr(config, "batching_policy", "legacy") == "joint":
                 logger.info_rank0(
                     "Joint group-resident batching: "
@@ -776,6 +777,17 @@ class Engine:
         # _iter_offload_moe_layers() hook when its MoE blocks are bespoke nn.Modules (DSV4).
         layers = attach_offload_moe_cache(self.model, cache)
         assert len(layers) == config.model_config.num_moe_layers
+        sample = layers[0]
+        method = bind_expert_method(
+            expert_math(sample),
+            ExpertLayout(cache.quant_format, sample.hidden_size, sample.intermediate_size,
+                         sample.num_experts),
+            banks.format_state if cache_factory is None else None,
+            device=self.device,
+            backend=config.moe_backend,
+        )
+        for layer in layers:
+            layer.expert_method = method
         cache.register_resident_working_sets(
             [layer.num_experts for layer in layers]
         )
@@ -849,7 +861,8 @@ class Engine:
             device=self.device,
             swiglu_alpha=getattr(sample, "hidden_act_alpha", 1.702),
             swiglu_limit=getattr(sample, "swiglu_limit", None),
-            nowag_model_type=getattr(sample, "nowag_model_type", None),
+            gate_up_input_rounding=getattr(sample, "gate_up_input_rounding", None),
+            down_input_rounding=getattr(sample, "down_input_rounding", None),
         )
         cache.set_cpu_executor(executor)
         self.cpu_moe_executor = executor
@@ -1692,9 +1705,8 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
     is_moe = getattr(model_config, "is_moe", False)
     nowag_expert_path = getattr(config, "nowag_expert_path", None)
     if nowag_expert_path is not None:
-        from freetoken.moe.nowag import get_nowag_model_rule
-
-        get_nowag_model_rule(model_config)
+        if not is_moe:
+            raise ValueError("--nowag-expert-path requires a model with routed experts")
         object.__setattr__(model_config, "expert_quant", "nowag")
         object.__setattr__(model_config, "nowag_expert_path", nowag_expert_path)
     expert_quant = getattr(model_config, "expert_quant", "none")

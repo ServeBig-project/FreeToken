@@ -6,12 +6,7 @@ import torch
 import freetoken.layers.moe as moe_layers
 from freetoken.layers import BaseOP, LinearReplicated, MoELayer, OffloadMoELayer
 from freetoken.moe import is_offload_moe_backend
-from freetoken.moe.fused_mxfp4 import (
-    MXFP4_DECODE_MAX_TOKENS,
-    _transpose_mxfp4_for_decode,
-    run_mxfp4_prefill_experts_t,
-    run_mxfp4_splitk_decode_experts,
-)
+from freetoken.moe.fused_mxfp4 import _transpose_mxfp4_for_decode
 from freetoken.utils import nvtx_annotate
 
 from .weight import local_mxfp4_intermediate_range
@@ -46,6 +41,7 @@ class GptOssMxfp4TritonMoELayer(MoELayer):
         self.local_intermediate_size = local_intermediate
         self.hidden_act_alpha = config.hidden_act_alpha
         self.swiglu_limit = config.swiglu_limit
+        moe_layers.bind_resident_method(self)
 
         hidden_blocks = config.hidden_size // 32
         intermediate_blocks = local_intermediate // 32
@@ -131,24 +127,12 @@ class GptOssMxfp4TritonMoELayer(MoELayer):
 
         topk_weights, topk_ids = self._topk(router_logits)
         self._ensure_decode_weights()
-        if hidden_states.shape[0] <= MXFP4_DECODE_MAX_TOKENS:
-            output = run_mxfp4_splitk_decode_experts(
-                hidden_states, topk_weights, topk_ids,
-                self._gu_blocks_t, self._gu_scales_t, self.gate_up_proj_bias,
-                self._dn_blocks_t, self._dn_scales_t, self.down_proj_bias,
-                top_k=self.top_k,
-                hidden_act_alpha=self.hidden_act_alpha,
-                swiglu_limit=self.swiglu_limit,
-            )
-        else:
-            output = run_mxfp4_prefill_experts_t(
-                hidden_states, topk_weights, topk_ids,
-                self._gu_blocks_t, self._gu_scales_t, self.gate_up_proj_bias,
-                self._dn_blocks_t, self._dn_scales_t, self.down_proj_bias,
-                top_k=self.top_k,
-                hidden_act_alpha=self.hidden_act_alpha,
-                swiglu_limit=self.swiglu_limit,
-            )
+        banks = {
+            "gate_up_blocks": self._gu_blocks_t, "gate_up_scales": self._gu_scales_t,
+            "gate_up_bias": self.gate_up_proj_bias, "down_blocks": self._dn_blocks_t,
+            "down_scales": self._dn_scales_t, "down_bias": self.down_proj_bias,
+        }
+        output = self.expert_method.run(hidden_states, topk_ids, topk_weights, banks, {})
         return self._maybe_all_reduce(output)
 
 

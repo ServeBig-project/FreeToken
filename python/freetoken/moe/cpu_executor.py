@@ -21,7 +21,6 @@ import os
 import threading
 import time
 import weakref
-from dataclasses import dataclass
 
 import torch
 
@@ -93,53 +92,6 @@ _NOWAG_BANK_NAMES = (
 
 def _nowag_assignment_words(width: int) -> int:
     return ((width + 5) // 6 * 12 + 31) // 32
-
-
-@dataclass(frozen=True)
-class _NowagCpuMath:
-    round_input: bool = False
-    round_middle: bool = False
-    preapply_down_norm: bool = False
-    router_weight_on_input: bool = False
-
-
-def _resolve_nowag_cpu_math(
-    fmt: str,
-    model_type: str | None,
-    activation: str,
-    apply_router_weight_on_input: bool,
-    swiglu_limit: float | None,
-) -> _NowagCpuMath:
-    if fmt != "nowag":
-        return _NowagCpuMath()
-
-    from freetoken.moe.nowag import (
-        GATE_UP_EPILOGUE_NORM,
-        NO_ACTIVATION_ROUNDING,
-        get_nowag_model_rule,
-    )
-
-    if model_type is None:
-        raise ValueError(
-            "NoWAG CPU MoE requires nowag_model_type "
-            "('qwen3_5_moe' or 'deepseek_v4')"
-        )
-    rule = get_nowag_model_rule(model_type)
-    if activation not in ("silu", "swish"):
-        raise ValueError(
-            f"{rule.model_type} NoWAG CPU MoE requires silu, got {activation!r}"
-        )
-    if apply_router_weight_on_input != rule.router_weight_on_input:
-        placement = "Gate/Up input" if rule.router_weight_on_input else "Down output"
-        raise ValueError(f"{rule.model_type} NoWAG applies router weights at {placement}")
-    if rule.requires_swiglu_limit and swiglu_limit is None:
-        raise ValueError(f"{rule.model_type} NoWAG requires swiglu_limit")
-    return _NowagCpuMath(
-        round_input=rule.gate_up_input_rounding != NO_ACTIVATION_ROUNDING,
-        round_middle=rule.down_input_rounding != NO_ACTIVATION_ROUNDING,
-        preapply_down_norm=rule.down_norm_placement == GATE_UP_EPILOGUE_NORM,
-        router_weight_on_input=rule.router_weight_on_input,
-    )
 
 
 def compiled_extension_supports(
@@ -237,7 +189,8 @@ class CpuMoeExecutor:
         device: torch.device,
         swiglu_alpha: float = 1.702,
         swiglu_limit: float | None = None,
-        nowag_model_type: str | None = None,
+        gate_up_input_rounding: str | None = None,
+        down_input_rounding: str | None = None,
     ) -> None:
         from freetoken.kernel import _cpu_moe
 
@@ -277,18 +230,16 @@ class CpuMoeExecutor:
         self.quant_format = fmt
         self.device = device
         self.max_tokens = int(max_tokens)
-        nowag_math = _resolve_nowag_cpu_math(
-            fmt,
-            nowag_model_type,
-            activation,
-            apply_router_weight_on_input,
-            swiglu_limit,
-        )
-        router_weight_on_input = (
-            nowag_math.router_weight_on_input
-            if fmt == "nowag"
-            else bool(apply_router_weight_on_input)
-        )
+        nowag_flags = (False, False, False)
+        if fmt == "nowag":
+            from freetoken.moe.expert_format import ExpertMath
+            from freetoken.moe.nowag.method import nowag_cpu_flags
+
+            nowag_flags = nowag_cpu_flags(ExpertMath(
+                activation, swiglu_alpha, swiglu_limit, bool(apply_router_weight_on_input),
+                gate_up_input_rounding, down_input_rounding,
+            ))
+        router_weight_on_input = bool(apply_router_weight_on_input)
         self.apply_router_weight_on_input = router_weight_on_input
         # The per-layer tensors and their pointer tables must outlive the executor
         # (C++ holds raw addresses into both).
@@ -338,9 +289,9 @@ class CpuMoeExecutor:
             weight_format=_WFMT_IDS[fmt],
             swiglu_alpha=float(swiglu_alpha),
             swiglu_limit=float(swiglu_limit) if swiglu_limit is not None else float("inf"),
-            nowag_round_input=nowag_math.round_input,
-            nowag_round_middle=nowag_math.round_middle,
-            nowag_preapply_down_norm=nowag_math.preapply_down_norm,
+            nowag_round_input=nowag_flags[0],
+            nowag_round_middle=nowag_flags[1],
+            nowag_preapply_down_norm=nowag_flags[2],
             core_ids=core_ids,
             **ptrs,
         )
@@ -405,7 +356,7 @@ class CpuMoeExecutor:
         # Move a required input FP8 round-trip to the captured GPU path before D2H;
         # the C++ executor then skips its serial host-side equivalent.
         self._gpu_prequant = (
-            fmt == "ds_fp4" or (fmt == "nowag" and nowag_math.round_input)
+            fmt == "ds_fp4" or (fmt == "nowag" and nowag_flags[0])
         ) and device.type == "cuda"
         if self._gpu_prequant:
             self._ext.set_input_prequant(True)
@@ -447,7 +398,7 @@ class CpuMoeExecutor:
         """
         banks = cache.bank_sources
         if fmt == "nowag":
-            return self._resolve_nowag_banks(banks, cache.host_codebook)
+            return self._resolve_nowag_banks(banks, cache.host_shared.get("codebook"))
 
         if fmt == "bf16":
             gate_up = banks["gate_up"]

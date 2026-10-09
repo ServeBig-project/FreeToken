@@ -1,4 +1,4 @@
-"""Load expert-only NoWAG weights and describe their model-specific math."""
+"""Read NoWAG v1 expert-only weights (native sidecar) into pinned host banks."""
 
 from __future__ import annotations
 
@@ -16,10 +16,6 @@ FORMAT = "nowag_expert_sidecar_v1"
 LEGACY_DSV4_FORMAT = "deepseek_v4_nowag_expert_sidecar_v1"
 CODEBOOK_KEY = "global_all.codebook"
 RUNTIME_ASSIGNMENT_LAYOUT = "word_major"
-NO_ACTIVATION_ROUNDING = "none"
-DYNAMIC_E4M3_GROUP128_UE8M0 = "dynamic_e4m3_per_token_group128_ue8m0"
-GATE_UP_EPILOGUE_NORM = "gate_up_epilogue"
-DOWN_PROLOGUE_NORM = "down_prologue"
 
 # The files keep the projection names used by the first DSV4 quantizer.  Their
 # meaning is model-independent: w1 is gate, w3 is up, and w2 is down.
@@ -27,62 +23,11 @@ _PROJECTION_BANK = {"w1": "gate", "w3": "up", "w2": "down"}
 
 
 @dataclass(frozen=True)
-class NowagModelRule:
-    model_type: str
-    gate_up_input_rounding: str
-    down_input_rounding: str
-    down_norm_placement: str
-    router_weight_on_input: bool
-    requires_swiglu_limit: bool
+class NowagState:
+    """Encoding parameters the NoWAG method interprets; opaque to common code."""
 
-
-_MODEL_RULES = {
-    "deepseek_v4": NowagModelRule(
-        "deepseek_v4",
-        gate_up_input_rounding=DYNAMIC_E4M3_GROUP128_UE8M0,
-        down_input_rounding=DYNAMIC_E4M3_GROUP128_UE8M0,
-        down_norm_placement=DOWN_PROLOGUE_NORM,
-        router_weight_on_input=False,
-        requires_swiglu_limit=True,
-    ),
-    "qwen3_5_moe": NowagModelRule(
-        "qwen3_5_moe",
-        gate_up_input_rounding=NO_ACTIVATION_ROUNDING,
-        down_input_rounding=NO_ACTIVATION_ROUNDING,
-        down_norm_placement=GATE_UP_EPILOGUE_NORM,
-        router_weight_on_input=False,
-        requires_swiglu_limit=False,
-    ),
-}
-
-
-def get_nowag_model_rule(model_config_or_type) -> NowagModelRule:
-    """Return the supported NoWAG rule for a parsed model config or model type."""
-    if isinstance(model_config_or_type, str):
-        model_type = model_config_or_type
-        model_config = None
-    else:
-        model_config = model_config_or_type
-        model_type = getattr(model_config, "model_type", None)
-        if getattr(model_config, "dsv4_args", None) is not None:
-            model_type = "deepseek_v4"
-
-    rule = _MODEL_RULES.get(model_type)
-    if rule is None:
-        supported = ", ".join(sorted(_MODEL_RULES))
-        raise ValueError(
-            f"NoWAG expert serving does not support model_type {model_type!r}; "
-            f"supported model types: {supported}"
-        )
-    if model_config is not None:
-        if not getattr(model_config, "is_moe", True):
-            raise ValueError("--nowag-expert-path requires a model with routed experts")
-        hidden_act = getattr(model_config, "hidden_act", "silu")
-        if hidden_act != "silu":
-            raise ValueError(
-                f"NoWAG expert serving requires SwiGLU/silu experts, got {hidden_act!r}"
-            )
-    return rule
+    d: int
+    assignment_bits: int
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -105,7 +50,7 @@ def _tensor_key(layer: int, expert: int, projection: str, suffix: str) -> str:
 def _validate_manifest_model(
     manifest: dict[str, Any],
     manifest_path: Path,
-    rule: NowagModelRule,
+    model_type: str,
     *,
     layers: int,
     experts: int,
@@ -114,18 +59,18 @@ def _validate_manifest_model(
 ) -> None:
     output_format = manifest.get("format")
     if output_format == LEGACY_DSV4_FORMAT:
-        if rule.model_type != "deepseek_v4":
+        if model_type != "deepseek_v4":
             raise ValueError(
                 f"{manifest_path}: legacy DeepSeek-V4 NoWAG weights cannot serve "
-                f"{rule.model_type}"
+                f"{model_type}"
             )
         return
     if output_format != FORMAT:
         raise ValueError(f"{manifest_path}: unsupported NoWAG output format")
-    if manifest.get("model_type") != rule.model_type:
+    if manifest.get("model_type") != model_type:
         raise ValueError(
             f"{manifest_path}: NoWAG weights are for model_type "
-            f"{manifest.get('model_type')!r}, expected {rule.model_type!r}"
+            f"{manifest.get('model_type')!r}, expected {model_type!r}"
         )
     expected_dims = {
         "num_moe_layers": layers,
@@ -145,8 +90,7 @@ def load_nowag_expert_sources(
     model_config,
     *,
     dtype: torch.dtype = torch.bfloat16,
-    model_type: str | None = None,
-) -> tuple[dict[str, list[torch.Tensor]], torch.Tensor]:
+) -> tuple[dict[str, list[torch.Tensor]], dict[str, torch.Tensor], NowagState]:
     """Load and pin the nine per-expert banks plus one model-wide codebook.
 
     Assignment banks are always returned as contiguous ``[E, W, N]`` tensors.
@@ -158,7 +102,6 @@ def load_nowag_expert_sources(
     if dtype != torch.bfloat16:
         raise ValueError("NoWAG expert serving currently requires bfloat16")
 
-    rule = get_nowag_model_rule(model_type or model_config)
     root = Path(output_path).resolve()
     manifest_path = root / "manifest.json" if root.is_dir() else root
     root = manifest_path.parent
@@ -171,7 +114,7 @@ def load_nowag_expert_sources(
     _validate_manifest_model(
         manifest,
         manifest_path,
-        rule,
+        model_config.model_type,
         layers=layers,
         experts=experts,
         hidden=hidden,
@@ -297,19 +240,4 @@ def load_nowag_expert_sources(
             f"NoWAG codebook must be {list(expected_codebook_shape)}, "
             f"got {tuple(codebook.shape)}"
         )
-    return sources, codebook
-
-
-__all__ = [
-    "CODEBOOK_KEY",
-    "DOWN_PROLOGUE_NORM",
-    "DYNAMIC_E4M3_GROUP128_UE8M0",
-    "FORMAT",
-    "GATE_UP_EPILOGUE_NORM",
-    "LEGACY_DSV4_FORMAT",
-    "NO_ACTIVATION_ROUNDING",
-    "RUNTIME_ASSIGNMENT_LAYOUT",
-    "NowagModelRule",
-    "get_nowag_model_rule",
-    "load_nowag_expert_sources",
-]
+    return sources, {"codebook": codebook}, NowagState(group_size, assignment_bits)

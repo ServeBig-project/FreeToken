@@ -7,10 +7,8 @@ extracting the GPU-resident alphas if the format folds its global scales. The
 engine stays quant-agnostic: it calls :func:`load_expert_banks` and wires the
 returned bundle into the cache.
 
-A format is fully described by three per-format tables: ``_BANK_SCHEMAS``
-(offload_cache, bank layout), ``_PROVIDERS`` (here, loading/repack), and
-``OffloadMoELayer._expert_gemm`` (kernel dispatch). Adding a format touches those
-three places and nothing else.
+A format is described in two places: :mod:`freetoken.moe.expert_format` (bank layout
+and bound compute method) and ``_PROVIDERS`` here (loading/repack).
 """
 
 from __future__ import annotations
@@ -24,7 +22,7 @@ import torch
 
 from freetoken.utils import init_logger
 
-from .offload_cache import _BANK_SCHEMAS
+from .expert_format import _BANK_SCHEMAS
 
 logger = init_logger(__name__)
 
@@ -40,9 +38,11 @@ class ExpertBanks:
     # marlin/b12x per-expert global scales ([L*E]); None for formats without them
     gate_up_alpha: torch.Tensor | None = field(default=None)
     down_alpha: torch.Tensor | None = field(default=None)
-    # One model-wide NoWAG codebook. It is copied to the GPU once and does not
-    # contribute to the per-expert slot size.
-    codebook: torch.Tensor | None = field(default=None)
+    # Format-wide read-only tensors (the NoWAG codebook): installed once per device,
+    # never part of the per-expert slot size.
+    shared: dict[str, torch.Tensor] = field(default_factory=dict)
+    # Format-private encoding parameters, passed through to bind_expert_method.
+    format_state: object = None
     # Per-layer HostResidency values; None -> all pinned (the only class
     # served; policies that assign other classes are not implemented).
     layer_residency: list[str] | None = field(default=None)
@@ -284,17 +284,13 @@ def _nowag_banks(model_path, model_config, device, dtype, dummy, parallel=False,
         raise ValueError("NoWAG experts require a completed quantization output")
     if layer_sink is not None:
         raise NotImplementedError("FTW conversion does not yet write NoWAG expert banks")
-    from freetoken.moe.nowag import load_nowag_expert_sources
+    from freetoken.moe.nowag.weights import load_nowag_expert_sources
 
     path = getattr(model_config, "nowag_expert_path", None)
     if not path:
         raise ValueError("NoWAG expert path was not configured")
-    sources, codebook = load_nowag_expert_sources(path, model_config, dtype=dtype)
-    return ExpertBanks(
-        "nowag",
-        {name: sources[name] for name in _BANK_SCHEMAS["nowag"]},
-        codebook=codebook,
-    )
+    sources, shared, state = load_nowag_expert_sources(path, model_config, dtype=dtype)
+    return ExpertBanks("nowag", sources, shared=shared, format_state=state)
 
 
 def _model_setup_override(model_config):
