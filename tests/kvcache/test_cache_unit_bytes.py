@@ -162,6 +162,9 @@ def _config(page_size=16, max_running_req=4, cache_type="hybrid_radix", num_expe
         model_config=SimpleNamespace(
             num_experts=num_experts, dsv4_args=None, has_swa_attention=False
         ),
+        speculative_num_steps=0,  # SD off: the GDN floor adds no SD scratch states
+        enable_gdn_replayssm=False,
+        gdn_replay_buffer_len=32,
     )
 
 
