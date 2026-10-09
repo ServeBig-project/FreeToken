@@ -112,7 +112,8 @@ class HybridSWAKVCache(BaseKVCachePool):
         else:
             from .runtime_pool import banked
 
-            buffer, banks = banked(runtime, spec.name, shape, dtype)
+            # On a shared runtime this pool only holds the DFlash drafter's history.
+            buffer, banks = banked(runtime, f"draft_{spec.name}", shape, dtype)
         return _KVGroupStorage(
             buffer=buffer,
             k_buffer=buffer[0],
