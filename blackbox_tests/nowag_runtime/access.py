@@ -140,12 +140,13 @@ def expert_math(F, family):
 
 @lru_cache(maxsize=None)
 def loaded_banks(base, side):
-    from freetoken.distributed.info import DistributedInfo, set_tp_info
+    from freetoken.distributed.info import DistributedInfo, set_tp_info, try_get_tp_info
     from freetoken.engine.config import EngineConfig
     from freetoken.moe.expert_banks import load_expert_banks
     # The §9 recipe alone raises "TP info has not been set" in load_expert_banks; set_tp_info
     # is the public setter next to DistributedInfo. Reported to the coordinator.
-    set_tp_info(0, 1)
+    if try_get_tp_info() is None:
+        set_tp_info(0, 1)
     cfg = EngineConfig(model_path=str(base), nowag_expert_path=str(side),
                        tp_info=DistributedInfo(0, 1), dtype=torch.bfloat16)
     return load_expert_banks(str(base), cfg.model_config, device=torch.device("cpu"),
