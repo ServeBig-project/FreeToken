@@ -101,28 +101,82 @@ def write(out, template, d, cb, layers):
     return Path(out)
 
 
-def synth_like(real_side, out, d, seed=0):
-    """Random legal sidecar with the real artifact's geometry and layer map, at D=d (cached)."""
+def geometry(real_side):
+    """Model geometry and layer map of a real sidecar (used as the template for synthetic ones)."""
+    m = manifest(real_side)
+    layer = m["layers"][0]["layer"]
+    shapes = tensor_shapes(real_side, layer)
+    return {"template": m, "layers": [e["layer"] for e in m["layers"]],
+            "experts": len({int(k.split(".")[4]) for k in shapes}),
+            "hidden": shapes[key(layer, 0, "w1", "input_norm")][0],
+            "inter": shapes[key(layer, 0, "w1", "output_norm")][0]}
+
+
+def gptoss_geometry(base):
+    """GPT-OSS has no published NoWAG artifact; the manifest uses the generic v1 geometry keys."""
+    c = json.loads((Path(base) / "config.json").read_text())
+    template = {"format": "nowag_expert_sidecar_v1", "model_type": c["model_type"],
+                "hidden_size": c["hidden_size"], "moe_intermediate_size": c["intermediate_size"],
+                "num_experts": c["num_local_experts"], "num_moe_layers": c["num_hidden_layers"]}
+    return {"template": template, "layers": list(range(c["num_hidden_layers"])),
+            "experts": c["num_local_experts"], "hidden": c["hidden_size"],
+            "inter": c["intermediate_size"]}
+
+
+def synth_codebook(kind, d, inter):
+    if kind == "random":
+        return R.random_codebook(d, torch.Generator().manual_seed(d))
+    # "exact": a few dyadic codewords; everything else zero (see synth_expert)
+    cb = torch.zeros(R.CODEBOOK_SIZE, d)
+    cb[1] = 1.0
+    cb[2] = torch.tensor([0.5, -0.5] * d)[:d]
+    cb[3] = 0.5
+    cb[4, 0] = 1.0
+    cb[5, :2] = torch.tensor([0.5, 0.25])
+    if inter % d:                          # lanes past I in the last down codeword: never used
+        cb[5, inter % d:] = 64.0
+    return cb.bfloat16()
+
+
+def synth_expert(kind, d, hidden, inter, layer, e):
+    """Deterministic per (layer, expert), so files and in-memory banks agree.
+
+    kind "exact" (SiLU family, see test_bind_contract.exact_inputs): gate = 32 for every row
+    when x has four lanes equal to 1, so SiLU(gate) == gate exactly; up in [-2,2]; the down row
+    n reads lane D*j (j depends on n and e) plus the two valid lanes of the last codeword.
+    All intermediate and final values are small dyadic numbers, exactly representable in BF16.
+    """
+    if kind == "random":
+        return R.random_expert(hidden, inter, d, torch.Generator().manual_seed(layer * 4096 + e))
+    nh, ni = R.ids_per_row(hidden, d), R.ids_per_row(inter, d)
+    rows = torch.arange(inter)
+    up_ids = torch.where(((rows + e) % 2 == 0)[:, None], 2, 3).expand(inter, nh)
+    down_ids = torch.zeros(hidden, ni, dtype=torch.long)
+    down_ids[torch.arange(hidden), (torch.arange(hidden) + e) % (ni - 1)] = 4
+    down_ids[:, -1] = 5
+    one = lambda n: torch.ones(n, dtype=torch.bfloat16)
+    return {
+        "w1": {"assignments": R.pack(torch.ones(inter, nh, dtype=torch.long)),
+               "input_norm": one(hidden) * 8, "output_norm": one(inter), "bias": None},
+        "w3": {"assignments": R.pack(up_ids), "input_norm": one(hidden),
+               "output_norm": torch.where(rows % 2 == 0, 1.0, 0.5).bfloat16(), "bias": None},
+        "w2": {"assignments": R.pack(down_ids), "input_norm": one(inter),
+               "output_norm": one(hidden), "bias": None},
+    }
+
+
+def synth_dir(geom, out, d, kind):
+    """Full-geometry synthetic sidecar (cached by path)."""
     out = Path(out)
     if (out / "manifest.json").exists():
         return out
     tmp = out.with_name(out.name + ".partial")
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
-    template = manifest(real_side)
-    g = torch.Generator().manual_seed(seed)
-    cb = R.random_codebook(d, g)
-    entries = []
-    for entry in template["layers"]:
-        layer = entry["layer"]
-        shapes = tensor_shapes(real_side, layer)
-        experts = {}
-        for e in sorted({int(k.split(".")[4]) for k in shapes}):
-            inter = shapes[key(layer, e, "w1", "output_norm")][0]
-            hidden = shapes[key(layer, e, "w1", "input_norm")][0]
-            experts[e] = R.random_expert(hidden, inter, d, g)
-        entries.append(write_layer(tmp, layer, experts))
-    write_head(tmp, template, d, cb, entries)
+    entries = [write_layer(tmp, layer, {e: synth_expert(kind, d, geom["hidden"], geom["inter"], layer, e)
+                                        for e in range(geom["experts"])})
+               for layer in geom["layers"]]
+    write_head(tmp, geom["template"], d, synth_codebook(kind, d, geom["inter"]), entries)
     tmp.rename(out)
     return out
 

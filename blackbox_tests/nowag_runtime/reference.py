@@ -39,12 +39,14 @@ def pack(ids):
 
 
 def unpack(packed, count):
-    """row_major int32 [N, words] -> [N, count] int64 ids."""
-    n, words = packed.shape
+    """row_major int32 [N, words] -> [N, count] int64 ids (arithmetic form, unlike pack)."""
     value = packed.long() & 0xFFFFFFFF
-    bits = (value.unsqueeze(-1) >> torch.arange(32)) & 1                  # [N, words, 32]
-    bits = bits.reshape(n, words * 32)[:, :count * BITS].reshape(n, count, BITS)
-    return (bits << torch.arange(BITS)).sum(-1)
+    value = torch.cat([value, torch.zeros_like(value[:, :1])], 1)    # word after the last
+    start = torch.arange(count) * BITS
+    word, shift = start // 32, start % 32
+    low = value[:, word] >> shift
+    high = value[:, word + 1] << (32 - shift)
+    return (low | high) & 0xFFF
 
 
 def to_layout(packed_row_major, layout):
@@ -72,7 +74,7 @@ def codeword_matrix(packed, codebook, k, layout="row_major"):
 def projection(x, proj, codebook, layout="row_major"):
     """Unrounded single projection ((x*in_norm) @ C[A].T) * out_norm + bias, fp32."""
     k = proj["input_norm"].shape[0]
-    w = codeword_matrix(proj["assignments"], codebook, k, layout)
+    w = proj["dense"] if "dense" in proj else codeword_matrix(proj["assignments"], codebook, k, layout)
     y = (x.float() * proj["input_norm"].float()) @ w.t() * proj["output_norm"].float()
     if proj.get("bias") is not None:
         y = y + proj["bias"].float()
