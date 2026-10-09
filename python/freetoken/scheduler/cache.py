@@ -1003,11 +1003,14 @@ class CacheManager:
         return None
 
     def _evictable_bytes(self) -> int:
-        """Cached prefix data no request holds: claims reclaim it for any component."""
+        """Bytes of cached prefix data no request holds (KV, GDN checkpoints, window slots):
+        claims reclaim it for any component. Logical bytes, not whole physical blocks."""
         unit = lambda units: sum(length for *_, length in units.banks) if units else 0
         pages = self._evictable("kv") // self.page_size * unit(self.page_units)
         states = self._evictable("state") * unit(getattr(self.linear_state_pool, "units", None))
-        return pages + states
+        windows = (self._evictable("window") * unit(self.swa_pool.slot_units)
+                   if self.swa_paged else 0)
+        return pages + states + windows
 
     def drop_cached(self) -> None:
         """Release every unlocked cached prefix from the GPU, so the next claims, taking the
