@@ -411,15 +411,19 @@ def graph_ladder(se, max_bs):
     seen = {}
     # layered admits one prompt per wave, so the c-th request joins decode only after c-1 waves:
     # outputs must outlast those waves for all c requests to decode together
+    out = 240 if not view.sd_on(s) else 1000  # an SD round commits up to steps+1 tokens per wave step
     for c in range(1, 5):
         b = se.c.stats()
-        res = se.c.parallel([(se.c.complete, (count_prompt(10 * i + 1), 240), {}) for i in range(c)])
+        res = se.c.parallel([(se.c.complete, (count_prompt(10 * i + 1), out), {}) for i in range(c)])
         for r in res:
-            exact_len(r, 240)
+            exact_len(r, out)
         a = se.c.stats()
         sb, sa = _shapes(b), _shapes(a)
         grew = {k: v - sb.get(k, 0) for k, v in sa.items() if v > sb.get(k, 0)}
         seen[c] = sorted({k[1] for k in grew})
+        eager = {k: v - ((b.get("cuda_graph") or {}).get("speculative_eager") or {}).get(k, 0)
+                 for k, v in ((a.get("cuda_graph") or {}).get("speculative_eager") or {}).items()}
+        record(se.name + f":graph_c{c}", {"replayed": {str(k): v for k, v in grew.items()}, "sd_eager": eager})
         assert all(k[1] <= cover for k in grew), f"Graph replayed batch {grew} beyond coverage {cover}"
         if c <= cover:
             assert c in seen[c], f"{c} concurrent decodes never replayed a batch-{c} Graph: {grew}"
