@@ -245,6 +245,7 @@ class LinearStatePool:
             slots = [slots]
         self._free_slots.extend(int(s) for s in slots)
         if self.units is not None:
+            self._free_slots.sort(reverse=True)  # lowest slot next: states pack into few blocks
             self.units.release(slots)
 
     def clear_slots(self, slots) -> None:

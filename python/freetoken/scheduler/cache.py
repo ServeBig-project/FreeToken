@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterable, List, Tuple
 
+import numpy as np
 import torch
 from freetoken.core import Batch, Req
 from freetoken.kvcache.prefix_policy import ANCHOR, INPUT, OUTPUT, POLICIES
@@ -1000,6 +1001,12 @@ class CacheManager:
             self.discard_paused(state)
         return None
 
+    def drop_cached(self) -> None:
+        """Release every unlocked cached prefix from the GPU, so the next claims, taking the
+        lowest free ids, lay a request out packed."""
+        while self._evict_any(1 << 62):  # any amount: everything unlocked goes
+            pass
+
     def release_paused(self, req: Req) -> None:
         """Give back a paused request's GPU data, as a finish would, without publishing it."""
         self._cancel_decode_reservation(req)
@@ -1313,8 +1320,10 @@ class CacheManager:
         """Release one batch of unlocked cached prefix data; False when nothing is left."""
         if self.tree is None:
             return False
-        for evict, amount in ((self.tree.evict_kv, tokens), (self.tree.evict_states, 1),
-                              (self.tree.evict_window, tokens)):
+        kinds = [(self.tree.evict_kv, tokens), (self.tree.evict_states, 1)]
+        if self.swa_paged:
+            kinds.append((self.tree.evict_window, tokens))
+        for evict, amount in kinds:
             ev = evict(amount)
             if ev.kv.numel() or ev.window.numel() or ev.states:
                 self._release(ev)
@@ -1326,9 +1335,15 @@ class CacheManager:
             self._return_pages(indices[:: self.page_size])
 
     def _return_pages(self, pages: torch.Tensor) -> None:
-        self.free_slots = torch.cat([self.free_slots, pages])
-        if self.page_units is not None:
-            self.page_units.release(pages.numpy() // self.page_size)
+        if self.page_units is None:
+            self.free_slots = torch.cat([self.free_slots, pages])
+            return
+        # Kept descending, the lowest page next (claims take the tail): live pages pack into
+        # the fewest blocks. Inserted in place of a full sort: returns happen every step.
+        free, back = self.free_slots.numpy()[::-1], np.sort(pages.numpy())
+        self.free_slots = torch.from_numpy(
+            np.insert(free, np.searchsorted(free, back), back)[::-1].copy())
+        self.page_units.release(pages.numpy() // self.page_size)
 
     def _page_to_token(self, pages: torch.Tensor) -> torch.Tensor:
         if self.page_size == 1:

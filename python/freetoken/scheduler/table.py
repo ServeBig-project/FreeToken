@@ -40,6 +40,7 @@ class TableManager:
     def free(self, slot: int) -> None:
         self._free_slots.append(slot)
         if self._rows is not None:
+            self._free_slots.sort(reverse=True)  # lowest row next, as at start
             self._rows.unbind(slot)
 
     def rebuild(self, page_table: torch.Tensor, rows=None) -> None:

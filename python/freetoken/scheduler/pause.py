@@ -44,6 +44,7 @@ class PauseManager:
         # uid -> position at which a request last gave way while alone. Short again there
         # once back (packed), it cannot be served at all.
         self.walls: dict[int, int] = {}
+        self.packing: set[int] = set()  # gave way to be packed: cached data goes on release
         self.unsaved: list[_Paused] = []    # host copy waits for copy budget
         self.saving: list[_Paused] = []     # host copy in flight; GPU data still held
         self.waiting: list[_Paused] = []    # on the host, by arrival
@@ -117,6 +118,7 @@ class PauseManager:
             self.fail(req.uid, "request no longer fits the shared runtime even alone", req)
             return
         self.walls[req.uid] = req.cached_len
+        self.packing.add(req.uid)
         if len(self.walls) > 1024:  # finished requests are not reported here; bound it
             self.walls.pop(next(iter(self.walls)))
         self.stats["compactions"] += 1
@@ -136,6 +138,7 @@ class PauseManager:
         self.cache.release_paused(req)
         self.table.free(req.table_idx)
         req.table_idx = -1  # released: the scheduler's free paths are no-ops now
+        self._pack(req)
         self.stats["paused"] += 1
         self.stats["recompute"] += 1
 
@@ -201,6 +204,7 @@ class PauseManager:
         self.cache.release_paused(req)
         self.table.free(req.table_idx)
         req.table_idx = -1  # released: the scheduler's free paths are no-ops now
+        self._pack(req)
         if req.aborted:
             if paused.state is not None:
                 self.cache.discard_paused(paused.state)
@@ -209,6 +213,11 @@ class PauseManager:
         else:
             self.waiting.append(paused)
             self.waiting.sort(key=lambda p: p.req.arrival)
+
+    def _pack(self, req: Req) -> None:
+        if req.uid in self.packing:
+            self.packing.discard(req.uid)
+            self.cache.drop_cached()
 
     def _requeue(self, paused: _Paused) -> None:
         self.stats["recompute"] += 1
