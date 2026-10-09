@@ -155,7 +155,9 @@ class BlockController:
             kind, nominal = "fixed", self.limit
         vector = [min(nominal, cap) for cap in caps]
         if reserve is not None:
+            reserve_started = time.perf_counter()
             vector = reserve(vector)
+            started += time.perf_counter() - reserve_started
         actual = dict(zip(members, vector))
         lengths = tuple(actual[member] for member, _ in groups)
         if not any(vector):
