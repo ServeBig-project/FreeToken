@@ -386,12 +386,13 @@ class CacheManager:
                "h2d_time_ms": 0.0, "d2h_time_ms": 0.0, **self.stats}
         if self.host is not None:
             out.update(self.host.status())
-        if self.window_cache:
+        if self.swa_paged:
             # Physical slots: free, held by the tree (locked by request handles or window
             # copies, else evictable), and the rest owned by running requests. Copies in
             # flight are a share of the locked and request slots, not extra ones.
             slots, free = self.swa_pool.swa_num_tokens - 1, self.swa_pool.swa_available_size()
-            locked, unlocked = self.tree.protected["window"], self.tree.evictable["window"]
+            locked, unlocked = ((self.tree.protected["window"], self.tree.evictable["window"])
+                                if self.window_cache else (0, 0))
             out["window_slots"] = dict(
                 total=slots, free=free, tree_locked=locked, tree_evictable=unlocked,
                 request_owned=slots - free - locked - unlocked,
