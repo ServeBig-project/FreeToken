@@ -16,6 +16,7 @@ point ``--model`` straight at it; the load path auto-detects the FTW and reads i
 from __future__ import annotations
 
 import glob
+import importlib
 import hashlib
 import os
 import shutil
@@ -176,6 +177,7 @@ def convert_checkpoint(
     checkpoint records no TP layout and loads independently of the runtime TP setting."""
     from freetoken.distributed import DistributedInfo, set_tp_info, try_get_tp_info
     from freetoken.engine.config import EngineConfig
+    from freetoken.models.register import get_model_spec
     from freetoken.models.weight import load_weight
     from freetoken.moe.expert_banks import load_expert_banks
     from freetoken.quant.dense import FTW_META_KEY, resolve_dense_precision
@@ -278,6 +280,15 @@ def convert_checkpoint(
                 n_alpha += name in ("gate_up_alpha", "down_alpha")
             bar.close()
 
+    # 3) host-resident tables a model serves from safetensors next to the FTW (qwen4_exp's
+    # PLE n-gram table): the model module's own hook, so the directory stands alone.
+    side_files: list[str] = []
+    spec = get_model_spec(cfg.hf_config.architectures[0])
+    write_side_files = getattr(importlib.import_module(spec.module), "ftw_side_files", None)
+    if write_side_files is not None:
+        _progress("side_files", 0, 0)
+        side_files = write_side_files(model_path, out_dir)
+
     _progress("finalize")  # writing shard index + copying config/tokenizer
     copied = _copy_metadata(model_path, out_dir)
 
@@ -303,6 +314,7 @@ def convert_checkpoint(
         "expert_bank_num_layers": num_layers,
         "counts": {"weight": n_weight, "experts_bank": n_bank + n_alpha},
         "copied_metadata": copied,
+        "side_files": side_files,
     })
     return index
 

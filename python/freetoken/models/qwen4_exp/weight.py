@@ -5,7 +5,8 @@ Three paths, because the checkpoint's three weight classes live in different pla
 * :func:`iter_weights` -- every dense (non-expert) tensor, prefix-stripped, fused where the
   model expects one buffer, and quantized to the resolved dense precision.
 * :func:`load_ple_table` -- the FP8 n-gram table, ``split_ngram_parts`` checkpoint shards
-  concatenated into one pinned :class:`HostBank`.
+  concatenated into one pinned :class:`HostBank`; :func:`ftw_side_files` copies those shards
+  next to an FTW checkpoint so the converted directory serves on its own.
 * :func:`load_nvfp4_expert_sources` -- the routed NVFP4 experts, through the common bank reader.
 
 Dropped: ``mtp.*`` (speculative head) and ``model.visual.*`` (served text-only).
@@ -13,6 +14,7 @@ Dropped: ``mtp.*`` (speculative head) and ``model.visual.*`` (served text-only).
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
@@ -55,6 +57,8 @@ _PLE_TABLE_INFIX = ".ple.ple_embedding.ngram_embedding."
 _PLE_SHARD_RE = re.compile(r"\.ple\.ple_embedding\.ngram_embedding\.shard_(?P<shard>\d+)\.weight$")
 _PLE_SCALE_SUFFIX = ".ple.ple_embedding.ngram_embedding.weight_scale"
 _PLE_ST_DTYPE = "F8_E4M3"
+_PLE_SIDE_FILE = "ple-table-{:05d}.safetensors"
+_PLE_SIDE_FILE_BYTES = 4 << 30
 
 # Checkpoint parts concatenated along dim 0 into one model buffer, in this order.
 _FUSIONS: dict[str, tuple[str, ...]] = {
@@ -188,6 +192,47 @@ def _safetensors_header(path: str) -> tuple[dict, int]:
         return json.loads(fh.read(n)), 8 + n
 
 
+def _ple_table_files(model_path: str) -> list[str]:
+    """Shards holding a piece of the n-gram table: from the index of an HF checkpoint, or the
+    ``ple-table-*.safetensors`` side files of an FTW directory."""
+    folder = download_hf_weight(model_path)
+    if os.path.exists(os.path.join(folder, "model.safetensors.index.json")):
+        _, weight_map = _weight_map(folder)
+        return sorted({os.path.join(folder, s) for n, s in weight_map.items() if _PLE_TABLE_INFIX in n})
+    return sorted(glob.glob(os.path.join(folder, _PLE_SIDE_FILE.format(0)[:-len("00000.safetensors")] + "*.safetensors")))
+
+
+def ftw_side_files(model_path: str, out_dir: str) -> list[str]:
+    """Write the n-gram table tensors (and their scale), and only those, into ``ple-table-*``
+    safetensors files next to an FTW checkpoint; returns the file names written."""
+    from safetensors.torch import save_file
+
+    written: list[str] = []
+    batch: dict[str, torch.Tensor] = {}
+    size = 0
+
+    def flush() -> None:
+        nonlocal batch, size
+        if batch:
+            name = _PLE_SIDE_FILE.format(len(written))
+            save_file(batch, os.path.join(out_dir, name))
+            written.append(name)
+            batch, size = {}, 0
+
+    for path in _ple_table_files(model_path):
+        with safetensors.safe_open(path, framework="pt", device="cpu") as f:
+            for key in f.keys():
+                if _PLE_TABLE_INFIX not in key:
+                    continue
+                t = f.get_tensor(key)
+                batch[key] = t
+                size += t.numel() * t.element_size()
+                if size >= _PLE_SIDE_FILE_BYTES:
+                    flush()
+    flush()
+    return written
+
+
 def load_ple_table(model_path: str, qwen4_args, *, workers: int = 8, chunk: int = 8 << 20) -> PleTable:
     """Concatenate the checkpoint's ``ngram_embedding.shard_<i>`` tensors into one pinned bank.
 
@@ -195,11 +240,10 @@ def load_ple_table(model_path: str, qwen4_args, *, workers: int = 8, chunk: int 
     the bank is filled at ``shard_index * rows_per_shard`` regardless of file order. Reads are
     O_DIRECT: a 47.7 GiB table must not also sit in the page cache next to the bank.
     """
-    folder, weight_map = _weight_map(model_path)
     parts: dict[int, tuple[str, int, int]] = {}  # shard index -> (path, file offset, bytes)
     scale: torch.Tensor | None = None
     rows = cols = 0
-    for path in sorted({os.path.join(folder, s) for n, s in weight_map.items() if _PLE_TABLE_INFIX in n}):
+    for path in _ple_table_files(model_path):
         header, base = _safetensors_header(path)
         for key, meta in header.items():
             if key.endswith(_PLE_SCALE_SUFFIX):
@@ -238,7 +282,8 @@ def load_ple_table(model_path: str, qwen4_args, *, workers: int = 8, chunk: int 
             bar.update(nbytes)
     finally:
         bar.close()
-    bank.pin()
+    if torch.cuda.is_available():
+        bank.pin()
     return PleTable(bank=bank, weight_scale=scale)
 
 
@@ -266,6 +311,7 @@ def load_nvfp4_expert_sources_parallel(
 
 __all__ = [
     "PleTable",
+    "ftw_side_files",
     "iter_weights",
     "load_nvfp4_expert_sources",
     "load_nvfp4_expert_sources_parallel",

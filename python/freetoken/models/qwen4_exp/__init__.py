@@ -5,6 +5,7 @@ experts (top-10) plus a gated shared expert."""
 from .config import parse_config
 from .model import Qwen4ExpForCausalLM
 from .weight import (
+    ftw_side_files,
     iter_weights,
     load_nvfp4_expert_sources,
     load_nvfp4_expert_sources_parallel,
@@ -13,6 +14,7 @@ from .weight import (
 
 __all__ = [
     "Qwen4ExpForCausalLM",
+    "ftw_side_files",
     "iter_weights",
     "load_nvfp4_expert_sources",
     "load_nvfp4_expert_sources_parallel",

@@ -318,6 +318,8 @@ class Engine:
             speculative_num_steps=config.speculative_num_steps,
             speculative_draft_model_path=config.speculative_draft_model_path,
             speculative_phase=config.speculative_phase,
+            dense_quant=config.dense_quantization,
+            kv_dtype=config.kv_dtype,
         )
         self.execution_fallbacks = _adjust_config(config)
         torch.manual_seed(42)
@@ -1317,6 +1319,8 @@ class Engine:
             requested=dict(self.execution_requested),
             effective=dict(
                 batching_policy=getattr(config, "batching_policy", "legacy"),
+                dense_quant=config.model_config.dense_precision,
+                kv_dtype=config.kv_dtype,
                 drafter=("dflash" if config.speculative_draft_model_path else "self") if steps else None,
                 speculative_num_steps=steps,
                 speculative_phase=(config.speculative_phase if layered else "outwave") if steps else None,
