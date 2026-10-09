@@ -390,6 +390,7 @@ def test_engine_resolve_auto_moe_cache_size_maps_kwargs():
             "gate_up": [torch.zeros(4, 32, 8, dtype=torch.float16)] * 2,  # row = 32*8*2 = 512
             "down": [torch.zeros(4, 8, 16, dtype=torch.float16)] * 2,     # row = 8*16*2 = 256
         }
+        shared = {}  # bf16 has no format-wide tensors
 
     from freetoken.kvcache.mha_pool import MHAKVCache
 
