@@ -1305,7 +1305,7 @@ class CacheManager:
             return claim
 
         while (claim := build()) is None or not self.page_units.blocks.acquire(claim.plan):
-            if not self._evict_any(max(pages, 1) * ps):
+            if not self._evict_any(max(pages, 1) * ps, states_first=not pages):
                 claim = None
                 break
         if not self._agree(claim is not None):
@@ -1327,11 +1327,15 @@ class CacheManager:
         torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MIN, group=self.tp_group)
         return bool(flag.item())
 
-    def _evict_any(self, tokens: int) -> bool:
-        """Release one batch of unlocked cached prefix data; False when nothing is left."""
+    def _evict_any(self, tokens: int, *, states_first: bool = False) -> bool:
+        """Release one batch of unlocked cached prefix data; False when nothing is left. A
+        claim evicts its own kind first: memory freed in the same component is taken back
+        without unmapping and remapping blocks of another."""
         if self.tree is None:
             return False
         kinds = [(self.tree.evict_kv, tokens), (self.tree.evict_states, 1)]
+        if states_first:
+            kinds.reverse()
         if self.swa_paged:
             kinds.append((self.tree.evict_window, tokens))
         for evict, amount in kinds:

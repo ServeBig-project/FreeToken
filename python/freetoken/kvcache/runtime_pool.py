@@ -119,7 +119,8 @@ class PhysicalBlocks:
         protected = lambda r: 0 if oldest is None else int((r.idle >= oldest).sum()) * g
         components = {r.name: dict(held_bytes=held(r), used_bytes=used[r],
                                    waste_bytes=held(r) - used[r], idle_bytes=idle(r),
-                                   protected_bytes=protected(r), address_bytes=r.size)
+                                   protected_bytes=protected(r), address_bytes=r.size,
+                                   maps=r.maps, unmaps=r.unmaps)
                       for r in self.regions}
         return dict(budget_bytes=self.total_bytes, granularity_bytes=g,
                     free_bytes=len(self.free) * g,
@@ -189,6 +190,7 @@ class Region:
         self.idle = np.full(count, -1, dtype=np.int64)   # release order of a mapped, unheld chunk
         self.idle_event = np.empty(count, dtype=object)  # the _Release that made a chunk idle
         self.init_event = np.empty(count, dtype=object)  # the zeroing of a freshly mapped chunk
+        self.maps = self.unmaps = 0  # chunks mapped and unmapped here, for the status
 
     def tensor(self, shape, strides, dtype: torch.dtype, offset: int = 0) -> torch.Tensor:
         return _vmm().view(self.base + offset, list(shape), list(strides), dtype,
@@ -210,6 +212,7 @@ class Region:
             self.block[chunk] = block
         vmm.set_access(blocks.device.index, self.base + first * g, count * g)
         blocks.map_count += count
+        self.maps += count
         self.tensor((count * g,), (1,), torch.uint8, first * g).zero_()
         event = torch.cuda.Event()
         event.record()
@@ -227,6 +230,7 @@ class Region:
         self.block[chunk], self.idle[chunk] = -1, -1
         self.idle_event[chunk] = self.init_event[chunk] = None
         blocks.unmap_count += 1
+        self.unmaps += 1
         blocks.map_seconds += time.perf_counter() - begin
 
 
