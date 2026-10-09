@@ -15,7 +15,7 @@ from freetoken.gpu_select import gpu_identity
 from freetoken.layers import set_rope_device
 from freetoken.models import create_model, load_weight
 from freetoken.moe import create_moe_backend, is_offload_moe_backend
-from freetoken.moe.expert_format import ExpertLayout, bind_expert_method, expert_math
+from freetoken.moe.expert_format import ExpertLayout, ExpertMethod, bind_expert_method, expert_math
 from freetoken.moe.expert_banks import load_expert_banks
 from freetoken.moe.offload_cache import (
     OffloadMoeCache,
@@ -394,12 +394,16 @@ class Engine:
         self.moe_offload_cache = None
         self.cpu_moe_executor = None
         self._resident_expert_host_bytes = 0
+        self.expert_workspace_bytes = 0
         if is_offload_moe_backend(config.moe_backend):
             self._init_offload_moe_cache(config)
         elif config.model_config.expert_quant == "nowag":
             self._init_resident_expert_banks(config)
         if hasattr(self.model, "prepare_for_runtime"):
             self.model.prepare_for_runtime()
+
+        if config.runtime_cache_gib is None:  # before the KV budget measures what is left
+            self._alloc_expert_workspace(config)
 
         # ======================= KV cache initialization ========================
         new_free = self._sync_get_memory()[1]
@@ -412,6 +416,7 @@ class Engine:
             self._init_runtime(config, _startup_kv_budget(
                 config.memory_ratio, local_init_free, self._local_free)
                 - transfer_device_bytes(config))
+            self._alloc_expert_workspace(config)  # part of the runtime's execution room
         else:
             available_memory -= state_pool_bytes(config)
             if self.dflash_layout is not None:
@@ -660,7 +665,8 @@ class Engine:
                      + 2 * 4 * (steps + 1) * vocab * (steps > 0))
         # Each graph-captured batch row: fp32 logits and the attention backend's page-table row.
         executing = lambda c: ((c + 1) * row_bytes
-                               + _graph_rows(config, c) * (4 * vocab + 4 * width))
+                               + _graph_rows(config, c) * (4 * vocab + 4 * width)
+                               + self._expert_workspace_bytes(config, c))
         resource = largest(lambda c: layout.blocks(
             pages=c + 1, windows=1 + c * window, states=c + 1, rows=c) <= total
             and executing(c) <= execution, _MAX_AUTO_RUNNING)
@@ -833,8 +839,11 @@ class Engine:
         reserve = 8192 if config.kv_reserve_tokens is None else config.kv_reserve_tokens
         page_extra = (self.dflash_layout.total_bytes if self.dflash_layout is not None
                       else lambda pages: 0)
+        # The format's shared tensors sit beside the slots once.
+        fixed_cache_size += sum(t.numel() * t.element_size() for t in banks.shared.values())
         if getattr(config, "runtime_cache_gib", None) is None:
-            fixed_cache_size += state_pool_bytes(config)
+            fixed_cache_size += state_pool_bytes(config) + self._expert_workspace_bytes(
+                config, config.max_running_req)
         else:  # experts get what the runtime and its execution tables leave; pages are unused
             fixed_cache_size += (int(config.runtime_cache_gib * (1 << 30))
                                  + self.runtime_limits["execution_bytes"])
@@ -900,12 +909,61 @@ class Engine:
             "expert_device_bytes": device,
             "shared_host_bytes": shared_host,
             "shared_device_bytes": shared_device,
-            # Expert kernels still allocate their scratch per call; nothing is reserved yet.
-            "workspace_device_bytes": 0,
+            # The decode stream's reserved scratch; prefill tiles allocate theirs per call.
+            "workspace_device_bytes": self.expert_workspace_bytes,
         }
         ranks = [None] * self.config.tp_info.size
         torch.distributed.all_gather_object(ranks, rank, group=self.tp_cpu_group)
         return {"format": fmt, "format_parameters": dict(method.format_parameters), "ranks": ranks}
+
+    def _bind_experts(self, config: EngineConfig, layers: list, quant_format: str,
+                      format_state) -> ExpertMethod:
+        """Bind every MoE layer's expert method from the loaded format."""
+        sample = layers[0]
+        self.expert_method = bind_expert_method(
+            expert_math(sample),
+            ExpertLayout(quant_format, sample.hidden_size, sample.intermediate_size,
+                         sample.num_experts),
+            format_state,
+            device=self.device,
+            backend=config.moe_backend,
+        )
+        self._expert_top_k = sample.top_k
+        for layer in layers:
+            layer.expert_method = self.expert_method
+        return self.expert_method
+
+    def _expert_workspace_spec(self, config: EngineConfig, running: int) -> dict:
+        """Expert scratch for the decode stream: decode, SD drafting and verification run one
+        graph (or eager step) at a time, so one scratch sized for the largest padded batch
+        serves them all. Bank rows are bounded by every expert of every layer, so a cache
+        resize keeps it. Prefill tiles allocate their own, inside the measured prefill peak."""
+        method = getattr(self, "expert_method", None)
+        if method is None:
+            return {}
+        rows = max(running, _graph_rows(config, running), 1) * ((config.speculative_num_steps or 0) + 1)
+        mc = config.model_config
+        return method.workspace_spec(rows, self._expert_top_k,
+                                     bank_rows=mc.num_moe_layers * mc.num_experts)
+
+    def _expert_workspace_bytes(self, config: EngineConfig, running: int) -> int:
+        spec = self._expert_workspace_spec(config, running)
+        return sum(math.prod(shape) * dtype.itemsize for shape, dtype in spec.values())
+
+    def _alloc_expert_workspace(self, config: EngineConfig) -> None:
+        """Reserve the decode stream's expert scratch once the concurrency is settled."""
+        from freetoken.layers import MoELayer
+
+        spec = self._expert_workspace_spec(config, config.max_running_req)
+        if not spec:
+            return
+        workspace = {name: torch.empty(shape, dtype=dtype, device=self.device)
+                     for name, (shape, dtype) in spec.items()}
+        self.expert_workspace_bytes = self._expert_workspace_bytes(config, config.max_running_req)
+        layers = (iter_offload_moe_layers(self.model) if self.moe_offload_cache is not None
+                  else iter_moe_layers(self.model, MoELayer))
+        for layer in layers:
+            layer.expert_workspace = workspace
 
     def _init_resident_expert_banks(self, config: EngineConfig) -> None:
         """Hold format-loaded experts (NoWAG) whole on the GPU: each layer reads its own
@@ -922,15 +980,7 @@ class Engine:
 
         banks = load_expert_banks(config.model_path, config.model_config, device=self.device,
                                   dtype=self.dtype, layer_sink=upload)
-        sample = layers[0]
-        method = bind_expert_method(
-            expert_math(sample),
-            ExpertLayout(banks.quant_format, sample.hidden_size, sample.intermediate_size,
-                         sample.num_experts),
-            banks.format_state,
-            device=self.device,
-            backend=config.moe_backend,
-        )
+        method = self._bind_experts(config, layers, banks.quant_format, banks.format_state)
         shared = {name: t.to(self.device) for name, t in banks.shared.items()}
         # Only the model-supplied banks (expert biases) keep a pinned host copy.
         self._resident_expert_host_bytes = sum(
@@ -988,6 +1038,8 @@ class Engine:
                 parallel=expert_parallel,
                 decode_target=("cpu" if decode_target in ("cpu", "hybrid") else "gpu"),
             )
+            self._bind_experts(config, list(iter_offload_moe_layers(self.model)),
+                               banks.quant_format, banks.format_state)
             shared = getattr(config, "runtime_cache_gib", None) is not None
             if shared and config.moe_cache_auto:
                 from freetoken.engine.cache_budget import expert_bytes_per_slot
@@ -1094,6 +1146,8 @@ class Engine:
                 )
         else:
             cache = cache_factory(config, self.device)
+            self._bind_experts(config, list(iter_offload_moe_layers(self.model)),
+                               cache.quant_format, None)
             cache.decode_target = decode_target
             cache.hybrid_max_fetch = config.moe_hybrid_max_fetch
         if decode_target == "hybrid":
@@ -1106,17 +1160,6 @@ class Engine:
         # _iter_offload_moe_layers() hook when its MoE blocks are bespoke nn.Modules (DSV4).
         layers = attach_offload_moe_cache(self.model, cache)
         assert len(layers) == config.model_config.num_moe_layers
-        sample = layers[0]
-        method = bind_expert_method(
-            expert_math(sample),
-            ExpertLayout(cache.quant_format, sample.hidden_size, sample.intermediate_size,
-                         sample.num_experts),
-            banks.format_state if cache_factory is None else None,
-            device=self.device,
-            backend=config.moe_backend,
-        )
-        for layer in layers:
-            layer.expert_method = method
         cache.register_resident_working_sets(
             [layer.num_experts for layer in layers]
         )

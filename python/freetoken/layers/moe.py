@@ -59,6 +59,8 @@ class MoELayer(BaseOP):
         self.expert_method = None
         self.expert_banks: dict[str, torch.Tensor] | None = None
         self.expert_shared: dict[str, torch.Tensor] = {}
+        # The decode stream's reserved expert scratch (engine); prefill allocates its own.
+        self.expert_workspace: dict[str, torch.Tensor] | None = None
         intermediate_size_per_partition = div_even(intermediate_size, tp_size)
         if allocate_experts:
             self._alloc_resident_experts(intermediate_size_per_partition)
@@ -118,9 +120,11 @@ class MoELayer(BaseOP):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor:
+        prefill = get_global_ctx().batch.uses_extend_path
         return self.expert_method.run(
             hidden_states, topk_ids, topk_weights, self._resident_banks(), self.expert_shared,
-            prefill=get_global_ctx().batch.uses_extend_path,
+            workspace=None if prefill else self.expert_workspace,
+            prefill=prefill,
             sort_rows=self.num_experts,
         )
 
@@ -487,6 +491,7 @@ class OffloadMoELayer(MoELayer):
             banks["gate_up_alpha"], banks["down_alpha"] = alphas
         return self.expert_method.run(
             hidden_states, topk_ids, topk_weights, banks, cache.shared,
+            workspace=None if is_prefill else self.expert_workspace,
             prefill=is_prefill, sort_rows=n, expert_map=expert_map,
         )
 
