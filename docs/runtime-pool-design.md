@@ -1,9 +1,7 @@
 # 共享 runtime 池与请求暂停恢复设计
 
-状态：已完成最终文档审查，可移交实现；生产实现与独立验收未开始。2026-10-09已对齐`main@c320fbb`（batching＋SD已合入）与DFlash合流版`32646f6`；后者相对已审查的`696c164`没有生产代码变化。本文和配套内核协议构成完整feature的实施范围，任何中间阶段都不单独算交付；正式实现以DFlash合入后的main为基座。
-工作树：`.worktrees/runtime-pool-design`，分支 `design/runtime-pool`。
+状态：已实现（PR #9，基于 DFlash 合入后的 `main@732f1ee`）；独立黑盒验收结果见 `test/runtime-pool` 分支的 `docs/runtime-pool-blackbox-report.md`。本文与配套内核协议描述该实现的设计范围。
 
-实现前置条件：DFlash合入main并完成其承诺的验收，冻结对应提交。已转交内存预算工作的layered＋DFlash OOM由本feature在共享模式验收，不反过来阻塞开工；不等待明确另行交付的layered自适应。已解决项、继承范围、已知失败及具体代码接点见[实现交接](runtime-pool-integration.md)。本设计worktree只交付文档，其中旧生产代码不得作为实现基座。
 
 ## 1. 目标和已确认边界
 
