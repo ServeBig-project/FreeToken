@@ -215,7 +215,13 @@ class EngineConfig:
     def model_config(self) -> ModelConfig:
         spec = get_model_spec(self.hf_config.architectures[0])
         parse_config = _load_attr(spec.module, spec.parse_config)
-        return parse_config(self.hf_config)
+        config = parse_config(self.hf_config)
+        if self.nowag_expert_path is not None:
+            # The routed experts come from the NoWAG output; the base checkpoint
+            # supplies everything else.
+            object.__setattr__(config, "expert_quant", "nowag")
+            object.__setattr__(config, "nowag_expert_path", self.nowag_expert_path)
+        return config
 
     @property
     def legacy_sd_controls(self) -> bool:

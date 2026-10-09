@@ -1802,12 +1802,8 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
     has_swa_attention = getattr(model_config, "has_swa_attention", False)
     has_linear_attention = getattr(model_config, "has_linear_attention", False)
     is_moe = getattr(model_config, "is_moe", False)
-    nowag_expert_path = getattr(config, "nowag_expert_path", None)
-    if nowag_expert_path is not None:
-        if not is_moe:
-            raise ValueError("--nowag-expert-path requires a model with routed experts")
-        object.__setattr__(model_config, "expert_quant", "nowag")
-        object.__setattr__(model_config, "nowag_expert_path", nowag_expert_path)
+    if getattr(config, "nowag_expert_path", None) is not None and not is_moe:
+        raise ValueError("--nowag-expert-path requires a model with routed experts")
     expert_quant = getattr(model_config, "expert_quant", "none")
 
     fallbacks: list[dict] = []

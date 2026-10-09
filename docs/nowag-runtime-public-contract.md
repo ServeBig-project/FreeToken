@@ -49,7 +49,7 @@ Python 使用现有 `freetoken.llm.LLM` 的相应参数；HTTP 继续沿用现�
 
 - 保留 gate/up 后的激活、clamp、bias 和乘法顺序；普通 SiLU、GELU、tanh-GELU、GPT-OSS／MiniMax 带参数门控均是不同参考。
 - 路由权重乘在输入或输出的位置由原模型规定；不能跨非线性移动。
-- DSV4 保留 gate/up 输入与 down 输入的 E4M3 分组舍入；down normalizer 位于该舍入之后。其他模型不能因为用了 NoWAG 就得到此额外舍入。
+- DSV4 保留 gate/up 输入与 down 输入的 E4M3 分组舍入；down normalizer 位于该舍入之后。路由权重按 DSV4 参考乘在 down 输入上（激活之后、down 输入舍入之前），down 输出不再乘权重。其他模型不能因为用了 NoWAG 就得到此额外舍入。
 - CPU、GPU、全驻、卸载、Graph、TP 均与同一组压缩权重的独立参考比较。NoWAG 与原未压缩模型的质量差异另行报告，不要求两者逐字相同。
 
 在看到候选结果前冻结容差，依据相同 dtype／舍入的参考与基准 kernel 确定，记录最大绝对／相对误差及累计误差；不得遇到失败后扩大容差。语义正确的精确小样本还应逐值核对。
@@ -87,7 +87,7 @@ method.workspace_spec(rows, top_k, bank_rows=...)  # dict: name -> (shape_tuple,
 method.run(x, expert_rows, route_weights, banks, shared, workspace=..., out=...)
 ```
 
-`math`是原组件数学记录：activation、alpha／limit、router_weight_on_input以及gate/up与down输入舍入。`layout`含公共几何、bank形状／dtype、MoE层编号及TP逻辑分区；`format_state`由权重加载入口返回，具体格式负责解释。独立作者通过合法模型和上文权重文件取得这些公开输出，不读取实现私有对象字段；参考数学直接来自本契约的权重定义。
+`math`是原组件数学记录 `freetoken.moe.expert_format.ExpertMath`：activation、activation_alpha／activation_limit、router_weight_on_input（乘在 gate/up 输入）、router_weight_on_down_input（乘在 down 输入）以及gate/up与down输入舍入（`None` 或 `E4M3_GROUP128_UE8M0`）。`layout`含公共几何、bank形状／dtype、MoE层编号及TP逻辑分区；`format_state`由权重加载入口返回，具体格式负责解释。独立作者通过合法模型和上文权重文件取得这些公开输出，不读取实现私有对象字段；参考数学直接来自本契约的权重定义。
 
 `rows`包含Graph padding；`bank_rows`是本次kernel实际可寻址的专家行数，缓存模式取实际槽数，全驻／整层通常取逻辑专家数。空间查询没有分配、编译和文件读取副作用；改变缓存容量后必须使用与新几何对应的workspace及图。
 
@@ -146,3 +146,18 @@ Graph与SD的实际执行继续由既有配置、Graph／speculative统计和独
 - 共享runtime／Flash-Next合入后的最终基座及已知限制；不能用旧快照假定通过。
 
 所有必须矩阵完成、生产代码整理完毕、相对功能开始前基线的生产／测试代码量分别核算后，才可称达到可交付标准。CPU检查、HTTP冒烟、设计合入均不能代替这些条件。
+
+## 9. 实施期补充说明（2026-10-09）
+
+以下回答黑盒作者提出的公开问题，与上文同等有效。
+
+- **取得 bind 输入**：`cfg = freetoken.engine.config.EngineConfig(model_path=BASE, nowag_expert_path=SIDE, tp_info=DistributedInfo(0, 1))`；`banks = freetoken.moe.expert_banks.load_expert_banks(BASE, cfg.model_config, device=..., dtype=torch.bfloat16)`。`banks.sources[name][l]` 是第 `l` 个 MoE 层的 `[E, ...]` 主机张量，行号即逻辑专家号；`l = 解码器层号 − first_k_dense_replace`。`banks.shared` 是共享张量（`codebook`），`banks.format_state` 传给 bind。`layout = ExpertLayout("nowag", H, I, E)`；`backend` 为 `--moe-backend` 取值（`offload`、`cpu`、`hybrid`、`fused`）。bank 名：九个基础 bank（`{gate,up,down}_{assignments,input_norm,output_norm}`），模型有专家 bias 时另有 `gate_bias`、`up_bias`、`down_bias`（`[E, I]`/`[E, H]`）。
+- **布局**：manifest 的 `assignment_layout` 为 `row_major`（缺省，每专家 `[N, W]`）或 `word_major`（每专家 `[W, N]`）。
+- **层覆盖**：sidecar 必须恰好覆盖基座的全部 MoE 解码器层 `[first_k_dense_replace, num_layers)`，层号为解码器层号；部分覆盖拒绝。MTP 层不在其中。
+- **状态**：NoWAG 的 `format` 为 `"nowag"`，`format_parameters` 为 `{"d", "assignment_bits"}`；其他格式报实际绑定格式名（如 `bf16`、`fp8_block`、`nvfp4_marlin`、`ds_fp4`），`format_parameters` 为 `{}`。专家临时空间目前由内核按次分配，`workspace_device_bytes` 如实为 0，待共享 runtime 集成后改为预留量。
+- **容量**：沿用现有 CLI 语义（`ft serve --help`）；`--moe-cache-size` 以专家槽计（一槽 = 一层的一个专家的全部 bank）。非法容量以 ready 前的公开错误为准。
+- **不支持的组合**：NoWAG 不支持路由权重乘在 gate/up 输入、上述以外的激活或舍入；gpt-oss 的 NoWAG 只走 `offload`／`cpu`／`hybrid`。TP 切片属于 P4，交付前 TP>1 的 NoWAG 结果不计为通过。
+- **数学族与模型**：SwiGLU-OAI（MiniMax-M3 `swigluoai`、gpt-oss）为 `clamp(gate, max=L) * sigmoid(α·gate) * (clamp(up, ±L) + 1)`；tanh-GELU 对应 Gemma4；erf-GELU 目前无已注册模型，不要求覆盖。
+- **padding**：CUDA Graph 补齐行的路由 id 为 `-1`，`run` 对其贡献为零；这是公共调度实际产生的输入。
+- **合成 gpt-oss sidecar**：沿用通用 v1 键（`format="nowag_expert_sidecar_v1"`、`model_type="gpt_oss"`、`hidden_size`、`moe_intermediate_size`、`num_experts`、`num_moe_layers`）；sidecar 不含 bias，bias 取自基座。
+- **无公开手段**：强制 SD 零接受、观测 collective 执行均无公开入口；不能构造时如实记为未覆盖。
