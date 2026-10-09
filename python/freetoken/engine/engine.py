@@ -683,7 +683,11 @@ class Engine:
         scratch = range(div_ceil(min(
             config.max_running_req * ((config.speculative_num_steps or 0) + 1),
             self.num_pages * config.page_size), config.page_size))
-        (self.page_units.pin if mapped else self.page_units.release)(scratch)
+        if mapped:
+            if not self.page_units.acquire(scratch):
+                raise RuntimeError("shared runtime cannot map graph capture scratch blocks")
+        else:
+            self.page_units.release(scratch)
 
     def _fit_runtime_rebuild(self, config: EngineConfig, gib: float, expert_bytes: int):
         """A new runtime total must fit beside the weights and target experts, and still hold
