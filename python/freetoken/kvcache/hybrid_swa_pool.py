@@ -176,10 +176,12 @@ class HybridSWAKVCache(BaseKVCachePool):
         # swa slots 1.._swa_num_tokens-1 are allocatable; slot 0 is the reserved sentinel. The
         # free slots are the ``_swa_count`` ring entries from ``_swa_head``: the host knows how
         # many it takes and returns, so no call reads the device.
-        self._swa_free = torch.arange(1, self._swa_num_tokens, dtype=torch.int64, device=dev)
-        self._swa_head = 0
-        self._swa_count = self._swa_free.numel()
-        if self.slot_units is not None:
+        if self.slot_units is None:
+            self._swa_free = torch.arange(1, self._swa_num_tokens, dtype=torch.int64,
+                                          device=dev)
+            self._swa_head = 0
+            self._swa_count = self._swa_free.numel()
+        else:
             # The host's copy of the mapping and its free slots (tail first: low, then reused).
             self._swa_host = torch.zeros(n + ps + 1, dtype=torch.int64)
             self._swa_host[-1] = -1
