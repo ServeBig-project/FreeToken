@@ -395,10 +395,12 @@ class Engine:
         self.cpu_moe_executor = None
         self._resident_expert_host_bytes = 0
         self.expert_workspace_bytes = 0
+        self.expert_shared_bytes = 0
         if is_offload_moe_backend(config.moe_backend):
             self._init_offload_moe_cache(config)
         elif config.model_config.expert_quant == "nowag":
             self._init_resident_expert_banks(config)
+            self._weights_bytes = self._baseline_free - self._sync_get_memory()[0]
         if hasattr(self.model, "prepare_for_runtime"):
             self.model.prepare_for_runtime()
 
@@ -564,7 +566,8 @@ class Engine:
         )
         self.dflash_layout = DFlashLayout(config, draft)
 
-    def _resolve_runtime(self, config: EngineConfig, expert_bytes: int | None) -> None:
+    def _resolve_runtime(self, config: EngineConfig, expert_bytes: int | None,
+                         cache_size: int | None = None) -> None:
         """--runtime-cache-gib: settle the context and concurrency limits before anything sized
         by them exists. ``expert_bytes`` is the expert cache beside the runtime (with
         --moe-cache-auto, the smallest one the plan may keep)."""
@@ -573,8 +576,9 @@ class Engine:
         budget = int(config.runtime_cache_gib * (1 << 30))
         execution = net_cache_budget_bytes(
             config.memory_ratio, self._baseline_free, self._weights_bytes,
-            budget + transfer_device_bytes(config)) - expert_bytes
-        limits = self.runtime_limits = self._runtime_limits(config, budget, execution, {})
+            budget + transfer_device_bytes(config) + self.expert_shared_bytes) - expert_bytes
+        limits = self.runtime_limits = self._runtime_limits(
+            config, budget, execution, {}, cache_size=cache_size)
         object.__setattr__(config, "max_seq_len_override", limits["context_tokens"])
         object.__setattr__(config, "max_running_req", limits["max_running_requests"])
         if config.cuda_graph_bs is None:  # no larger batch than the scheduler can form
@@ -623,7 +627,7 @@ class Engine:
         return self._runtime_layout(config).unit_bytes("pages")
 
     def _runtime_limits(self, config: EngineConfig, budget: int, execution: int,
-                        prior: dict) -> dict:
+                        prior: dict, *, cache_size: int | None = None) -> dict:
         """The longest request a runtime of ``budget`` bytes holds alone, and how many it holds
         at their minimum (a page, a GDN state and record row, a drafter window each): the
         context and concurrency limits. Each request's tables, drafter index lists and SD
@@ -666,7 +670,7 @@ class Engine:
         # Each graph-captured batch row: fp32 logits and the attention backend's page-table row.
         executing = lambda c: ((c + 1) * row_bytes
                                + _graph_rows(config, c) * (4 * vocab + 4 * width)
-                               + self._expert_workspace_bytes(config, c))
+                               + self._expert_workspace_bytes(config, c, cache_size=cache_size))
         resource = largest(lambda c: layout.blocks(
             pages=c + 1, windows=1 + c * window, states=c + 1, rows=c) <= total
             and executing(c) <= execution, _MAX_AUTO_RUNNING)
@@ -701,7 +705,8 @@ class Engine:
             self.num_pages * config.page_size), config.page_size))
         (self.page_units.pin if mapped else self.page_units.release)(scratch)
 
-    def _fit_runtime_rebuild(self, config: EngineConfig, gib: float, expert_bytes: int):
+    def _fit_runtime_rebuild(self, config: EngineConfig, gib: float, expert_bytes: int,
+                             cache_size: int):
         """A new runtime total must fit beside the weights and target experts, and still hold
         the configured context and running requests; checked before anything is freed."""
         from freetoken.engine.cache_budget import net_cache_budget_bytes
@@ -709,7 +714,7 @@ class Engine:
         budget = int(gib * (1 << 30))
         available = net_cache_budget_bytes(
             config.memory_ratio, self._baseline_free, self._weights_bytes,
-            transfer_device_bytes(config)) - expert_bytes
+            transfer_device_bytes(config) + self.expert_shared_bytes) - expert_bytes
         if budget <= 0:
             raise CacheRebuildRejected(f"runtime_cache_gib must be > 0, got {gib}")
         if budget > available:
@@ -718,7 +723,7 @@ class Engine:
                 "beside the weights and experts; old cache kept, still serving")
         try:
             return budget, self._runtime_limits(config, budget, available - budget,
-                                                self.runtime_limits)
+                                                self.runtime_limits, cache_size=cache_size)
         except ValueError as error:
             raise CacheRebuildRejected(f"{error}; old cache kept, still serving") from error
 
@@ -747,7 +752,9 @@ class Engine:
         from freetoken.engine.cache_budget import expert_bytes_per_slot, net_cache_budget_bytes
 
         per_page, fixed, _, _ = self._pool_cls.kv_cost(config)
-        fixed += state_pool_bytes(config) + transfer_device_bytes(config)
+        fixed += (state_pool_bytes(config) + transfer_device_bytes(config)
+                  + self.expert_shared_bytes
+                  + self._expert_workspace_bytes(config, config.max_running_req))
         budget = net_cache_budget_bytes(
             config.memory_ratio, self._baseline_free, self._weights_bytes, fixed)
         pages = config.num_page_override or 2
@@ -842,11 +849,13 @@ class Engine:
         # The format's shared tensors sit beside the slots once.
         fixed_cache_size += sum(t.numel() * t.element_size() for t in banks.shared.values())
         if getattr(config, "runtime_cache_gib", None) is None:
-            fixed_cache_size += state_pool_bytes(config) + self._expert_workspace_bytes(
-                config, config.max_running_req)
+            fixed_cache_size += state_pool_bytes(config)
         else:  # experts get what the runtime and its execution tables leave; pages are unused
             fixed_cache_size += (int(config.runtime_cache_gib * (1 << 30))
-                                 + self.runtime_limits["execution_bytes"])
+                                 + self.runtime_limits["execution_bytes"]
+                                 - self._expert_workspace_bytes(
+                                     config, config.max_running_req,
+                                     cache_size=self._runtime_initial_cache_size))
             reserve, page_extra = 2 * page_tokens, lambda pages: 0
         num_experts = config.model_config.num_experts
         total_experts = config.model_config.num_moe_layers * num_experts
@@ -867,6 +876,8 @@ class Engine:
                 1 if getattr(config, "batching_policy", "legacy") == "joint" else 2
             ),
             page_extra_bytes=page_extra,
+            slot_extra_bytes=lambda slots: self._expert_workspace_bytes(
+                config, config.max_running_req, cache_size=slots),
         )
 
     def _gather_expert_geometry(self) -> dict | None:
@@ -882,12 +893,14 @@ class Engine:
         method = layers[0].expert_method
 
         def nbytes(tensors) -> int:
-            return sum(t.numel() * t.element_size() for t in tensors)
+            storages = {t.untyped_storage().data_ptr(): t.untyped_storage().nbytes()
+                        for t in tensors}
+            return sum(storages.values())
 
         if cache is not None:
             fmt = cache.quant_format
             host = nbytes(t for per_layer in cache.bank_sources.values() for t in per_layer)
-            device = nbytes(cache.bank_caches.values()) + nbytes(cache.prefill_bank_buffers)
+            device = nbytes([*cache.bank_caches.values(), *cache.prefill_bank_buffers])
             shared_host, shared_device = nbytes(cache.host_shared.values()), nbytes(cache.shared.values())
         else:
             fmt = layers[0].weight_format
@@ -933,21 +946,25 @@ class Engine:
             layer.expert_method = self.expert_method
         return self.expert_method
 
-    def _expert_workspace_spec(self, config: EngineConfig, running: int) -> dict:
+    def _expert_workspace_spec(self, config: EngineConfig, running: int,
+                               *, cache_size: int | None = None) -> dict:
         """Expert scratch for the decode stream: decode, SD drafting and verification run one
         graph (or eager step) at a time, so one scratch sized for the largest padded batch
-        serves them all. Bank rows are bounded by every expert of every layer, so a cache
-        resize keeps it. Prefill tiles allocate their own, inside the measured prefill peak."""
+        serves them all. Prefill tiles allocate their own, inside the measured prefill peak."""
         method = getattr(self, "expert_method", None)
         if method is None:
             return {}
         rows = max(running, _graph_rows(config, running), 1) * ((config.speculative_num_steps or 0) + 1)
-        mc = config.model_config
-        return method.workspace_spec(rows, self._expert_top_k,
-                                     bank_rows=mc.num_moe_layers * mc.num_experts)
+        bank_rows = config.model_config.num_experts
+        if is_offload_moe_backend(config.moe_backend):
+            slots = config.moe_cache_size if cache_size is None else cache_size
+            buffers = 2 if config.batching_policy == "layered" else 0
+            bank_rows = max(bank_rows, slots - buffers * bank_rows)
+        return method.workspace_spec(rows, self._expert_top_k, bank_rows=bank_rows)
 
-    def _expert_workspace_bytes(self, config: EngineConfig, running: int) -> int:
-        spec = self._expert_workspace_spec(config, running)
+    def _expert_workspace_bytes(self, config: EngineConfig, running: int,
+                                *, cache_size: int | None = None) -> int:
+        spec = self._expert_workspace_spec(config, running, cache_size=cache_size)
         return sum(math.prod(shape) * dtype.itemsize for shape, dtype in spec.values())
 
     def _alloc_expert_workspace(self, config: EngineConfig) -> None:
@@ -992,7 +1009,8 @@ class Engine:
         for layer_id, layer in enumerate(layers):
             # Banks the model supplies itself (expert biases) arrive whole, not streamed.
             for name, per_layer in banks.sources.items():
-                uploaded[layer_id].setdefault(name, per_layer[layer_id].to(self.device))
+                if name not in uploaded[layer_id]:
+                    uploaded[layer_id][name] = per_layer[layer_id].to(self.device)
             layer.expert_banks = uploaded[layer_id]
             layer.expert_shared = shared
             layer.expert_method = method
@@ -1040,6 +1058,8 @@ class Engine:
             )
             self._bind_experts(config, list(iter_offload_moe_layers(self.model)),
                                banks.quant_format, banks.format_state)
+            self.expert_shared_bytes = sum(t.numel() * t.element_size()
+                                           for t in banks.shared.values())
             shared = getattr(config, "runtime_cache_gib", None) is not None
             if shared and config.moe_cache_auto:
                 from freetoken.engine.cache_budget import expert_bytes_per_slot
@@ -1048,11 +1068,17 @@ class Engine:
                 # then takes what the runtime and that concurrency's execution tables leave.
                 layers = 1 if getattr(config, "batching_policy", "legacy") == "joint" else 2
                 floor = (layers if config.moe_prefill_overlap else 1) * config.model_config.num_experts
-                self._resolve_runtime(config, floor * expert_bytes_per_slot(banks.sources))
+                self._runtime_initial_cache_size = floor
+                self._resolve_runtime(config, floor * expert_bytes_per_slot(banks.sources), floor)
             if config.moe_cache_auto:
                 size, pages, overlap = self._resolve_auto_moe_cache_size(config, banks)
                 object.__setattr__(config, "moe_cache_size", size)
                 object.__setattr__(config, "moe_prefill_overlap", overlap)
+                if shared:
+                    self.runtime_limits["execution_bytes"] += (
+                        self._expert_workspace_bytes(config, config.max_running_req)
+                        - self._expert_workspace_bytes(config, config.max_running_req,
+                                                       cache_size=self._runtime_initial_cache_size))
                 if config.num_page_override is None and config.runtime_cache_gib is None:
                     # Honor the plan's KV half too: MoE slots and KV pages were solved
                     # against ONE budget (ratio x baseline - weights), so both must come
@@ -1391,7 +1417,7 @@ class Engine:
         if shared:  # an expert-only change keeps the runtime and its contents
             budget, limits = self._fit_runtime_rebuild(
                 config, config.runtime_cache_gib if runtime_cache_gib is None
-                else runtime_cache_gib, target_moe * per_expert_bytes)
+                else runtime_cache_gib, target_moe * per_expert_bytes, target_moe)
         # Price the sibling GDN state pool at ITS target (physical slots = usable + padding
         # sink) and hand the bytes in -- the KV pool only budgets its own tiers.
         target_mamba = (
@@ -1416,6 +1442,9 @@ class Engine:
                 extra_fixed_bytes=(
                     (state_pool_bytes(config, target_mamba) if target_mamba is not None else 0)
                     + draft_bytes + transfer_device_bytes(config)
+                    + self.expert_shared_bytes
+                    + self._expert_workspace_bytes(config, config.max_running_req,
+                                                   cache_size=target_moe or None)
                 ),
                 extra_note=(
                     f", mamba={target_mamba - 1} slots" if target_mamba is not None else ""
@@ -1441,6 +1470,9 @@ class Engine:
         prior_replays = self.graph_runner.replay_counts
         prior_eager = self.graph_runner.eager_counts
         self.graph_runner.destroy_cuda_graphs()
+        if moe_cache_size is not None:
+            for layer in iter_offload_moe_layers(self.model):
+                layer.expert_workspace = None
         # 2. Resize caches in place (each frees its old GPU tensors before allocating).
         # Pin the new window first (validated above) so any KV-pool rebuild below sizes the window
         # to it (_dsv4_pool_sizes / _swa_paged_num_tokens read config.swa_num_pages_override).
@@ -1451,6 +1483,10 @@ class Engine:
         if moe_cache_size is not None:
             assert self.moe_offload_cache is not None, "no MoE offload cache to resize"
             self.moe_offload_cache.rebuild(moe_cache_size)
+            object.__setattr__(config, "moe_cache_size", moe_cache_size)
+            self._alloc_expert_workspace(config)
+            if shared:
+                self.runtime.limits = self.runtime_limits = limits
         if runtime_cache_gib is not None:
             self._replace_runtime(config, budget, limits)
         elif num_pages is not None:

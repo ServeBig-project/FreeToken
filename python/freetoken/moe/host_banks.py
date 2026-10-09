@@ -100,6 +100,16 @@ class HostBank:
         assert not self._pinned, "cannot release a pinned bank"
         self._buf.madvise(mmap.MADV_DONTNEED)
 
+    def close(self) -> None:
+        """Dispose an unpinned loading buffer after all its tensor views are discarded."""
+        assert not self._pinned, "cannot close a pinned bank"
+        self.tensor = None
+        for index, buffer in enumerate(_LIVE_BUFFERS):
+            if buffer is self._buf:
+                del _LIVE_BUFFERS[index]
+                break
+        self._buf.close()
+
     def lock(self) -> None:
         """Make the buffer resident without a device mapping (VirtualLock/mlock).
 

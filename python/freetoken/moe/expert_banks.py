@@ -16,6 +16,7 @@ from __future__ import annotations
 import glob
 import os
 import threading
+from functools import partial
 from dataclasses import dataclass, field
 
 import torch
@@ -317,14 +318,14 @@ def _model_hook(model_config, name: str):
         return None
 
 
-def _restore_nowag(banks, model_config):
-    from freetoken.moe.nowag.weights import restore_ftw_banks
+def _prepare_nowag(stored_state, model_config):
+    from freetoken.moe.nowag.weights import prepare_ftw_banks
 
-    return restore_ftw_banks(banks, model_config)
+    return prepare_ftw_banks(stored_state, model_config)
 
 
 # Formats whose FTW banks need the format's own restore (encoding state, TP slicing).
-_FTW_RESTORE = {"nowag": _restore_nowag}
+_FTW_PREPARE = {"nowag": _prepare_nowag}
 
 # ModelConfig.expert_quant -> provider
 _PROVIDERS = {
@@ -439,14 +440,14 @@ def load_expert_banks(
     provider only engages it (and reports ``ExpertBanks.streamed=True``) for its own
     streamable formats, so callers must check ``streamed`` rather than assume it fired.
     """
-    from freetoken.checkpoint.ftw import is_ftw_checkpoint, load_ftw_banks
+    from freetoken.checkpoint.ftw import is_ftw_checkpoint, load_ftw_banks, ftw_quant_format
 
     if model_path and is_ftw_checkpoint(model_path) and not dummy:
+        prepare = _FTW_PREPARE.get(ftw_quant_format(model_path))
         banks = load_ftw_banks(
-            model_path, num_layers=model_config.num_moe_layers, workers=workers, chunk=chunk
+            model_path, num_layers=model_config.num_moe_layers, workers=workers, chunk=chunk,
+            prepare=partial(prepare, model_config=model_config) if prepare is not None else None,
         )
-        if banks is not None and banks.quant_format in _FTW_RESTORE:
-            banks = _FTW_RESTORE[banks.quant_format](banks, model_config)
         if banks is not None:
             logger.info_rank0(f"expert banks: FTW fast path (FTW checkpoint {model_path})")
             return banks

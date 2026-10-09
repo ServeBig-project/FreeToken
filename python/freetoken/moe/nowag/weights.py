@@ -342,21 +342,17 @@ def load_nowag_expert_sources(
     return sources, {"codebook": codebook}, shard.state(group_size, assignment_bits)
 
 
-def restore_ftw_banks(banks, model_config):
-    """NoWAG banks read from an FTW checkpoint, which stores the global encoding: decode
-    the stored state and keep this TP rank's slice (the down bias stays on rank 0)."""
-    from dataclasses import replace
-
-    from freetoken.kernel.pinned import copy_to_pinned_tensor
-
-    stored = NowagState(**banks.format_state)
+def prepare_ftw_banks(stored_state, model_config):
+    """Select this rank's encoding before FTW locks each loaded bank in host memory."""
+    stored = NowagState(**stored_state)
     shard = _Shard.of(model_config, stored.d)
     state = shard.state(stored.d, stored.assignment_bits)
     if state.intermediate_size == stored.intermediate_size:
-        return replace(banks, format_state=state)
-    sources = {
-        name: [copy_to_pinned_tensor(shard.apply(name, t).contiguous()) for t in per_layer]
-        for name, per_layer in banks.sources.items()
-        if name != "down_bias" or shard.rank == 0
-    }
-    return replace(banks, sources=sources, format_state=state)
+        return state, None
+
+    def transform(name, tensor):
+        if name == "down_bias" and shard.rank != 0:
+            return None
+        return shard.apply(name, tensor)
+
+    return state, transform
