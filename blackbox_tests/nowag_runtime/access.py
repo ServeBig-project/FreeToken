@@ -1,13 +1,12 @@
 """How a test obtains a bound expert method: the candidate's public entry, or the reference.
 
-Contract §5 fixes the call `freetoken.moe.expert_format.bind_expert_method(math, layout,
-format_state, device=..., backend=...)` and the shape of `run`/`workspace_spec`, but not how a
-black-box caller gets `math`, `layout`, `format_state`, the `banks` dict and the `shared` dict
-from a model directory plus a NoWAG directory. `candidate()` therefore skips with that reason
-until the coordinator publishes the recipe; only that function needs filling in.
+Candidate: the recipe of contract §9 -- EngineConfig(model_path=BASE, nowag_expert_path=SIDE,
+tp_info=DistributedInfo(0, 1)), load_expert_banks(...), banks.sources[name][l] for MoE layer
+l = decoder layer - first_k_dense_replace, banks.shared, banks.format_state,
+ExpertLayout("nowag", H, I, E), backend = the --moe-backend value; math is an ExpertMath (§5).
 
-The "reference" implementation below follows the same call contract on CPU so every test body
-is exercised now; it validates the tests, not the product.
+The "reference" implementation follows the same call contract on CPU so every test body is
+exercised against the independent reference too; it validates the tests, not the product.
 """
 
 import json
@@ -23,16 +22,22 @@ import sidecar as S
 from cases import (FAMILIES, QWEN36_BASE, QWEN36_SIDE, DSV4_BASE, DSV4_SIDE, GPTOSS_BASE,
                    need_path, need_scratch)
 
-# name: (family, D, kind, base, real sidecar or geometry source)
+# name: (geometry family, math family, D, kind, assignment layout, base, real sidecar/geometry)
+# "comp-*" cases run another published math family on the Qwen3.6 weights: a component-level
+# check of that math (contract §3), not a claim about a served model.
 CASES = {
-    "qwen36-d6-real": ("qwen36_silu", 6, "real", QWEN36_BASE, QWEN36_SIDE),
-    "dsv4-d6-real": ("dsv4", 6, "real", DSV4_BASE, DSV4_SIDE),
-    "qwen36-d4-random": ("qwen36_silu", 4, "random", QWEN36_BASE, QWEN36_SIDE),
-    "dsv4-d4-random": ("dsv4", 4, "random", DSV4_BASE, DSV4_SIDE),
-    "gptoss-d6-random": ("gptoss", 6, "random", GPTOSS_BASE, None),
-    "gptoss-d4-random": ("gptoss", 4, "random", GPTOSS_BASE, None),
-    "qwen36-d6-exact": ("qwen36_silu", 6, "exact", QWEN36_BASE, QWEN36_SIDE),
-    "qwen36-d4-exact": ("qwen36_silu", 4, "exact", QWEN36_BASE, QWEN36_SIDE),
+    "qwen36-d6-real": ("qwen36_silu", "qwen36_silu", 6, "real", "row_major", QWEN36_BASE, QWEN36_SIDE),
+    "dsv4-d6-real": ("dsv4", "dsv4", 6, "real", "row_major", DSV4_BASE, DSV4_SIDE),
+    "qwen36-d4-random": ("qwen36_silu", "qwen36_silu", 4, "random", "row_major", QWEN36_BASE, QWEN36_SIDE),
+    "qwen36-d6-wordmajor": ("qwen36_silu", "qwen36_silu", 6, "random", "word_major", QWEN36_BASE,
+                            QWEN36_SIDE),
+    "gptoss-d6-random": ("gptoss", "gptoss", 6, "random", "row_major", GPTOSS_BASE, None),
+    "qwen36-d6-exact": ("qwen36_silu", "qwen36_silu", 6, "exact", "row_major", QWEN36_BASE, QWEN36_SIDE),
+    "comp-dsv4math-qwen36": ("qwen36_silu", "dsv4", 6, "real", "row_major", QWEN36_BASE, QWEN36_SIDE),
+    "comp-swigluoai-qwen36": ("qwen36_silu", "gptoss", 6, "real", "row_major", QWEN36_BASE,
+                              QWEN36_SIDE),
+    "comp-gelutanh-qwen36": ("qwen36_silu", "gelu_tanh", 6, "real", "row_major", QWEN36_BASE,
+                             QWEN36_SIDE),
 }
 
 
@@ -42,8 +47,9 @@ class Bound:
     def __init__(self, name, method, banks, shared, bank_experts, layer, device, weights_of):
         self.name, self.method, self.banks, self.shared = name, method, banks, shared
         self.bank_experts, self.layer, self.device = bank_experts, layer, device
-        family, self.d, self.kind, self.base, self.side = CASES[name]
-        self.hidden, self.inter, self.top_k, self.math = FAMILIES[family]
+        geom, mathf, self.d, self.kind, self.layout, self.base, self.side = CASES[name]
+        self.hidden, self.inter, self.top_k, _ = FAMILIES[geom]
+        self.math = FAMILIES[mathf][3]
         self._weights_of = weights_of
         self._cache = {}
 
@@ -90,32 +96,91 @@ def with_base_bias(w, base, layer, e):
 
 def sidecar_dir(name):
     """On-disk NoWAG directory for a case (synthetic ones are generated under NOWAG_SCRATCH)."""
-    family, d, kind, base, src = CASES[name]
+    geom, _, d, kind, layout, base, src = CASES[name]
     if kind == "real":
         return need_path(src, f"{name} sidecar")
-    geom = (S.gptoss_geometry(need_path(base, f"{name} base")) if family == "gptoss"
-            else S.geometry(need_path(src, f"{name} geometry source")))
-    return S.synth_dir(geom, need_scratch() / f"synth-{name}", d, kind)
+    g = (S.gptoss_geometry(need_path(base, f"{name} base")) if geom == "gptoss"
+         else S.geometry(need_path(src, f"{name} geometry source")))
+    return S.synth_dir(g, need_scratch() / f"synth-{geom}-d{d}-{kind}-{layout}", d, kind, layout)
 
 
 def file_weights(name, side, layer):
-    family, d, kind, base, _ = CASES[name]
+    geom, base = CASES[name][0], CASES[name][5]
 
     def weights_of(e):
         if e == "codebook":
             return S.codebook(side)
         w = S.read_experts(side, layer, [e])[e]
-        return with_base_bias(w, base, layer, e) if family == "gptoss" else w
+        return with_base_bias(w, base, layer, e) if geom == "gptoss" else w
     return weights_of
 
 
-# ------------------------------------------------------------------ the two implementations
+def layer_numbers(side, pos):
+    layers = [e["layer"] for e in S.manifest(side)["layers"]]
+    return layers[0] if pos == "first" else layers[-1]
 
-def candidate(name, layer_pos, device, backend):
-    """Bind the candidate through its public entry. Recipe not yet published (see module doc)."""
-    pytest.skip("contract §5 does not say how a black-box caller obtains math/layout/"
-                "format_state/banks/shared for a model + NoWAG directory; ask coordinator")
 
+# ------------------------------------------------------------------ candidate (contract §9)
+
+def expert_math(F, family):
+    """ExpertMath for a math family (field names from the public ExpertMath signature, §5/§9)."""
+    m = FAMILIES[family][3]
+    if m["family"] == "silu":
+        return F.ExpertMath(activation="silu")
+    if m["family"] == "gptoss":
+        return F.ExpertMath(activation="swigluoai", activation_alpha=m["alpha"],
+                            activation_limit=m["limit"])
+    if m["family"] == "swiglu_limit":   # DSV4: clamped SiLU, route on down input, E4M3 twice
+        return F.ExpertMath(activation="silu", activation_limit=m["limit"],
+                            router_weight_on_down_input=True,
+                            gate_up_input_rounding=F.E4M3_GROUP128_UE8M0,
+                            down_input_rounding=F.E4M3_GROUP128_UE8M0)
+    pytest.skip(f"contract publishes no ExpertMath activation string for {m['family']}")
+
+
+@lru_cache(maxsize=None)
+def loaded_banks(base, side):
+    from freetoken.distributed.info import DistributedInfo
+    from freetoken.engine.config import EngineConfig
+    from freetoken.moe.expert_banks import load_expert_banks
+    cfg = EngineConfig(model_path=str(base), nowag_expert_path=str(side),
+                       tp_info=DistributedInfo(0, 1), dtype=torch.bfloat16)
+    return load_expert_banks(str(base), cfg.model_config, device=torch.device("cpu"),
+                             dtype=torch.bfloat16)
+
+
+def to_device(value, device):
+    if torch.is_tensor(value):
+        return value.to(device)
+    if isinstance(value, dict):
+        return {k: to_device(v, device) for k, v in value.items()}
+    return value
+
+
+def candidate(name, layer_pos, impl):
+    """Bind the candidate through its public entry; impl "cpu" -> backend cpu on CPU,
+    "cuda" -> backend offload on cuda:0."""
+    import freetoken.moe.expert_format as F
+    geom, mathf, d, kind, layout, base, src = CASES[name]
+    base = need_path(base, f"{name} base")
+    side = sidecar_dir(name)
+    math = expert_math(F, mathf)
+    device = torch.device("cpu") if impl == "cpu" else torch.device("cuda", 0)
+    backend = "cpu" if impl == "cpu" else "offload"
+    hidden, inter, _, _ = FAMILIES[geom]
+    config = json.loads((base / "config.json").read_text())
+    first_dense = config.get("text_config", config).get("first_k_dense_replace", 0)
+    layer = layer_numbers(side, layer_pos)
+    banks = loaded_banks(str(base), str(side))
+    experts = next(iter(banks.sources.values()))[layer - first_dense].shape[0]
+    layer_banks = {k: v[layer - first_dense].to(device).contiguous() for k, v in banks.sources.items()}
+    method = F.bind_expert_method(math, F.ExpertLayout("nowag", hidden, inter, experts),
+                                  banks.format_state, device=device, backend=backend)
+    return Bound(name, method, layer_banks, to_device(banks.shared, device), list(range(experts)),
+                 layer, device, file_weights(name, side, layer))
+
+
+# ------------------------------------------------------------------ reference implementation
 
 class ReferenceMethod:
     def __init__(self, bound_ref):
@@ -132,12 +197,11 @@ class ReferenceMethod:
 
 
 def reference(name, layer_pos, bank_size=12):
-    family, d, kind, base, src = CASES[name]
-    hidden, inter, top_k, math_ = FAMILIES[family]
+    geom, mathf, d, kind, layout, base, src = CASES[name]
+    hidden, inter, _, geom_math = FAMILIES[geom]
     if kind == "real":
         side = need_path(src, f"{name} sidecar")
-        layers = [e["layer"] for e in S.manifest(side)["layers"]]
-        layer = layers[0] if layer_pos == "first" else layers[-1]
+        layer = layer_numbers(side, layer_pos)
         weights_of = file_weights(name, side, layer)
         total = S.geometry(side)["experts"]
     else:
@@ -147,7 +211,7 @@ def reference(name, layer_pos, bank_size=12):
             if e == "codebook":
                 return S.synth_codebook(kind, d, inter)
             w = S.synth_expert(kind, d, hidden, inter, layer, e)
-            if math_.get("bias"):
+            if geom_math.get("bias"):
                 g = torch.Generator().manual_seed(e)
                 w = {p: dict(q, bias=(torch.randn(q["output_norm"].shape[0], generator=g) * 0.1)
                              .bfloat16()) for p, q in w.items()}

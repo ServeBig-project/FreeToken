@@ -13,8 +13,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 import sidecar as S  # noqa: E402
-from cases import (QWEN36_BASE, QWEN36_SIDE, DSV4_SIDE, DENSE_BASE, need_gpu,  # noqa: E402
-                   need_path, need_tp2)
+import access as A  # noqa: E402
+from cases import (QWEN36_BASE, QWEN36_SIDE, DSV4_SIDE, DENSE_BASE, GPTOSS_BASE,  # noqa: E402
+                   need_gpu, need_path, need_tp2)
 from harness import Server, expect_rejected, run_prompts, same_execution  # noqa: E402
 
 CACHE = os.environ.get("NOWAG_QWEN36_CACHE", "1536")
@@ -58,6 +59,22 @@ def test_layer_not_in_model(tmp_path, qwen_side):
     side = copy(qwen_side, tmp_path, "extra_layer")
     S.edit_manifest(side, lambda m: m["layers"][-1].update(layer=1000))
     expect_rejected("err_layer_out_of_model", qwen_args(side), gpu)
+
+
+def test_partial_layer_coverage(tmp_path, qwen_side):
+    """Contract §9: the sidecar must cover exactly every MoE decoder layer."""
+    gpu = need_gpu()
+    side = copy(qwen_side, tmp_path, "partial")
+    S.edit_manifest(side, lambda m: m.update(layers=m["layers"][:-1]))
+    expect_rejected("err_partial_layers", qwen_args(side), gpu)
+
+
+def test_gptoss_nowag_fused_rejected():
+    """Contract §9: GPT-OSS NoWAG runs only offload/cpu/hybrid."""
+    gpu = need_gpu()
+    expect_rejected("err_gptoss_fused", ["--model", need_path(GPTOSS_BASE, "GPT-OSS base"),
+                                         "--nowag-expert-path", A.sidecar_dir("gptoss-d6-random"),
+                                         "--moe-backend", "fused"], gpu)
 
 
 def test_declared_d_disagrees_with_tensors(tmp_path, qwen_side):

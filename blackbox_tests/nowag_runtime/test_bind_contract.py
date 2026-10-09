@@ -17,9 +17,11 @@ import tolerances as TOL  # noqa: E402
 from cases import need_gpu  # noqa: E402
 
 IMPLS = ["reference", "cpu", "cuda"]
-NUMERIC = ["qwen36-d6-real", "dsv4-d6-real", "qwen36-d4-random", "dsv4-d4-random",
-           "gptoss-d6-random", "gptoss-d4-random"]
-EXACT = ["qwen36-d6-exact", "qwen36-d4-exact"]
+NUMERIC = ["qwen36-d6-real", "dsv4-d6-real", "qwen36-d4-random", "qwen36-d6-wordmajor",
+           "gptoss-d6-random", "comp-dsv4math-qwen36", "comp-swigluoai-qwen36",
+           "comp-gelutanh-qwen36"]
+EXACT = ["qwen36-d6-exact"]
+BUFFER = ["qwen36-d6-real", "comp-dsv4math-qwen36"]   # buffer/purity checks: one plain, one DSV4 math
 _BOUND = {}
 
 
@@ -31,7 +33,7 @@ def bind(impl, name, layer_pos="first"):
         else:
             if impl == "cuda":
                 need_gpu()
-            _BOUND[key] = A.candidate(name, layer_pos, impl, backend=None)
+            _BOUND[key] = A.candidate(name, layer_pos, impl)
     return _BOUND[key]
 
 
@@ -77,7 +79,7 @@ def snapshot(b, *tensors):
 # ------------------------------------------------------------------ workspace_spec
 
 @pytest.mark.parametrize("impl", IMPLS)
-@pytest.mark.parametrize("name", NUMERIC[:2])
+@pytest.mark.parametrize("name", BUFFER)
 def test_workspace_spec_is_pure_and_well_formed(impl, name):
     b = bind(impl, name)
     before_io = Path("/proc/self/io").read_text()
@@ -174,7 +176,7 @@ def test_exact_sample_bitwise(impl, name, t):
 # ------------------------------------------------------------------ buffer contract
 
 @pytest.mark.parametrize("impl", IMPLS)
-@pytest.mark.parametrize("name", NUMERIC[:2])
+@pytest.mark.parametrize("name", BUFFER)
 def test_dirty_buffers_and_repeat_give_identical_output(impl, name):
     b = bind(impl, name)
     x, rows, rw = inputs(b, 9, seed=3)
@@ -188,7 +190,7 @@ def test_dirty_buffers_and_repeat_give_identical_output(impl, name):
 
 
 @pytest.mark.parametrize("impl", IMPLS)
-@pytest.mark.parametrize("name", NUMERIC[:2])
+@pytest.mark.parametrize("name", BUFFER)
 def test_inputs_and_weights_not_modified(impl, name):
     b = bind(impl, name)
     x, rows, rw = (t.to(b.device) for t in inputs(b, 6, seed=4))
@@ -199,7 +201,7 @@ def test_inputs_and_weights_not_modified(impl, name):
 
 
 @pytest.mark.parametrize("impl", IMPLS)
-@pytest.mark.parametrize("name", NUMERIC[:2])
+@pytest.mark.parametrize("name", BUFFER)
 def test_empty_batch(impl, name):
     b = bind(impl, name)
     x, rows, rw = inputs(b, 0, seed=0)
@@ -208,7 +210,7 @@ def test_empty_batch(impl, name):
 
 
 @pytest.mark.parametrize("impl", IMPLS)
-@pytest.mark.parametrize("name", NUMERIC[:2])
+@pytest.mark.parametrize("name", BUFFER)
 def test_invalid_routes_and_padding_rows(impl, name):
     """expert_rows == -1 contributes nothing; padded rows (all -1) come out exactly zero."""
     b = bind(impl, name)
@@ -238,9 +240,33 @@ def test_out_aliasing_x_is_correct_or_rejected_before_running(impl, name):
     TOL.assert_close(ret.cpu(), ref, b.math, "aliased out")
 
 
+# ------------------------------------------------------------------ unsupported math (§9)
+
+UNSUPPORTED = {
+    "route_on_gate_up_input": dict(activation="silu", router_weight_on_input=True),
+    "erf_gelu": dict(activation="gelu"),
+    "unknown_rounding": dict(activation="silu", down_input_rounding="int8_per_tensor"),
+}
+
+
+@pytest.mark.parametrize("impl", ["cpu", "cuda"])
+@pytest.mark.parametrize("variant", sorted(UNSUPPORTED))
+def test_unsupported_math_rejected_at_bind(impl, variant):
+    """Contract §9: NoWAG does not support these; refuse at bind, before any run."""
+    if impl == "cuda":
+        need_gpu()
+    import freetoken.moe.expert_format as F
+    b = bind(impl, "qwen36-d6-real")
+    banks = A.loaded_banks(str(b.base), str(b.side))
+    with pytest.raises(Exception):
+        F.bind_expert_method(F.ExpertMath(**UNSUPPORTED[variant]),
+                             F.ExpertLayout("nowag", b.hidden, b.inter, len(b.bank_experts)),
+                             banks.format_state, device=b.device, backend=impl if impl == "cpu" else "offload")
+
+
 # ------------------------------------------------------------------ CUDA graph replay
 
-@pytest.mark.parametrize("name", NUMERIC[:2] + EXACT[:1])
+@pytest.mark.parametrize("name", BUFFER + EXACT)
 def test_graph_replay_changes_tokens_routes_and_tail(name):
     need_gpu()
     b = bind("cuda", name)

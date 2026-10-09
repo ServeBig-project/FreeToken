@@ -38,14 +38,18 @@ def layer_entry(side, layer):
 
 
 def read_experts(side, layer, experts):
-    """{expert: {w1/w2/w3: {assignments,input_norm,output_norm,bias=None}}} (row_major)."""
+    """{expert: {w1/w2/w3: {assignments,input_norm,output_norm,bias=None}}}; assignments are
+    returned row_major whatever the manifest's assignment_layout (contract §9)."""
     entry = layer_entry(side, layer)
+    layout = manifest(side).get("assignment_layout", "row_major")
     out = {}
     with safe_open(str(Path(side) / entry["file"]), "pt") as f:
         for e in experts:
             out[e] = {p: {part: f.get_tensor(key(layer, e, p, part))
                           for part in ("assignments", "input_norm", "output_norm")} | {"bias": None}
                       for p in PROJ}
+            for w in out[e].values():
+                w["assignments"] = R.to_row_major(w["assignments"], layout)
     return out
 
 
@@ -55,8 +59,9 @@ def tensor_shapes(side, layer):
         return {k: tuple(f.get_slice(k).get_shape()) for k in f.keys()}
 
 
-def write_layer(out, layer, experts):
-    """Write layer-LLL.safetensors/.json for {expert: weights}; return the manifest entry."""
+def write_layer(out, layer, experts, layout="row_major"):
+    """Write layer-LLL.safetensors/.json for {expert: weights} (row_major in memory, stored in
+    `layout`); return the manifest entry."""
     tensors, matrices = {}, {}
     name = f"layer-{layer:03d}"
     for e, w in experts.items():
@@ -64,7 +69,8 @@ def write_layer(out, layer, experts):
             meta = {}
             for field, part in (("packed_assignments", "assignments"),
                                 ("input_norm", "input_norm"), ("output_norm", "output_norm")):
-                t = w[p][part].contiguous()
+                t = w[p][part]
+                t = (R.to_layout(t, layout) if part == "assignments" else t).contiguous()
                 tensors[key(layer, e, p, part)] = t
                 meta[field] = {"dtype": str(t.dtype).replace("torch.", ""),
                                "name": key(layer, e, p, part), "shape": list(t.shape)}
@@ -78,14 +84,14 @@ def write_layer(out, layer, experts):
             "matrix_count": len(matrices)}
 
 
-def write_head(out, template, d, cb, entries):
+def write_head(out, template, d, cb, entries, layout="row_major"):
     """Codebook file + manifest. template: a real manifest whose model-geometry fields
     (format, model_type, hidden_size, num_experts, ...) are kept; calibration bookkeeping dropped."""
     save_file({"global_all.codebook": cb.contiguous()}, str(Path(out) / "global_codebook.safetensors"))
     keep = {k: v for k, v in template.items()
             if not k.startswith(("lloyd", "calibration", "initialize", "kmeans", "pool"))}
     keep.update({"d": d, "assignment_bits": 12, "assignments_packed": True, "scope": "expert_only",
-                 "codebook_sharing": "global_all", "layers": entries,
+                 "codebook_sharing": "global_all", "layers": entries, "assignment_layout": layout,
                  "matrix_count": sum(e["matrix_count"] for e in entries),
                  "n_bits": 12 / d, "normalizer_order": [0, 1], "normalizer_zero": [False, False],
                  "codebook": {"dtype": "bfloat16", "file": "global_codebook.safetensors",
@@ -157,7 +163,7 @@ def synth_expert(kind, d, hidden, inter, layer, e):
     }
 
 
-def synth_dir(geom, out, d, kind):
+def synth_dir(geom, out, d, kind, layout="row_major"):
     """Full-geometry synthetic sidecar (cached by path)."""
     out = Path(out)
     if (out / "manifest.json").exists():
@@ -166,9 +172,9 @@ def synth_dir(geom, out, d, kind):
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
     entries = [write_layer(tmp, layer, {e: synth_expert(kind, d, geom["hidden"], geom["inter"], layer, e)
-                                        for e in range(geom["experts"])})
+                                        for e in range(geom["experts"])}, layout)
                for layer in geom["layers"]]
-    write_head(tmp, geom["template"], d, synth_codebook(kind, d, geom["inter"]), entries)
+    write_head(tmp, geom["template"], d, synth_codebook(kind, d, geom["inter"]), entries, layout)
     tmp.rename(out)
     return out
 

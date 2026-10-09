@@ -36,15 +36,14 @@ def sizes(side):
 
 
 def check_block(block, d, n_ranks=1):
-    assert isinstance(block["format"], str) and block["format"]
-    assert block["format_parameters"]["d"] == d
-    assert block["format_parameters"]["assignment_bits"] == 12
+    assert block["format"] == "nowag"
+    assert block["format_parameters"] == {"d": d, "assignment_bits": 12}
     ranks = block["ranks"]
     assert sorted(r["rank"] for r in ranks) == list(range(n_ranks))
     for r in ranks:
         missing = [f for f in RANK_FIELDS if f not in r]
         assert not missing, f"rank fields missing: {missing}"
-        for f in BYTE_FIELDS:
+        for f in BYTE_FIELDS:   # workspace_device_bytes is 0 until shared-runtime reservation (§9)
             assert isinstance(r[f], int) and r[f] >= 0, (f, r[f])
         kb = r["kernel_backend"]
         assert (isinstance(kb, str) and kb) or (isinstance(kb, list) and kb
@@ -101,8 +100,8 @@ def test_non_nowag_model_reports_a_different_format():
         plain = experts(s.status())
     with Server("status_nowag", qwen(side, SMALL), gpu) as s:
         nowag = experts(s.status())
-    assert plain["format"] != nowag["format"]
-    assert "ranks" in plain and "format_parameters" in plain
+    assert plain["format"] not in ("", "nowag") and nowag["format"] == "nowag"
+    assert plain["format_parameters"] == {} and "ranks" in plain
 
 
 def test_tp2_one_codebook_per_rank():

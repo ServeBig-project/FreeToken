@@ -9,6 +9,7 @@ Math families are transcribed from the public model definitions:
       cast BF16, E4M3 act_quant again on the down input.
   GELU-tanh (Gemma4 text experts, HF transformers): gelu_pytorch_tanh(gate)*up. No base is
       available locally, so it is a component-level family with Qwen3.6 geometry.
+  SwiGLU-OAI (contract §9, MiniMax-M3 swigluoai and GPT-OSS) is the "gptoss" family.
 """
 
 import os
@@ -75,6 +76,9 @@ def need_gpu():
 
 
 def need_tp2():
+    """TP>1 NoWAG results do not count before TP slicing (phase P4) is delivered (§9)."""
+    if os.environ.get("NOWAG_TP_DELIVERED") != "1":
+        pytest.skip("TP>1 NoWAG not delivered yet (contract §9: P4); set NOWAG_TP_DELIVERED=1")
     if os.environ.get("NOWAG_TP2_OK") != "1":
         pytest.skip("two-GPU use not approved (set NOWAG_TP2_OK=1 and NOWAG_TP2_GPUS=a,b)")
     gpus = os.environ.get("NOWAG_TP2_GPUS", "")
