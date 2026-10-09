@@ -18,7 +18,7 @@ import tolerances as TOL  # noqa: E402
 from cases import need_gpu  # noqa: E402
 
 IMPLS = ["reference", "cuda"]
-NUMERIC = ["qwen36-d6-real", "dsv4-d6-real", "qwen36-d4-random", "qwen36-d6-wordmajor",
+NUMERIC = ["qwen36-d6-real", "dsv4-d6-real", "qwen36-d4-random", "qwen36-d4-wordmajor", "qwen36-d6-wordmajor",
            "gptoss-d6-random", "comp-dsv4math-qwen36", "comp-swigluoai-qwen36",
            "comp-gelutanh-qwen36"]
 EXACT = ["qwen36-d6-exact"]
@@ -225,6 +225,45 @@ def test_invalid_routes_and_padding_rows(impl, name):
 
 
 @pytest.mark.parametrize("impl", IMPLS)
+@pytest.mark.parametrize("name", BUFFER)
+def test_cache_capacity_and_slot_remapping(impl, name):
+    """A partial-layer dispatch can have fewer physical slots than the router top-k.
+    All active route ids address the supplied slots, not the model's expert numbers."""
+    source = bind(impl, name)
+    order = list(reversed(range(len(source.bank_experts))))
+    for capacity in (1, source.top_k, source.top_k + 3):
+        b = A.cache_view(source, order[:capacity])
+        x, _, rw = inputs(source, 7, seed=capacity)
+        rows = torch.full((7, b.top_k), -1, dtype=torch.int32)
+        valid = min(capacity, b.top_k)
+        rows[:, :valid] = (torch.arange(valid)[None, :] + torch.arange(7)[:, None]) % capacity
+        got = call(b, x, rows, rw)[0].cpu()
+        TOL.assert_close(got, b.expected(x, rows, rw), b.math, f"cache slots {capacity}")
+
+
+@pytest.mark.parametrize("impl", IMPLS)
+@pytest.mark.parametrize("name", BUFFER)
+def test_separate_workspaces_do_not_keep_another_calls_values(impl, name):
+    """Interleave two public execution domains and reuse each one's buffers for tail batches."""
+    b = bind(impl, name)
+    spec = b.method.workspace_spec(16, b.top_k, bank_rows=len(b.bank_experts))
+    workspaces = [garbage(spec, b.device) for _ in range(2)]
+    outputs = [torch.full((16, b.hidden), float("nan"), dtype=torch.bfloat16, device=b.device)
+               for _ in range(2)]
+    for step, valid in enumerate((16, 7, 1, 0, 9, 3)):
+        domain = step % 2
+        x, rows, rw = inputs(b, 16, seed=200 + step)
+        rows[valid:] = -1
+        held = outputs[1 - domain].clone() if step else None
+        got = call(b, x, rows, rw, out=outputs[domain], workspace=workspaces[domain])[0].cpu()
+        assert torch.equal(got[valid:], torch.zeros_like(got[valid:]))
+        if valid:
+            TOL.assert_close(got[:valid], b.expected(x[:valid], rows[:valid], rw[:valid]), b.math)
+        if held is not None:
+            assert torch.equal(outputs[1 - domain], held), "another domain's output changed"
+
+
+@pytest.mark.parametrize("impl", IMPLS)
 @pytest.mark.parametrize("name", NUMERIC[:1])
 def test_out_aliasing_x_is_correct_or_rejected_before_running(impl, name):
     b = bind(impl, name)
@@ -264,9 +303,12 @@ def test_unsupported_math_rejected_at_bind(variant):
 # ------------------------------------------------------------------ CUDA graph replay
 
 @pytest.mark.parametrize("name", BUFFER + EXACT)
-def test_graph_replay_changes_tokens_routes_and_tail(name):
+@pytest.mark.parametrize("cache_slots", [None, 11])
+def test_graph_replay_changes_tokens_routes_and_tail(name, cache_slots):
     need_gpu()
     b = bind("cuda", name)
+    if cache_slots is not None:
+        b = A.cache_view(b, list(reversed(range(len(b.bank_experts))))[:cache_slots])
     cap = 16
     spec = b.method.workspace_spec(cap, b.top_k, bank_rows=len(b.bank_experts))
     ws = garbage(spec, b.device)
@@ -292,3 +334,28 @@ def test_graph_replay_changes_tokens_routes_and_tail(name):
             assert torch.equal(got[:valid].float(), ref), f"replay {step}"
         else:
             TOL.assert_close(got[:valid], ref, b.math, f"replay {step}")
+
+
+@pytest.mark.parametrize("name", BUFFER)
+def test_concurrent_cuda_streams_have_separate_workspaces(name):
+    need_gpu()
+    b = bind("cuda", name)
+    spec = b.method.workspace_spec(16, b.top_k, bank_rows=len(b.bank_experts))
+    streams = [torch.cuda.Stream() for _ in range(2)]
+    domains = []
+    for i, stream in enumerate(streams):
+        x, rows, rw = inputs(b, 16, seed=300 + i)
+        rows[3 if i else 11:] = -1
+        tensors = [t.to(b.device) for t in (x, rows, rw)]
+        ws = garbage(spec, b.device)
+        out = torch.full_like(tensors[0], float("nan"))
+        b.method.run(*tensors, b.banks, b.shared, workspace=ws, out=out)
+        domains.append((tensors, ws, out, b.expected(x, rows, rw)))
+        stream.wait_stream(torch.cuda.current_stream())
+    for _ in range(4):
+        for stream, (tensors, ws, out, _) in zip(streams, domains):
+            with torch.cuda.stream(stream):
+                b.method.run(*tensors, b.banks, b.shared, workspace=ws, out=out)
+    for stream, (_, _, out, ref) in zip(streams, domains):
+        stream.synchronize()
+        TOL.assert_close(out.cpu(), ref, b.math, "concurrent execution domain")

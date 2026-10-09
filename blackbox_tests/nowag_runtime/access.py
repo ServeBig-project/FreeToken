@@ -28,6 +28,8 @@ CASES = {
     "qwen36-d6-real": ("qwen36_silu", "qwen36_silu", 6, "real", "row_major", QWEN36_BASE, QWEN36_SIDE),
     "dsv4-d6-real": ("dsv4", "dsv4", 6, "real", "row_major", DSV4_BASE, DSV4_SIDE),
     "qwen36-d4-random": ("qwen36_silu", "qwen36_silu", 4, "random", "row_major", QWEN36_BASE, QWEN36_SIDE),
+    "qwen36-d4-wordmajor": ("qwen36_silu", "qwen36_silu", 4, "random", "word_major", QWEN36_BASE,
+                            QWEN36_SIDE),
     "qwen36-d6-wordmajor": ("qwen36_silu", "qwen36_silu", 6, "random", "word_major", QWEN36_BASE,
                             QWEN36_SIDE),
     "gptoss-d6-random": ("gptoss", "gptoss", 6, "random", "row_major", GPTOSS_BASE, None),
@@ -184,6 +186,20 @@ def to_device(value, device):
     if isinstance(value, dict):
         return {k: to_device(v, device) for k, v in value.items()}
     return value
+
+
+def cache_view(bound, selected):
+    """A cache whose physical slots contain a chosen permutation of logical experts (§5)."""
+    rows = torch.tensor(selected, dtype=torch.long, device=bound.device)
+    banks = {name: tensor.index_select(0, rows).contiguous()
+             for name, tensor in bound.banks.items()}
+    view = Bound(bound.name, bound.method, banks, bound.shared,
+                 [bound.bank_experts[i] for i in selected], bound.layer, bound.device,
+                 bound._weights_of)
+    view.math = bound.math
+    if isinstance(bound.method, ReferenceMethod):
+        view.method = ReferenceMethod(view)
+    return view
 
 
 def candidate(name, layer_pos):

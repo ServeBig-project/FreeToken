@@ -26,6 +26,7 @@ from harness import (Server, expect_rejected, experts, ft, run_prompts, same_exe
 CACHE = {"qwen36": os.environ.get("NOWAG_QWEN36_CACHE", "1536"),
          "dsv4": os.environ.get("NOWAG_DSV4_CACHE", "640"),
          "gptoss": os.environ.get("NOWAG_GPTOSS_CACHE", "256")}
+VARIANTS = ["qwen36", "qwen36-d4-random", "qwen36-d6-wordmajor", "dsv4", "gptoss"]
 
 
 def inventory(root):
@@ -42,11 +43,14 @@ def sources(which):
         return need_path(QWEN36_BASE, "Qwen3.6 base"), need_path(QWEN36_SIDE, "Qwen3.6 sidecar")
     if which == "dsv4":
         return need_path(DSV4_BASE, "DSV4 base"), need_path(DSV4_SIDE, "DSV4 sidecar")
+    if which.startswith("qwen36-"):
+        return need_path(QWEN36_BASE, "Qwen3.6 base"), A.sidecar_dir(which)
     return need_path(GPTOSS_BASE, "GPT-OSS base"), A.sidecar_dir("gptoss-d6-random")
 
 
 def serve_args(model, which, side=None, *extra):
-    args = ["--model", model, "--moe-backend", "offload", "--moe-cache-size", CACHE[which], *extra]
+    cache = CACHE[which.split("-")[0]]
+    args = ["--model", model, "--moe-backend", "offload", "--moe-cache-size", cache, *extra]
     return args + (["--nowag-expert-path", side] if side else [])
 
 
@@ -76,18 +80,18 @@ def converted(which):
     return _FTW[which]
 
 
-@pytest.mark.parametrize("which", ["qwen36", "dsv4", "gptoss"])
+@pytest.mark.parametrize("which", VARIANTS)
 def test_conversion_leaves_sources_untouched(which):
     assert converted(which)["sources_unchanged"]
 
 
-@pytest.mark.parametrize("which", ["qwen36", "dsv4", "gptoss"])
+@pytest.mark.parametrize("which", VARIANTS)
 def test_ftw_runs_alone_and_matches_native(which):
     """Native and FTW carry the same compressed weights; for GPT-OSS the native run reads the
     expert biases from BASE, so a FTW that dropped them diverges from it."""
     gpu = need_gpu()
     info = converted(which)
-    task = which != "gptoss"                                  # synthetic GPT-OSS weights
+    task = which in ("qwen36", "dsv4")                        # only calibrated real weights
     with Server(f"ftw_native_{which}", serve_args(info["base"], which, info["side"]), gpu) as s:
         native, native_status = run_prompts(s), experts(s.status())
     with Server(f"ftw_{which}", serve_args(info["dest"], which), gpu) as s:
@@ -122,7 +126,7 @@ def test_ftw_missing_data_rejected(tmp_path):
     expect_rejected("ftw_missing_shard", serve_args(broken, "qwen36"), gpu)
 
 
-@pytest.mark.parametrize("which", ["qwen36", "dsv4"])
+@pytest.mark.parametrize("which", ["qwen36", "qwen36-d4-random", "dsv4"])
 def test_ftw_tp2_matches_tp1(which):
     gpus = need_tp2()
     gpu = need_gpu()
@@ -134,7 +138,7 @@ def test_ftw_tp2_matches_tp1(which):
         tp2, ranks = run_prompts(s), experts(s.status())["ranks"]
     assert sorted(r["rank"] for r in ranks) == [0, 1]
     assert len({str(r["device"]) for r in ranks}) == 2
-    cross_path(tp1, tp2, f"{which} FTW TP1 vs TP2")
+    cross_path(tp1, tp2, f"{which} FTW TP1 vs TP2", task=which in ("qwen36", "dsv4"))
 
 
 def test_gptoss_native_without_base_bias_rejected():

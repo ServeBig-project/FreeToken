@@ -17,6 +17,41 @@ artifacts. No production code, design notes, diffs or internal tests were read.
 docstring, reproduce with `python calibrate.py`); `harness.py` holds the frozen output
 comparison protocol for service runs.
 
+## Prepared coverage and evidence (2026-10-09)
+
+No candidate GPU matrix has run. The coordinator confirmed that no earlier candidate GPU
+pass log exists. The available suite is preparation, not delivery acceptance.
+
+| Prepared | Remaining material or observation |
+| --- | --- |
+| D4/D6 and both assignment layouts; real SiLU/DSV4, component SwiGLU-OAI/tanh-GELU, GPT-OSS bias | GPT-OSS BASE missing; component math is not a real-model service pass |
+| Physical cache slot permutation, capacities 1/top-k/top-k+3, dirty buffers, empty/padded tail, two workspaces, concurrent CUDA streams | Candidate GPU run; service minimum-capacity rules still needed |
+| Graph replay for full-layer and cache banks, changing tokens/routes/tails | Service Graph/SD execution-statistics protocol and candidate run |
+| FTW D4/D6/word-major, rename, missing data, bias, TP2 | Current source deletion removes input symlink copies only; canonical source paths remain visible, so complete source isolation is not yet established |
+| Real Qwen/DSV4 service, CPU/hybrid/resident/offload, layered scheduling, cancellation, self-SD/DFlash | Explicit legal-mode expectations; maintenance API; cache groups/multi-turn; profiler evidence for transport, HBM, Graph and SD |
+| TP2 service and independent TP boundary math | Two approved GPUs; public per-rank bind recipe; actual collective observation is unavailable under contract §9 |
+| Paired baseline/candidate timings and non-NoWAG regression | Baseline e6f6d90 source environment, quiet resource window; HBM and transfer-byte measurements |
+
+Flash-Next has no qualified BASE/weight pair for this acceptance. Its reference geometry
+does not count as a served-model pass. Offline quantization/training and GGUF are excluded.
+
+This handoff ran only independent single-thread CPU checks with `CUDA_VISIBLE_DEVICES=''`:
+runner transport/token accounting **2 passed** (0.96 s), cache-slot/workspace reference rows
+**4 passed** (2.34 s), and pack/layout/loop-projection/E4M3 self-checks **35 passed** (0.97 s).
+These results establish the test/reference behavior only. Frozen numeric bounds are unchanged.
+
+The coordinator supplied these public inputs (set them explicitly in the run environment):
+
+```sh
+export NOWAG_QWEN36_SIDE=/data1/lmcache_kv/goodput_campaign/qwen36_general_mix_joint_recovery_v1
+export NOWAG_DSV4_BASE=/data1/lmcache_kv/models/DeepSeek-V4-Flash-0731
+export NOWAG_DFLASH_DRAFT=/data2/servebig-envs/dflash_models/models--z-lab--Qwen3.6-35B-A3B-DFlash/snapshots/f181eece646affea2c38b2765f1aaa01a9734ccd
+```
+
+The Qwen manifest declares generic v1, D6/B12, H=2048/I=512/E=256, 40 MoE layers;
+the DSV4 BASE config declares H=4096/I=2048, 43 decoder layers. These are input checks,
+not evidence that the candidate can load or serve them.
+
 ## Environment
 
 | Variable | Meaning |
