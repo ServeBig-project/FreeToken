@@ -855,8 +855,11 @@ def cache_geometry(state: Any) -> dict:
     geo["limits"] = _cache_limits(geo, unit_bytes, pool_budget, floors)
     runtime = (state.stats.prefix_cache or {}).get("runtime")
     if runtime is not None:  # a shared runtime: page and slot counts are only address space
-        geo.update(runtime_cache_bytes=runtime["budget_bytes"], address_pages=num_pages,
-                   address_mamba_slots=num_mamba_slots, num_pages=0, num_mamba_slots=0)
+        # Before the first reply the load-time pools carry the address space under its own key.
+        geo.update(runtime_cache_bytes=runtime["budget_bytes"],
+                   address_pages=num_pages or int(pools.get("address_pages", 0)),
+                   address_mamba_slots=num_mamba_slots or int(pools.get("address_mamba_slots", 0)),
+                   num_pages=0, num_mamba_slots=0)
     return geo
 
 
