@@ -167,7 +167,25 @@ def _load_routed_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "nowag_vllm", nowag)
     monkeypatch.setitem(sys.modules, "nowag_vllm.cuda_ops", cuda_ops)
     monkeypatch.setitem(sys.modules, "nowag_vllm.moe_ops", nowag_ops)
-    return align, nowag_ops, importlib.import_module("freetoken.moe.fused_nowag")
+    return align, nowag_ops, importlib.import_module("freetoken.moe.expert_format")
+
+
+def _run_routed(expert_format, positional, output):
+    from freetoken.moe.nowag.weights import NowagState
+
+    x, slots, weights, codebook, *banks = positional
+    layout = expert_format.ExpertLayout(
+        "nowag", x.shape[1], banks[2].shape[1], banks[0].shape[0]
+    )
+    method = expert_format.bind_expert_method(
+        expert_format.ExpertMath(),
+        layout,
+        NowagState(codebook.shape[1], 12),
+        device=x.device,
+        backend="offload",
+    )
+    banks = dict(zip(expert_format._BANK_SCHEMAS["nowag"], banks))
+    return method.run(x, slots, weights, banks, {"codebook": codebook}, out=output)
 
 
 def _routed_args(num_tokens: int):
@@ -179,7 +197,6 @@ def _routed_args(num_tokens: int):
     hidden = 2048
     intermediate = 512
     experts = 256
-    routes = num_tokens * top_k
     tensor = lambda shape, dtype=bf16: _FakeTensor(shape, dtype)
     positional = (
         tensor((num_tokens, hidden)),
@@ -196,18 +213,7 @@ def _routed_args(num_tokens: int):
         tensor((experts, intermediate)),
         tensor((experts, hidden)),
     )
-    keywords = {
-        "model_type": "qwen3_5_moe",
-        "model_num_experts": experts,
-        "swiglu_limit": None,
-        "gate_up_backend": "cuda_exact_k48",
-        "down_backend": "cuda_exact_k48",
-        "cuda_launch_plan": object(),
-        "output": tensor((num_tokens, hidden)),
-        "middle_workspace": tensor((16000, intermediate)),
-        "route_output_workspace": tensor((routes, hidden)),
-    }
-    return positional, keywords
+    return positional, tensor((num_tokens, hidden))
 
 
 @pytest.mark.parametrize(
@@ -245,8 +251,8 @@ def test_routed_experts_selects_adaptive_callback_only_above_1024_routes(
         return result_marker
 
     nowag_ops.nowag_fused_moe = capture_nowag
-    positional, keywords = _routed_args(num_tokens)
-    assert routed.routed_experts_nowag(*positional, **keywords) is result_marker
+    positional, output = _routed_args(num_tokens)
+    assert _run_routed(routed, positional, output) is result_marker
 
     ordinary_args = (positional[1], 16, 256)
     assert captured["align_routes"](*ordinary_args) is plain_result
@@ -278,9 +284,9 @@ def test_adaptive_callback_error_propagates_through_routed_experts(monkeypatch) 
         return callback(*(object() for _ in range(6)))
 
     nowag_ops.nowag_fused_moe = invoke_callback
-    positional, keywords = _routed_args(129)
+    positional, output = _routed_args(129)
     with pytest.raises(RuntimeError) as raised:
-        routed.routed_experts_nowag(*positional, **keywords)
+        _run_routed(routed, positional, output)
     assert raised.value is expected
 
 
@@ -292,7 +298,7 @@ def test_routed_experts_propagates_plugin_error(monkeypatch) -> None:
         raise expected
 
     nowag_ops.nowag_fused_moe = fail_nowag
-    positional, keywords = _routed_args(129)
+    positional, output = _routed_args(129)
     with pytest.raises(RuntimeError) as raised:
-        routed.routed_experts_nowag(*positional, **keywords)
+        _run_routed(routed, positional, output)
     assert raised.value is expected

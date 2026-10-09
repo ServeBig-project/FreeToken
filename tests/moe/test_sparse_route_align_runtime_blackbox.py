@@ -21,7 +21,7 @@ class _PublicModules:
 @pytest.fixture
 def public_modules() -> _PublicModules:
     return _PublicModules(
-        fused=importlib.import_module("freetoken.moe.fused_nowag"),
+        fused=importlib.import_module("freetoken.moe.nowag.method"),
         cuda_ops=importlib.import_module("nowag_vllm.cuda_ops"),
         moe_ops=importlib.import_module("nowag_vllm.moe_ops"),
         legacy_align=importlib.import_module("freetoken.kernel.triton.moe_align"),
@@ -32,7 +32,6 @@ def _dummy_call_tensors(m: int, *, top_k: int = 8, num_experts: int = 4):
     hidden = 6
     intermediate = 6
     routes = m * top_k
-    rows = routes * 16
 
     topk_ids = (
         torch.arange(routes, dtype=torch.int32).remainder(num_experts).view(m, top_k)
@@ -54,12 +53,6 @@ def _dummy_call_tensors(m: int, *, top_k: int = 8, num_experts: int = 4):
             torch.ones((num_experts, hidden), dtype=torch.bfloat16),
         ),
         "output": torch.empty((m, hidden), dtype=torch.bfloat16),
-        "middle_workspace": torch.empty(
-            (2 * rows, intermediate), dtype=torch.bfloat16
-        ),
-        "route_output_workspace": torch.empty(
-            (routes, hidden), dtype=torch.bfloat16
-        ),
         "topk_ids": topk_ids,
     }
 
@@ -122,16 +115,30 @@ def _capture_align_callback(
         sparse_align=sparse_align,
         legacy_align=legacy_align,
     )
+    from freetoken.moe.expert_format import (
+        _BANK_SCHEMAS,
+        ExpertLayout,
+        ExpertMath,
+        bind_expert_method,
+    )
+    from freetoken.moe.nowag.weights import NowagState
+
     tensors = _dummy_call_tensors(m)
-    result = modules.fused.routed_experts_nowag(
-        *tensors["args"],
-        model_type="qwen3_5_moe",
-        model_num_experts=4,
-        gate_up_backend="auto",
-        down_backend="auto",
-        output=tensors["output"],
-        middle_workspace=tensors["middle_workspace"],
-        route_output_workspace=tensors["route_output_workspace"],
+    x, slots, weights, codebook, *banks = tensors["args"]
+    method = bind_expert_method(
+        ExpertMath(),
+        ExpertLayout("nowag", x.shape[1], banks[2].shape[1], 4),
+        NowagState(codebook.shape[1], 12),
+        device=x.device,
+        backend="offload",
+    )
+    result = method.run(
+        x,
+        slots,
+        weights,
+        dict(zip(_BANK_SCHEMAS["nowag"], banks)),
+        {"codebook": codebook},
+        out=tensors["output"],
     )
     assert result is tensors["output"]
     return captured["align_routes"], tensors["topk_ids"]
