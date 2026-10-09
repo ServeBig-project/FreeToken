@@ -75,7 +75,7 @@ class BaseAttnBackend(ABC):
     @abstractmethod
     def prepare_for_replay(self, batch: Batch) -> None: ...
 
-    def create_speculative_graphs(self, max_seq_len: int):
+    def create_speculative_graphs(self, max_seq_len: int, max_batch_size: int):
         raise ValueError(f"{type(self).__name__} has no speculative Graph plan")
 
     def prepare_for_layer_range_capture(self, batch: Batch) -> None:

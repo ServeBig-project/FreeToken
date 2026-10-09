@@ -568,13 +568,13 @@ class FlashInferBackend(BaseAttnBackend):
         batch.attn_metadata.decode.initialized = False
         self.prepare_for_replay(batch)
 
-    def create_speculative_graphs(self, max_seq_len: int):
-        return FISpeculativeGraphs(self, max_seq_len)
+    def create_speculative_graphs(self, max_seq_len: int, max_batch_size: int):
+        return FISpeculativeGraphs(self, max_seq_len, max_batch_size)
 
-    def create_decode_graph_wrapper(self, batch_size: int):
+    def create_decode_graph_wrapper(self, batch_size: int, capture: FICaptureData | None = None):
         from flashinfer import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
 
-        capture = self.capture
+        capture = capture if capture is not None else self.capture
         wrapper = CUDAGraphBatchDecodeWithPagedKVCacheWrapper(
             self.float_workspace_buffer,
             kv_layout="NHD",
@@ -619,14 +619,17 @@ class FlashInferBackend(BaseAttnBackend):
 
 
 class FISpeculativeGraphs:
-    def __init__(self, backend, max_seq_len):
+    def __init__(self, backend, max_seq_len, max_batch_size):
         self.backend, self.max_seq_len = backend, max_seq_len
         self.draft, self.verify = {}, {}
+        # Draft wrappers share one plan store sized for SD, independent of target-decode sizes.
+        self.capture = FICaptureData.create(max_batch_size, max_seq_len, backend.device)
+        self.capture.page_table = self.capture.page_table.view(-1)
 
     def _wrapper(self, batch):
         if not batch.is_speculative_verify:
             if batch.size not in self.draft:
-                self.draft[batch.size] = self.backend.create_decode_graph_wrapper(batch.size)
+                self.draft[batch.size] = self.backend.create_decode_graph_wrapper(batch.size, self.capture)
             return self.draft[batch.size]
         if batch.size not in self.verify:
             self.verify[batch.size] = self.backend.create_verify_graph_wrapper(batch.size, self.max_seq_len)

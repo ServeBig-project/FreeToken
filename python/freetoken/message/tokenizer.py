@@ -50,6 +50,7 @@ class DetokenizeMsg(BaseTokenizerMsg):
     gpu_mem_bytes: int = 0
     speculative: dict | None = None
     cuda_graph: dict | None = None
+    resources: dict | None = None
     gdn_replayssm: dict | None = None
     prefix_cache: dict | None = None
 

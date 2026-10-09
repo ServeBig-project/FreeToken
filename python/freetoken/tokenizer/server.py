@@ -234,6 +234,7 @@ def tokenize_worker(
                         gpu_mem_bytes=msg.gpu_mem_bytes,
                         speculative=msg.speculative,
                         cuda_graph=msg.cuda_graph,
+                        resources=msg.resources,
                         gdn_replayssm=msg.gdn_replayssm,
                         prefix_cache=msg.prefix_cache,
                     )

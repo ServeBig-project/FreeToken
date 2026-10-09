@@ -297,6 +297,7 @@ class FrontendManager:
             self.stats.prefix_cache = msg.prefix_cache
         if getattr(msg, "execution", None) is not None:
             self.execution = msg.execution
+            self.stats.resources = None
         fut = self.rebuild_futures.pop(msg.request_id, None)
         if fut is not None and not fut.done():
             fut.set_result(self.last_rebuild)

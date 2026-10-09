@@ -42,6 +42,7 @@ class StatsTracker:
                                             "flushes", "flushed_records", "snapshot_exports"), 0)
         self.gdn_replayssm.update(flush_gpu_ms=0.0, export_gpu_ms=0.0)
         self.prefix_cache = None  # scheduler CacheManager.status() as of the latest reply
+        self.resources = None  # Engine.resource_status() as of the latest reply
         self.cuda_graph = {"enabled": False, "target_decode": 0, "draft": 0, "verify": 0, "verify_range": 0,
                            "speculative_eager": {"draft": 0, "verify": 0, "verify_range": 0},
                            "replay_shapes": [], "capture_seconds": 0.0, "extra_reserved_bytes": 0}
@@ -84,6 +85,8 @@ class StatsTracker:
         t = time.monotonic() if now is None else now
         if getattr(reply, "cuda_graph", None) is not None:
             self.cuda_graph = reply.cuda_graph
+        if getattr(reply, "resources", None) is not None:
+            self.resources = reply.resources
         if getattr(reply, "speculative", None) is not None:
             self.speculative.update(reply.speculative)
         if getattr(reply, "gdn_replayssm", None) is not None:
@@ -208,7 +211,8 @@ def build_stats(state: Any, p95_ms: int, ttft_mean_ms: int) -> dict:
             "active": bool((getattr(state, "gdn_geometry", None) or {}).get("active")),
             **tr.gdn_replayssm,
         },
-        "execution": execution,
+        # Ready and rebuild publish resources with execution; replies refresh them after.
+        "execution": {**execution, "resources": tr.resources or execution.get("resources")},
         "speculative": {
             "enabled": bool(steps),
             "adaptive_cost_enabled": config.speculative_adaptive_cost,

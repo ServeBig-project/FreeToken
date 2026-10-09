@@ -1112,6 +1112,7 @@ class Scheduler(SchedulerIOMixin):
         swa_tokens = self._swa_token_usage()
         if reply:
             reply[-1].cuda_graph = self.engine.graph_runner.stats_snapshot()
+            reply[-1].resources = self.engine.resource_status()
             reply[-1].prefix_cache = self.cache_manager.status()
             pool = self.engine.linear_state_pool
             if pool is not None and pool.replay is not None:

@@ -89,9 +89,10 @@ def _determine_cuda_graph_bs(
     cuda_graph_bs: List[int] | None,
     cuda_graph_max_bs: int | None,
     free_memory: int,
-) -> List[int]:
+) -> tuple[List[int], int]:
+    """Target-decode graph sizes and the configured size limit they are drawn from."""
     if cuda_graph_bs is not None:
-        return cuda_graph_bs
+        return cuda_graph_bs, max(cuda_graph_bs, default=0)
 
     free_memory_gb = free_memory / (1 << 30)
     if cuda_graph_max_bs is None:
@@ -101,10 +102,10 @@ def _determine_cuda_graph_bs(
             cuda_graph_max_bs = 160
 
     if cuda_graph_max_bs < 1:
-        return []
+        return [], 0
 
     candidates = [1, 2, 4] + list(range(8, cuda_graph_max_bs + 1, 8))
-    return [bs for bs in candidates if bs <= cuda_graph_max_bs]
+    return [bs for bs in candidates if bs <= cuda_graph_max_bs], cuda_graph_max_bs
 
 
 def get_free_memory(device: torch.device) -> int:
@@ -128,7 +129,7 @@ class GraphRunner:
         layered_execution_adapter: LayeredExecutionAdapter | None = None,
         speculative_config=None,
     ) -> None:
-        cuda_graph_bs = _determine_cuda_graph_bs(
+        cuda_graph_bs, self.graph_bs_limit = _determine_cuda_graph_bs(
             cuda_graph_bs=cuda_graph_bs,
             cuda_graph_max_bs=cuda_graph_max_bs,
             free_memory=free_memory,

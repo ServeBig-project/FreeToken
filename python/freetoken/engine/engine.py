@@ -1267,6 +1267,15 @@ class Engine:
                 ),
             ),
             fallback_reasons=[dict(fallback) for fallback in self.execution_fallbacks],
+            resources=self.resource_status(),
+        )
+
+    def resource_status(self) -> dict:
+        """Buffers held now; CPU executor staging grows when a new row count first runs."""
+        executor = self.cpu_moe_executor
+        return dict(
+            speculative_graph_reserved_bytes=self.graph_runner.speculative_reserved_bytes,
+            cpu_executor_pinned_io_bytes=executor.pinned_io_bytes if executor is not None else 0,
         )
 
     def finish_layer_group_logits(self, batch: Batch, state) -> torch.Tensor:
@@ -1344,7 +1353,12 @@ class Engine:
                     top_p=(args.top_p[request_slice] if args.top_p is not None else None),
                 )
             logits = self.model.finish_layer_group_prefill(state, output_indices)
-        self._observe_replay(batch)  # layered decode rows bypass compute_logits
+        # Layered decode rows bypass compute_logits. A mixed batch finishes its decode and
+        # prefill subsets in separate calls, so count only the decode rows completed here.
+        replay = self.linear_state_pool.replay if self.linear_state_pool is not None else None
+        if replay is not None:
+            decode = {id(req) for req in batch.decode_reqs}
+            replay.counts["ar_tokens"] += sum(id(req) in decode for req in selected_reqs)
         if self.cpu_moe_executor is not None:
             self.cpu_moe_executor.raise_if_unhealthy()
         for req in selected_reqs:

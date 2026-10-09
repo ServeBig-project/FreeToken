@@ -58,6 +58,7 @@ class UserReply(BaseFrontendMsg):
     matched_stop: str | None = None
     speculative: dict | None = None
     cuda_graph: dict | None = None
+    resources: dict | None = None
     gdn_replayssm: dict | None = None
     prefix_cache: dict | None = None
 

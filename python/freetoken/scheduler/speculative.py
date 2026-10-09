@@ -83,12 +83,6 @@ class SpeculativeDecoder:
             "fallback_requests": dict(self.fallback_requests),
             "state_slot_stops": self.state_slot_stops,
             "draft_length_histogram": list(self.draft_length_histogram),
-            # Live: CPU staging grows when a new row count first runs.
-            "resources": {
-                "graph_reserved_bytes": self.engine.graph_runner.speculative_reserved_bytes,
-                "cpu_executor_pinned_io_bytes": (self.engine.cpu_moe_executor.pinned_io_bytes
-                                                 if self.engine.cpu_moe_executor is not None else 0),
-            },
         }
         result.update(self.drafter.snapshot())
         if self.cost is not None:
