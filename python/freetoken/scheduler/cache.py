@@ -211,6 +211,7 @@ class CacheManager:
             # SD targets have no window of their own: the drafter's window rides the tree.
             swa_pool, sliding_window_size = draft_kv, draft_kv.window
             self.draft_block = draft_kv.layout.config.speculative_num_steps + 1
+            self.anchor_windows = getattr(draft_kv.layout.config, "special_token_ckpt", False)
         self.swa_pool = swa_pool
         self.sliding_window_size = sliding_window_size
         # swa_paged: the pool keeps window KV behind a full->window mapping with its own slots,
@@ -255,6 +256,7 @@ class CacheManager:
     supports_runtime_rebuild = True
     prefill_chunk_budget = None  # generic shared page pool: no per-model prefill chunk cap
     draft_block = 0  # tokens one draft round adds when the window pool is the drafter's
+    anchor_windows = False  # a retained tool-call anchor may hold one more window
 
     def _make_tree(self) -> RadixCache | None:
         if not self.reuse:
@@ -318,12 +320,15 @@ class CacheManager:
     def wave_window_growth(self, reqs: Iterable[Req]) -> int:
         """Window slots decoding requests may take before their next release while a layered
         wave runs without new admissions: the rest of a window not filled yet, then one release
-        interval and one draft round, never more than each can still generate. Drafter pool
-        only (it is sized per running request); a reused prefix holds at most one window."""
+        interval and one draft round (plus the retained window before an anchor drops), never
+        more than each can still generate. Drafter pool only (it is sized per running request);
+        a reused prefix holds at most one window."""
         if not self.draft_block:
             return 0
         window = self.sliding_window_size
         steady = _SWA_EVICTION_INTERVAL + self.draft_block + 2 * self.page_size
+        if self.anchor_windows:
+            steady += window + _SWA_RETAIN_GAP
         return sum(
             min(req.max_device_len - req.device_len + self.draft_block,
                 window - min(req.device_len - req.swa_evicted_seqlen, window) + steady)
