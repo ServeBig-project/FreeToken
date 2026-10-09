@@ -27,8 +27,9 @@ comparison protocol for service runs.
 | `NOWAG_PYTHON` | interpreter (default freetoken-dev) |
 | `NOWAG_GPU_OK=1`, `NOWAG_GPU` | approve single-GPU use; GPU UUID or index for `--gpu` |
 | `NOWAG_TP2_OK=1`, `NOWAG_TP2_GPUS=a,b` | approve two-GPU runs |
+| `NOWAG_TP_DELIVERED=1` | count TP>1 NoWAG rows (contract §9: not before phase P4) |
 | `CUDA_VISIBLE_DEVICES` | the approved GPU for in-process CUDA tests (`cuda` rows use `cuda:0`) |
-| `NOWAG_SCRATCH` | writable multi-GB dir: synthetic full-geometry sidecars, FTW outputs |
+| `NOWAG_SCRATCH` | writable multi-GB dir (e.g. `/dev/shm/...`): synthetic full-geometry sidecars (~8-12 GB each), FTW outputs |
 | `NOWAG_QWEN36_BASE`, `NOWAG_QWEN36_SIDE`, `NOWAG_QWEN36_BF16` | Qwen3.6 inputs (defaults: /data1 paths) |
 | `NOWAG_DSV4_BASE`, `NOWAG_DSV4_SIDE` | DSV4 inputs (base has no default) |
 | `NOWAG_GPTOSS_BASE` | GPT-OSS-20B snapshot dir (synthetic NoWAG weights are generated) |

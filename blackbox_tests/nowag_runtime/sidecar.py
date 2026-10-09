@@ -171,9 +171,12 @@ def synth_dir(geom, out, d, kind, layout="row_major"):
     tmp = out.with_name(out.name + ".partial")
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
+    threads = torch.get_num_threads()
+    torch.set_num_threads(1)          # thousands of small tensors: threading only adds overhead
     entries = [write_layer(tmp, layer, {e: synth_expert(kind, d, geom["hidden"], geom["inter"], layer, e)
                                         for e in range(geom["experts"])}, layout)
                for layer in geom["layers"]]
+    torch.set_num_threads(threads)
     write_head(tmp, geom["template"], d, synth_codebook(kind, d, geom["inter"]), entries, layout)
     tmp.rename(out)
     return out

@@ -19,6 +19,8 @@ REAL_K = [2048, 512, 4096, 2880, 2560, 640, 256, 1024, 320, 1440]
 
 def test_pack_hand_vector():
     # 0xABC | 0x123<<12 | low 8 bits of 0xFFF <<24 ; then the remaining 4 bits start word 1
+    assert torch.equal(R.pack(torch.tensor([[0xABC, 0x123, 0xFFF]])),
+                       R.pack_bits(torch.tensor([[0xABC, 0x123, 0xFFF]])))
     words = R.pack(torch.tensor([[0xABC, 0x123, 0xFFF]]))
     assert words.dtype == torch.int32 and words.shape == (1, 2)
     assert (int(words[0, 0]) & 0xFFFFFFFF) == 0xFF123ABC
@@ -43,6 +45,7 @@ def test_pack_roundtrip_and_width(k, d):
     ids[1] = 0
     packed = R.pack(ids)
     assert packed.shape == (5, -(-count * 12 // 32))
+    assert torch.equal(packed, R.pack_bits(ids))
     assert torch.equal(R.unpack(packed, count), ids)
 
 

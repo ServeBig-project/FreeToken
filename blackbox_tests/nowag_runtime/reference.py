@@ -25,17 +25,29 @@ def words_per_row(k, d):
 
 
 def pack(ids):
-    """[N, n_ids] ids in [0,4096) -> row_major int32 [N, words]; 12-bit LSB-first stream per row."""
+    """[N, n_ids] ids in [0,4096) -> row_major int32 [N, words]; 12-bit LSB-first stream per row.
+    Bit ranges of different ids never overlap, so adding the shifted pieces equals OR-ing them."""
     n, count = ids.shape
     assert int(ids.min()) >= 0 and int(ids.max()) < CODEBOOK_SIZE
     words = math.ceil(count * BITS / 32)
+    start = torch.arange(count) * BITS
+    word, shift = start // 32, start % 32
+    ids = ids.long()
+    value = torch.zeros(n, words + 1, dtype=torch.long)
+    value.index_add_(1, word, (ids << shift) & 0xFFFFFFFF)
+    value.index_add_(1, word + 1, ids >> (32 - shift))                   # spill into next word
+    value = value[:, :words]
+    return torch.where(value >= 2 ** 31, value - 2 ** 32, value).to(torch.int32)
+
+
+def pack_bits(ids):
+    """Second, bit-by-bit formulation of pack (used only to cross-check it)."""
+    n, count = ids.shape
+    words = math.ceil(count * BITS / 32)
     bits = (ids.long().unsqueeze(-1) >> torch.arange(BITS)) & 1           # [N, n, 12], bit0 first
-    bits = bits.reshape(n, count * BITS)
-    bits = torch.nn.functional.pad(bits, (0, words * 32 - count * BITS))
-    bits = bits.reshape(n, words, 32)
-    value = (bits << torch.arange(32)).sum(-1)                            # uint32 value in int64
-    value = torch.where(value >= 2 ** 31, value - 2 ** 32, value)
-    return value.to(torch.int32)
+    bits = torch.nn.functional.pad(bits.reshape(n, count * BITS), (0, words * 32 - count * BITS))
+    value = (bits.reshape(n, words, 32) << torch.arange(32)).sum(-1)
+    return torch.where(value >= 2 ** 31, value - 2 ** 32, value).to(torch.int32)
 
 
 def unpack(packed, count):
