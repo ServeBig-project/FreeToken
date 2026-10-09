@@ -20,7 +20,8 @@ class EngineConfig:
     model_path: str
     tp_info: DistributedInfo
     dtype: torch.dtype
-    max_running_req: int = 4
+    # None: 4, or with --runtime-cache-gib what the runtime and execution budgets can run.
+    max_running_req: int | None = None
     # None: try SD at 4 steps when the components and budgets support it, else AR.
     speculative_num_steps: int | None = None
     # Where layered batching may run SD: outside prefill waves, in both, or only inside.
@@ -58,7 +59,8 @@ class EngineConfig:
     moe_cache_size: int = 0
     moe_cache_rate: float | None = None
     moe_cache_auto: bool = False
-    kv_reserve_tokens: int = 8192  # KV floor for --moe-cache-auto; small by design (MoE-priority)
+    # KV floor for --moe-cache-auto; small by design (MoE-priority). None: 8192.
+    kv_reserve_tokens: int | None = None
     moe_cache_policy: str = "lru"
     moe_prefill_overlap: bool = True
     # Prefill hit/miss split: serve cache-resident experts D2D during prefill
@@ -87,8 +89,8 @@ class EngineConfig:
     memory_ratio: float = 0.9
     # Hybrid GDN models default to a prefix tree that also keeps GDN states (cross-request reuse);
     # `--cache-type naive` opts out. linear_state_cache_ratio sizes the GDN snapshot cache as
-    # ceil(ratio * max_running_req) extra slots.
-    linear_state_cache_ratio: float = 2.0
+    # ceil(ratio * max_running_req) extra slots. None: 2.0.
+    linear_state_cache_ratio: float | None = None
     # Window/full ratio for the SWA radix cache (`--cache-type radix` on SWA models) and the DSV4
     # window tier: the DEFAULT window-pool size = max(working-set floor, ratio x full-pool tokens).
     # < 1.0 trades retained window-prefix capacity for memory savings; must be in (0, 1]. It is the
@@ -112,8 +114,22 @@ class EngineConfig:
     num_token_override: int | None = None
     # Host memory (GiB) for cold prefix-cache data per engine worker; 0 keeps it off.
     prefix_cache_host_gib: float = 0.0
+    # GiB per GPU worker shared by target KV, GDN states and records, and drafter history;
+    # None keeps each its own fixed pool.
+    runtime_cache_gib: float | None = None
 
     def __post_init__(self) -> None:
+        if self.runtime_cache_gib is not None:
+            if self.runtime_cache_gib <= 0:
+                raise ValueError(f"--runtime-cache-gib must be > 0, got {self.runtime_cache_gib}")
+            fixed = {"--num-pages": self.num_page_override, "--num-tokens": self.num_token_override,
+                     "--gdn-state-budget-bytes": self.gdn_state_budget_bytes,
+                     "--kv-reserve-tokens": self.kv_reserve_tokens,
+                     "linear_state_cache_ratio": self.linear_state_cache_ratio}
+            given = [name for name, value in fixed.items() if value is not None]
+            if given:
+                raise ValueError(f"--runtime-cache-gib shares one budget; it conflicts with the "
+                                 f"fixed pool sizes {', '.join(given)}")
         if self.prefix_cache_host_gib < 0:
             raise ValueError(
                 f"--prefix-cache-host-gib must be >= 0, got {self.prefix_cache_host_gib}")

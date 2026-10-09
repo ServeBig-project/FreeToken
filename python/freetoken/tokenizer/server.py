@@ -181,6 +181,7 @@ def tokenize_worker(
                             num_pages=m.num_pages,
                             num_mamba_slots=m.num_mamba_slots,
                             num_swa_pages=m.num_swa_pages,
+                            runtime_cache_gib=m.runtime_cache_gib,
                             mode=m.mode,
                         )
                     )

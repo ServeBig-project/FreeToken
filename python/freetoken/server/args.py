@@ -535,6 +535,15 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--runtime-cache-gib",
+        type=float,
+        default=ServerArgs.runtime_cache_gib,
+        help="GPU memory in GiB per worker shared by target KV, GDN states and records and "
+        "drafter history, moved between them as the load changes; conflicts with the fixed "
+        "pool sizes (--num-pages, --num-tokens, --gdn-state-budget-bytes, --kv-reserve-tokens).",
+    )
+
+    parser.add_argument(
         "--prefix-cache-policy",
         type=str,
         default=ServerArgs.prefix_cache_policy,

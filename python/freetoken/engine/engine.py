@@ -23,7 +23,7 @@ from freetoken.moe.offload_cache import (
     iter_moe_layers,
     iter_offload_moe_layers,
 )
-from freetoken.utils import align_ceil, init_logger, is_sm90_family, is_sm100_family, mem_GB, torch_dtype
+from freetoken.utils import align_ceil, div_ceil, init_logger, is_sm90_family, is_sm100_family, mem_GB, torch_dtype
 
 from .config import _LEGACY_SD_CONTROLS, EngineConfig
 from .graph import GraphRunner, get_free_memory
@@ -78,6 +78,14 @@ def _startup_kv_budget(memory_ratio: float, init_free_memory: int, new_free_memo
     what the resident model consumed. Kept as a pure function so the composition with the
     pool families' ``solve_num_pages`` stays CPU-testable."""
     return int(memory_ratio * init_free_memory) - (init_free_memory - new_free_memory)
+
+
+def _dummy_location(engine, page_size: int) -> int:
+    """Where padding rows write KV: the pool's last page, or page 0 that a shared runtime
+    keeps mapped."""
+    if getattr(engine, "runtime", None) is not None:
+        return 0
+    return engine.num_pages * page_size
 
 
 def _page_table_width(max_seq_len: int, page_size: int) -> int:
@@ -304,6 +312,9 @@ class ForwardOutput(NamedTuple):
 
 class Engine:
     dflash_layout = None  # the drafter's storage layout, set when a DFlash path is given
+    runtime = None  # shared runtime blocks (--runtime-cache-gib)
+    runtime_limits = None  # the context and concurrency limits derived from it
+    page_units = None  # the runtime chunks each KV page id maps, target and drafter
 
     def __init__(self, config: EngineConfig):
         assert not torch.cuda.is_initialized()
@@ -337,6 +348,7 @@ class Engine:
         self.tp_cpu_group = self._init_communication(config)
         free_min, free_max = self._sync_get_memory()
         init_free_memory = free_max  # startup KV sizing keeps cross-rank MAX (unchanged)
+        local_init_free = self._local_free
         self._baseline_free = free_min  # rebuild baseline: cross-rank MIN, deterministic across ranks
         logger.info_rank0(f"Free memory before loading model: {mem_GB(init_free_memory)}")
 
@@ -394,13 +406,20 @@ class Engine:
         # The engine measures the budget and settles the sibling GDN state pool's bytes
         # off it; the KV pool family owns every geometry-specific formula behind the rest.
         available_memory = _startup_kv_budget(config.memory_ratio, init_free_memory, new_free)
-        available_memory -= state_pool_bytes(config) + transfer_device_bytes(config)
-        if self.dflash_layout is not None:
-            self._fit_dflash_pages(config, available_memory)
-        self.num_pages = self._pool_cls.solve_num_pages(config, available_memory)
+        available_memory -= transfer_device_bytes(config)
+        if config.runtime_cache_gib is not None:
+            # This rank's own room: ranks agree only that every one of them holds its R.
+            self._init_runtime(config, _startup_kv_budget(
+                config.memory_ratio, local_init_free, self._local_free)
+                - transfer_device_bytes(config))
+        else:
+            available_memory -= state_pool_bytes(config)
+            if self.dflash_layout is not None:
+                self._fit_dflash_pages(config, available_memory)
+            self.num_pages = self._pool_cls.solve_num_pages(config, available_memory)
         num_tokens = self.num_pages * config.page_size
         self.ctx.kv_cache = self.kv_cache = create_kv_pool(
-            config, self.num_pages, device=self.device, dtype=self.dtype
+            config, self.num_pages, device=self.device, dtype=self.dtype, runtime=self.runtime
         )
 
         # ======================= Page table initialization ========================
@@ -435,22 +454,29 @@ class Engine:
         if linear_group is not None:
             from freetoken.kvcache.linear_state_pool import LinearStatePool
 
+            shared = self.runtime is not None
             self.linear_state_pool = LinearStatePool(
                 group=linear_group,
-                num_slots=_linear_pool_num_slots(config),
-                fixed_slots=(config.max_running_req if config.cache_type != "hybrid_radix" else 0),
+                # Shared: as many slots as the runtime could hold, each mapped when allocated.
+                num_slots=(self._runtime_state_slots(config) if shared
+                           else _linear_pool_num_slots(config)),
+                fixed_slots=(config.max_running_req
+                             if config.cache_type != "hybrid_radix" and not shared else 0),
                 dtype=self.dtype,
                 device=self.device,
                 tp_size=config.tp_info.size,
                 records=replay_records(config),
+                runtime=self.runtime,
             )
             self.ctx.linear_state_pool = self.linear_state_pool
         else:
             self.linear_state_pool = None
 
-        if self.linear_state_pool is not None:
+        if self.linear_state_pool is not None and self.runtime is None:
             from freetoken.kvcache.linear_state_pool import gdn_state_budget
             self._gdn_state_budget_bytes = gdn_state_budget(config)
+        if self.runtime is not None:
+            self._compose_page_units()
 
         # ======================= Sampler initialization ========================
         self.sampler = Sampler(self.device, config.model_config.vocab_size)
@@ -480,7 +506,8 @@ class Engine:
         # Dummy rows use the state pool's padding sink, never a live request slot.
         if self.linear_state_pool is not None:
             self.dummy_req.linear_slot_idx = self.linear_state_pool.padding_slot
-        self.page_table[self.dummy_req.table_idx].fill_(num_tokens)  # point to dummy page
+        self.page_table[self.dummy_req.table_idx].fill_(self.dummy_location)
+        self._map_capture_scratch(config, True)
         self.graph_runner = GraphRunner(
             stream=self.stream,
             device=self.device,
@@ -499,9 +526,12 @@ class Engine:
         )
         if self.dflash is not None:
             self.dflash.capture_graphs(self.graph_runner)
+        self._map_capture_scratch(config, False)
         if config.attention_backend.split(",")[0] == "triton":
             # Prefill runs on the first comma part; warm its autotune cache.
             self._warmup_prefill()
+        if self.runtime is not None and hasattr(config, "max_extend_tokens"):
+            self._fit_prefill_tile(config)
         self.expert_geometry = self._gather_expert_geometry()
 
     def _load_dflash(self, config: EngineConfig) -> None:
@@ -528,6 +558,182 @@ class Engine:
             config.speculative_draft_model_path, dtype=self.dtype, device=self.device,
         )
         self.dflash_layout = DFlashLayout(config, draft)
+
+    def _resolve_runtime(self, config: EngineConfig, expert_bytes: int | None) -> None:
+        """--runtime-cache-gib: settle the context and concurrency limits before anything sized
+        by them exists. ``expert_bytes`` is the expert cache beside the runtime (with
+        --moe-cache-auto, the smallest one the plan may keep)."""
+        from freetoken.engine.cache_budget import net_cache_budget_bytes
+
+        budget = int(config.runtime_cache_gib * (1 << 30))
+        execution = net_cache_budget_bytes(
+            config.memory_ratio, self._baseline_free, self._weights_bytes,
+            budget + transfer_device_bytes(config)) - expert_bytes
+        limits = self.runtime_limits = self._runtime_limits(config, budget, execution, {})
+        object.__setattr__(config, "max_seq_len_override", limits["context_tokens"])
+        object.__setattr__(config, "max_running_req", limits["max_running_requests"])
+        if config.cuda_graph_bs is None:  # no larger batch than the scheduler can form
+            object.__setattr__(config, "cuda_graph_max_bs",
+                               _graph_rows(config, limits["max_running_requests"]))
+
+    def _init_runtime(self, config: EngineConfig, available: int) -> None:
+        """--runtime-cache-gib: one set of physical blocks behind the target KV, GDN states and
+        records and the drafter's history. Page and slot counts only size the address space
+        the whole runtime could fill; memory is mapped as units are allocated."""
+        from freetoken.kvcache.runtime_pool import PhysicalBlocks
+
+        if self.runtime_limits is None:
+            self._resolve_runtime(config, 0)
+        budget = int(config.runtime_cache_gib * (1 << 30))
+        fits = torch.tensor([int(budget <= available)], dtype=torch.int64)
+        if config.tp_info.size > 1:  # every rank must hold its R, or none starts
+            torch.distributed.all_reduce(fits, op=torch.distributed.ReduceOp.MIN,
+                                         group=self.tp_cpu_group)
+        if not fits.item():
+            raise ValueError(
+                f"--runtime-cache-gib {config.runtime_cache_gib} needs {mem_GB(budget)}; a GPU "
+                f"has only {mem_GB(available)} left after weights and experts")
+        self.runtime = PhysicalBlocks(budget, self.device, self.stream)
+        self.runtime.limits = self.runtime_limits
+        self.num_pages = self.runtime.total_bytes // self._runtime_page_bytes(config)
+        logger.info_rank0(f"Shared runtime {mem_GB(budget)}: {self.runtime_limits}")
+
+    @property
+    def dummy_location(self) -> int:
+        return _dummy_location(self, self.config.page_size)
+
+    def _runtime_layout(self, config: EngineConfig):
+        """The pools' runtime layouts, as each component describes its own."""
+        from freetoken.kvcache.linear_state_pool import record_banks, state_banks
+        from freetoken.kvcache.runtime_pool import RuntimeLayout, granularity
+
+        draft = self.dflash_layout
+        return RuntimeLayout(
+            granularity(self.device),
+            pages=self._pool_cls.runtime_banks(config) + (draft.page_banks() if draft else []),
+            windows=draft.window_banks() if draft else [],
+            states=state_banks(config), rows=record_banks(config))
+
+    def _runtime_page_bytes(self, config: EngineConfig) -> int:
+        return self._runtime_layout(config).unit_bytes("pages")
+
+    def _runtime_limits(self, config: EngineConfig, budget: int, execution: int,
+                        prior: dict) -> dict:
+        """The longest request a runtime of ``budget`` bytes holds alone, and how many it holds
+        at their minimum (a page, a GDN state and record row, a drafter window each): the
+        context and concurrency limits. Each request's tables, drafter index lists and SD
+        logits/probabilities (``execution_bytes``) must fit ``execution``. A context the user
+        fixed, or (``prior`` limits, on a rebuild) the running concurrency, must fit."""
+        from freetoken.utils import div_ceil as up
+
+        layout = self._runtime_layout(config)
+        total = budget // layout.granularity
+        ps, steps, draft = config.page_size, config.speculative_num_steps or 0, self.dflash_layout
+        window = draft.request_window() if draft is not None and draft.window_layers else 0
+
+        def largest(fits, high):
+            low = 0
+            while low < high:
+                mid = (low + high + 1) // 2
+                low, high = (mid, high) if fits(mid) else (low, mid - 1)
+            return low
+
+        # One request alone, at its minimum legal progress (an AR step; SD rounds shrink to
+        # what fits): its tokens and the next, the dummy page, the padding state and its own,
+        # the prompt-end checkpoint its prefix-cache handle keeps locked, its record row (rows
+        # are handed out from 0), the window sentinel and its window.
+        checkpoint = int(getattr(config, "cache_type", "naive") != "naive")  # a prefix cache
+        alone = lambda length: layout.blocks(
+            pages=up(length + 1, ps) + 1, windows=1 + min(length + 1, window),
+            states=2 + checkpoint, rows=1) <= total
+        asked = prior.get("requested_context_tokens", config.max_seq_len_override)
+        model_max = prior.get("model_context_tokens", config.max_seq_len)
+        context = largest(alone, model_max if asked is None else asked)
+        if context < 1 or (asked is not None and context < asked):
+            raise ValueError(f"{mem_GB(budget)} of runtime holds one request of {context} "
+                             f"tokens; {asked or 1} are required")
+        # Page table and token pool rows, the drafter's index lists, and one SD round's
+        # verify logits and probabilities.
+        width = _page_table_width(context, ps)
+        vocab = config.model_config.vocab_size
+        row_bytes = (8 * width + (draft.index_bytes(width) if draft is not None else 0)
+                     + 2 * 4 * (steps + 1) * vocab * (steps > 0))
+        # Each graph-captured batch row: fp32 logits and the attention backend's page-table row.
+        executing = lambda c: ((c + 1) * row_bytes
+                               + _graph_rows(config, c) * (4 * vocab + 4 * width))
+        resource = largest(lambda c: layout.blocks(
+            pages=c + 1, windows=1 + c * window, states=c + 1, rows=c) <= total
+            and executing(c) <= execution, _MAX_AUTO_RUNNING)
+        requested = prior.get("requested_running_requests", config.max_running_req)
+        effective = resource if requested is None else min(requested, resource)
+        if effective < 1 or (prior and effective < prior["max_running_requests"]):
+            raise ValueError(
+                f"{mem_GB(budget)} of runtime holds {resource} requests at their minimum; "
+                f"{prior.get('max_running_requests', 1)} are required"
+                + (" (the concurrency the server started with is kept; start it with a lower "
+                   "--max-running-requests to allow a smaller runtime)" if prior else ""))
+        effective = prior.get("max_running_requests", effective)
+        return dict(context_tokens=context, max_running_requests=effective,
+                    requested_running_requests=requested, resource_running_requests=resource,
+                    requested_context_tokens=asked, model_context_tokens=model_max,
+                    execution_bytes=executing(effective))
+
+    def _compose_page_units(self) -> None:
+        """Pages map the target's and the drafter's full-history banks together."""
+        from freetoken.kvcache.runtime_pool import Units
+
+        draft = self.dflash.context.page_banks if self.dflash is not None else []
+        self.page_units = Units(self.kv_cache.banks + draft)
+        self.page_units.pin([0])  # the dummy page, and every layer view's base
+
+    def _map_capture_scratch(self, config: EngineConfig, mapped: bool) -> None:
+        """SD graph capture writes scratch K/V at the first positions; map them while it runs."""
+        if self.page_units is None:
+            return
+        scratch = range(div_ceil(min(
+            config.max_running_req * ((config.speculative_num_steps or 0) + 1),
+            self.num_pages * config.page_size), config.page_size))
+        (self.page_units.pin if mapped else self.page_units.release)(scratch)
+
+    def _fit_runtime_rebuild(self, config: EngineConfig, gib: float, expert_bytes: int):
+        """A new runtime total must fit beside the weights and target experts, and still hold
+        the configured context and running requests; checked before anything is freed."""
+        from freetoken.engine.cache_budget import net_cache_budget_bytes
+
+        budget = int(gib * (1 << 30))
+        available = net_cache_budget_bytes(
+            config.memory_ratio, self._baseline_free, self._weights_bytes,
+            transfer_device_bytes(config)) - expert_bytes
+        if budget <= 0:
+            raise CacheRebuildRejected(f"runtime_cache_gib must be > 0, got {gib}")
+        if budget > available:
+            raise CacheRebuildRejected(
+                f"runtime_cache_gib {gib} needs {mem_GB(budget)}; {mem_GB(available)} is left "
+                "beside the weights and experts; old cache kept, still serving")
+        try:
+            return budget, self._runtime_limits(config, budget, available - budget,
+                                                self.runtime_limits)
+        except ValueError as error:
+            raise CacheRebuildRejected(f"{error}; old cache kept, still serving") from error
+
+    def _replace_runtime(self, config: EngineConfig, budget: int, limits: dict) -> None:
+        """Swap the physical blocks under idle pools, which re-create their views on them."""
+        from freetoken.kvcache.runtime_pool import PhysicalBlocks
+
+        self.page_units = None
+        self.runtime.close()
+        self.runtime = PhysicalBlocks(budget, self.device, self.stream)
+        self.runtime.limits = self.runtime_limits = limits
+        object.__setattr__(config, "runtime_cache_gib", budget / (1 << 30))
+        object.__setattr__(config, "max_seq_len_override", limits["context_tokens"])
+        self.num_pages = self.runtime.total_bytes // self._runtime_page_bytes(config)
+        self.kv_cache.rebuild(self.num_pages + 1, runtime=self.runtime)
+        if self.linear_state_pool is not None:
+            self.linear_state_pool.rebuild(self._runtime_state_slots(config), runtime=self.runtime)
+
+    def _runtime_state_slots(self, config: EngineConfig) -> int:
+        """State slots the runtime could hold, plus the padding sink."""
+        return self.runtime.total_bytes // self._runtime_layout(config).unit_bytes("states") + 1
 
     def _fit_dflash_experts(self, config: EngineConfig, banks) -> None:
         """An explicit expert pool must leave the drafter and the smallest legal KV their
@@ -576,9 +782,12 @@ class Engine:
             )
             tp_cpu_group = torch.distributed.group.WORLD
             assert tp_cpu_group is not None
-            max_bytes = (
-                config.max_forward_len * config.model_config.hidden_size * self.dtype.itemsize
-            )
+            # A shared runtime derives the concurrency after the weights load: size for its bound.
+            extend = getattr(config, "max_extend_tokens", None)  # a scheduler's config
+            forward_len = (extend + _MAX_AUTO_RUNNING
+                           if config.max_running_req is None and extend is not None
+                           else config.max_forward_len)
+            max_bytes = forward_len * config.model_config.hidden_size * self.dtype.itemsize
             enable_pynccl_distributed(config.tp_info, tp_cpu_group, max_bytes)
         else:
             torch.distributed.init_process_group(
@@ -620,7 +829,16 @@ class Engine:
 
         cache_per_page, fixed_cache_size, page_tokens, min_reserve = self._pool_cls.kv_cost(config)
         # sibling GDN state pool and prefix-cache copy buffers, engine-summed
-        fixed_cache_size += state_pool_bytes(config) + transfer_device_bytes(config)
+        fixed_cache_size += transfer_device_bytes(config)
+        reserve = 8192 if config.kv_reserve_tokens is None else config.kv_reserve_tokens
+        page_extra = (self.dflash_layout.total_bytes if self.dflash_layout is not None
+                      else lambda pages: 0)
+        if getattr(config, "runtime_cache_gib", None) is None:
+            fixed_cache_size += state_pool_bytes(config)
+        else:  # experts get what the runtime and its execution tables leave; pages are unused
+            fixed_cache_size += (int(config.runtime_cache_gib * (1 << 30))
+                                 + self.runtime_limits["execution_bytes"])
+            reserve, page_extra = 2 * page_tokens, lambda pages: 0
         num_experts = config.model_config.num_experts
         total_experts = config.model_config.num_moe_layers * num_experts
         return resolve_moe_cache_auto(
@@ -633,14 +851,13 @@ class Engine:
             num_experts=num_experts,
             total_experts=total_experts,
             prefill_overlap=config.moe_prefill_overlap,
-            kv_reserve_tokens=max(config.kv_reserve_tokens, min_reserve),
+            kv_reserve_tokens=max(reserve, min_reserve),
             page_size=page_tokens,
             quant_format=banks.quant_format,
             prefill_overlap_min_layers=(
                 1 if getattr(config, "batching_policy", "legacy") == "joint" else 2
             ),
-            page_extra_bytes=(self.dflash_layout.total_bytes if self.dflash_layout is not None
-                              else lambda pages: 0),
+            page_extra_bytes=page_extra,
         )
 
     def _gather_expert_geometry(self) -> dict | None:
@@ -771,11 +988,20 @@ class Engine:
                 parallel=expert_parallel,
                 decode_target=("cpu" if decode_target in ("cpu", "hybrid") else "gpu"),
             )
+            shared = getattr(config, "runtime_cache_gib", None) is not None
+            if shared and config.moe_cache_auto:
+                from freetoken.engine.cache_budget import expert_bytes_per_slot
+
+                # The smallest expert cache the plan may keep bounds the concurrency; the plan
+                # then takes what the runtime and that concurrency's execution tables leave.
+                layers = 1 if getattr(config, "batching_policy", "legacy") == "joint" else 2
+                floor = (layers if config.moe_prefill_overlap else 1) * config.model_config.num_experts
+                self._resolve_runtime(config, floor * expert_bytes_per_slot(banks.sources))
             if config.moe_cache_auto:
                 size, pages, overlap = self._resolve_auto_moe_cache_size(config, banks)
                 object.__setattr__(config, "moe_cache_size", size)
                 object.__setattr__(config, "moe_prefill_overlap", overlap)
-                if config.num_page_override is None:
+                if config.num_page_override is None and config.runtime_cache_gib is None:
                     # Honor the plan's KV half too: MoE slots and KV pages were solved
                     # against ONE budget (ratio x baseline - weights), so both must come
                     # from it. Re-solving pages later from a fresh free-memory reading
@@ -800,7 +1026,13 @@ class Engine:
                     dict(feature="batching", reason="layered_unsupported", detail=reason))
                 logger.info_rank0(f"Not using batching: {reason}")
             _require_offload_cache_size(config.moe_cache_size, config.model_config.num_experts)
-            if self.dflash_layout is not None and not config.moe_cache_auto:
+            if shared and not config.moe_cache_auto:
+                from freetoken.engine.cache_budget import expert_bytes_per_slot
+
+                self._resolve_runtime(
+                    config, config.moe_cache_size * expert_bytes_per_slot(banks.sources))
+            if (self.dflash_layout is not None and not config.moe_cache_auto
+                    and config.runtime_cache_gib is None):
                 self._fit_dflash_experts(config, banks)
             if batching_policy in (
                 "joint",
@@ -970,14 +1202,16 @@ class Engine:
         torch.cuda.synchronize(self.device)
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(self.device)
-        free_memory = get_free_memory(self.device)
+        free_memory = self._local_free = get_free_memory(self.device)
         free_mem_tensor = torch.tensor([free_memory, -free_memory], device="cpu", dtype=torch.int64)
         torch.distributed.all_reduce(
             free_mem_tensor, op=torch.distributed.ReduceOp.MIN, group=self.tp_cpu_group
         )
         min_free_memory = int(free_mem_tensor[0].item())
         max_free_memory = -int(free_mem_tensor[1].item())
-        if max_free_memory - min_free_memory > 2 * 1024 * 1024 * 1024:
+        # A shared runtime checks each rank's own room for its R instead.
+        shared = getattr(self.config, "runtime_cache_gib", None) is not None
+        if max_free_memory - min_free_memory > 2 * 1024 * 1024 * 1024 and not shared:
             logger.error(
                 f"Memory across TP ranks are imbalanced:"
                 f" min {mem_GB(min_free_memory)}, max {mem_GB(max_free_memory)}"
@@ -1024,7 +1258,7 @@ class Engine:
                 dtype=torch.int32,
                 device=self.device,
             )
-        self.page_table[self.dummy_req.table_idx].fill_(num_tokens)
+        self.page_table[self.dummy_req.table_idx].fill_(_dummy_location(self, config.page_size))
         self.kv_cache.attach_page_table(self.page_table)
 
     @torch.inference_mode()
@@ -1035,16 +1269,25 @@ class Engine:
         num_pages: int | None = None,
         num_mamba_slots: int | None = None,
         num_swa_pages: int | None = None,
+        runtime_cache_gib: float | None = None,
     ) -> None:
         """Idle-only in-place resize of the MoE slot cache, KV page pool, GDN (mamba) state pool,
         and/or the window pool (num_swa_pages: an absolute pinned window), followed by CUDA-graph
         re-capture. Does NOT reload weights or host expert banks. The caller (scheduler) must
-        guarantee no in-flight prefill/decode.
+        guarantee no in-flight prefill/decode. A shared runtime takes a new total
+        (``runtime_cache_gib``) instead of the fixed pool sizes.
         """
         config = self.config
         if (moe_cache_size is None and num_pages is None and num_mamba_slots is None
-                and num_swa_pages is None):
+                and num_swa_pages is None and runtime_cache_gib is None):
             return
+        shared = self.runtime is not None
+        if shared and (num_pages, num_mamba_slots, num_swa_pages) != (None, None, None):
+            raise CacheRebuildRejected("a shared runtime is resized with runtime_cache_gib; "
+                                       "num_pages, num_mamba_slots and num_swa_pages size fixed pools")
+        if not shared and runtime_cache_gib is not None:
+            raise CacheRebuildRejected("runtime_cache_gib needs a server started with "
+                                       "--runtime-cache-gib")
 
         # 0a. Geometry prevalidation BEFORE any destructive free. An invalid target (moe
         #     slots on a model with no offload cache, moe below num_experts / above the
@@ -1102,6 +1345,10 @@ class Engine:
         #     rather than freeing and then OOMing into permanent failure. The engine supplies
         #     the memory account; the pool answers whether its target geometry fits.
         target_moe, per_expert_bytes = self._target_moe_and_expert_bytes(moe_cache_size)
+        if shared:  # an expert-only change keeps the runtime and its contents
+            budget, limits = self._fit_runtime_rebuild(
+                config, config.runtime_cache_gib if runtime_cache_gib is None
+                else runtime_cache_gib, target_moe * per_expert_bytes)
         # Price the sibling GDN state pool at ITS target (physical slots = usable + padding
         # sink) and hand the bytes in -- the KV pool only budgets its own tiers.
         target_mamba = (
@@ -1114,22 +1361,23 @@ class Engine:
             or (num_pages is not None and num_pages != self.num_pages)
         )
         draft_bytes = 0
-        if self.dflash is not None:
+        if self.dflash is not None and not shared:
             draft_bytes = self.dflash_layout.total_bytes(
                 self.num_pages if num_pages is None else num_pages)
-        self.kv_cache.validate_rebuild(
-            config, num_pages=num_pages,
-            num_swa_pages=num_swa_pages, target_moe=target_moe,
-            per_expert_bytes=per_expert_bytes, baseline_free=self._baseline_free,
-            weights_bytes=self._weights_bytes, current_num_pages=self.num_pages,
-            extra_fixed_bytes=(
-                (state_pool_bytes(config, target_mamba) if target_mamba is not None else 0)
-                + draft_bytes + transfer_device_bytes(config)
-            ),
-            extra_note=(
-                f", mamba={target_mamba - 1} slots" if target_mamba is not None else ""
-            ),
-        )
+        if not shared:
+            self.kv_cache.validate_rebuild(
+                config, num_pages=num_pages,
+                num_swa_pages=num_swa_pages, target_moe=target_moe,
+                per_expert_bytes=per_expert_bytes, baseline_free=self._baseline_free,
+                weights_bytes=self._weights_bytes, current_num_pages=self.num_pages,
+                extra_fixed_bytes=(
+                    (state_pool_bytes(config, target_mamba) if target_mamba is not None else 0)
+                    + draft_bytes + transfer_device_bytes(config)
+                ),
+                extra_note=(
+                    f", mamba={target_mamba - 1} slots" if target_mamba is not None else ""
+                ),
+            )
 
         torch.cuda.synchronize(self.device)
         # Preserve the CUDA-graph batch-size set resolved at startup. The auto heuristic keys
@@ -1160,7 +1408,9 @@ class Engine:
         if moe_cache_size is not None:
             assert self.moe_offload_cache is not None, "no MoE offload cache to resize"
             self.moe_offload_cache.rebuild(moe_cache_size)
-        if num_pages is not None:
+        if runtime_cache_gib is not None:
+            self._replace_runtime(config, budget, limits)
+        elif num_pages is not None:
             # sets self.num_pages (rebuilds KV + window)
             self._resize_kv_pool(config, num_pages, num_swa_pages)
         elif num_swa_pages is not None:
@@ -1175,8 +1425,10 @@ class Engine:
             self.linear_state_pool.rebuild(num_mamba_slots + 1)
         # 3. Refresh max_seq_len (+ generic page table) for the new token budget.
         self._refresh_seq_state(config)
-        if self.dflash is not None and num_pages is not None:
+        if self.dflash is not None and (num_pages is not None or runtime_cache_gib is not None):
             self.dflash.rebuild()
+        if runtime_cache_gib is not None:
+            self._compose_page_units()
         elif self.dflash is not None and num_mamba_slots is not None:
             # The prefix cache drops its GPU copies with the state pool, windows included;
             # reset before capture so the new graphs never see their stale bindings.
@@ -1188,6 +1440,7 @@ class Engine:
         #    the backend; _sync_get_memory empties the cache so freed memory is reclaimed).
         gc.collect()
         free_min = self._sync_get_memory()[0]
+        self._map_capture_scratch(config, True)
         self.graph_runner = GraphRunner(
             stream=self.stream,
             device=self.device,
@@ -1209,6 +1462,9 @@ class Engine:
         self.graph_runner.eager_counts = prior_eager
         if self.dflash is not None:
             self.dflash.capture_graphs(self.graph_runner)
+        self._map_capture_scratch(config, False)
+        if shared and hasattr(config, "max_extend_tokens"):
+            self._fit_prefill_tile(config)  # the new pools leave less (or more) execution room
         self.expert_geometry = self._gather_expert_geometry()
 
     def compute_logits(self, batch: Batch) -> torch.Tensor:
@@ -1536,9 +1792,7 @@ class Engine:
         """Compile the Triton prefill path before the first real request.
 
         Decode CUDA graph capture warms the decode path, but the first prefill
-        can still pay Triton/cublas setup costs. Use the dummy request row and
-        restore it afterwards so padded decode graph replay keeps using the
-        dedicated dummy KV slot.
+        can still pay Triton/cublas setup costs.
         """
         if self.max_seq_len < 2:
             return
@@ -1550,43 +1804,117 @@ class Engine:
         if not warmup_lens:
             return
 
-        dummy_row = self.page_table[self.dummy_req.table_idx]
-        dummy_slot = int(dummy_row[0].item())
         started = torch.cuda.Event(enable_timing=True)
         ended = torch.cuda.Event(enable_timing=True)
         started.record(self.stream)
-        try:
-            for length in warmup_lens:
-                dummy_row[:length] = torch.arange(
-                    length, dtype=torch.int32, device=self.device
-                )
-                warm_req = Req(
-                    input_ids=torch.zeros(length, dtype=torch.int32, device="cpu"),
-                    table_idx=self.dummy_req.table_idx,
-                    cached_len=0,
-                    output_len=1,
-                    uid=-1,
-                    sampling_params=None,  # type: ignore[arg-type]
-                    cache_handle=None,  # type: ignore[arg-type]
-                )
-                batch = Batch(reqs=[warm_req], decode_size=0)
-                batch.padded_reqs = batch.reqs
-                batch.input_ids = torch.zeros(length, dtype=torch.int32, device=self.device)
-                batch.positions = torch.arange(length, dtype=torch.int32, device=self.device)
-                batch.out_loc = dummy_row[:length]
-                self.attn_backend.prepare_metadata(batch)
-                with self.ctx.forward_batch(batch):
-                    forward_model(self.model)
-        finally:
-            dummy_row.fill_(dummy_slot)
-            if self.moe_offload_cache is not None:
-                self.moe_offload_cache.reset()
+        for length in warmup_lens:
+            self._dummy_prefill(length)
         ended.record(self.stream)
         torch.cuda.synchronize(self.device)
         logger.info_rank0(
             f"Prefill warmup complete for lengths {warmup_lens} "
             f"in {started.elapsed_time(ended) / 1000.0:.3f} s"
         )
+
+    def _dummy_prefill(self, length: int) -> None:
+        """One prefill of ``length`` zero tokens on the dummy request row, restored afterwards
+        so padded decode graph replay keeps using the dedicated dummy KV slot. A shared
+        runtime writes every position to the dummy page, the only page mapped at startup."""
+        dummy_row = self.page_table[self.dummy_req.table_idx]
+        dummy_slot = int(dummy_row[0].item())
+        try:
+            if self.runtime is None:
+                dummy_row[:length] = torch.arange(length, dtype=torch.int32, device=self.device)
+            warm_req = Req(
+                input_ids=torch.zeros(length, dtype=torch.int32, device="cpu"),
+                table_idx=self.dummy_req.table_idx,
+                cached_len=0,
+                output_len=1,
+                uid=-1,
+                sampling_params=None,  # type: ignore[arg-type]
+                cache_handle=None,  # type: ignore[arg-type]
+            )
+            warm_req.linear_slot_idx = self.dummy_req.linear_slot_idx
+            batch = Batch(reqs=[warm_req], decode_size=0)
+            batch.padded_reqs = batch.reqs
+            batch.input_ids = torch.zeros(length, dtype=torch.int32, device=self.device)
+            batch.positions = torch.arange(length, dtype=torch.int32, device=self.device)
+            batch.out_loc = dummy_row[:length]
+            self.attn_backend.prepare_metadata(batch)
+            with self.ctx.forward_batch(batch):
+                forward_model(self.model)
+        finally:
+            dummy_row.fill_(dummy_slot)
+            if self.moe_offload_cache is not None:
+                self.moe_offload_cache.reset()
+
+    def _fit_prefill_tile(self, config) -> None:
+        """Shared runtime: the largest prefill tile, up to --max-extend-tokens, whose activation
+        peak fits the memory left beside the runtime, weights, experts and an SD round's verify
+        logits and probabilities. Two small probes give the peak's per-token growth; only the
+        tile they predict to fit is run, to confirm it. A layered pipeline also keeps each
+        token's hidden state, residual and drafter features across its layer groups, counted
+        per token. Every TP rank probes the same shapes. The scheduler never starts a larger
+        tile."""
+        steps = config.speculative_num_steps or 0
+        reserve = (2 * 4 * config.max_running_req * (steps + 1) * config.model_config.vocab_size
+                   if steps else 0)
+        budget = int(config.memory_ratio * self._baseline_free) - reserve
+        # The user's --max-extend-tokens bounds every refit; earlier fits only narrowed it.
+        self._asked_extend = getattr(self, "_asked_extend", config.max_extend_tokens)
+        ps, high = config.page_size, min(self._asked_extend, self.max_seq_len)
+        small = max(ps, min(256, high // 4) // ps * ps)
+        retained = self._prefill_retained_bytes(config)
+        peak_a, peak_b = self._probe_prefill(small), self._probe_prefill(2 * small)
+        per_token = max(peak_b - peak_a, 0) / small + retained
+        room = budget - self._synced_used_bytes() - (peak_a - (per_token - retained) * small)
+        tile = min(high, int(room // per_token) // ps * ps) if per_token else high
+        tile = max(tile, ps)
+        while not self._probe_fits(tile, budget, retained):
+            if tile > ps:
+                tile = max(ps, tile // 2 // ps * ps)
+                continue
+            raise ValueError(
+                f"a {tile}-token prefill does not fit the {mem_GB(budget)} left beside the "
+                "runtime, weights and experts; lower --runtime-cache-gib or the expert cache")
+        object.__setattr__(config, "max_extend_tokens", tile)
+        self.runtime.limits["prefill_tile_tokens"] = tile
+
+    def _prefill_retained_bytes(self, config) -> int:
+        """Bytes a layered pipeline keeps per prefill token between layer groups, beyond one
+        forward's activation peak: hidden state, residual and the drafter's features."""
+        if getattr(config, "batching_policy", "legacy") != "layered-pipeline":
+            return 0
+        adapter = self._layered_execution_adapter
+        return (2 * config.model_config.hidden_size * config.dtype.itemsize
+                + (adapter.retained_feature_bytes_per_token if adapter is not None else 0))
+
+    def _synced_used_bytes(self) -> int:
+        """Device bytes in use now (PyTorch's free cache counted as usable), the most of any
+        TP rank, so every rank derives the same tile."""
+        reusable = torch.cuda.memory_reserved(self.device) - torch.cuda.memory_allocated(
+            self.device)
+        used = torch.tensor([self._baseline_free - torch.cuda.mem_get_info(self.device)[0]
+                             - reusable])
+        if self.config.tp_info.size > 1:
+            torch.distributed.all_reduce(used, op=torch.distributed.ReduceOp.MAX,
+                                         group=self.tp_cpu_group)
+        return int(used.item())
+
+    def _probe_prefill(self, tile: int) -> int:
+        """Peak bytes of one dummy prefill; every TP rank runs it and keeps the max."""
+        torch.cuda.reset_peak_memory_stats(self.device)
+        before = torch.cuda.memory_allocated(self.device)
+        self._dummy_prefill(tile)
+        torch.cuda.synchronize(self.device)
+        peak = torch.tensor([torch.cuda.max_memory_allocated(self.device) - before])
+        if self.config.tp_info.size > 1:
+            torch.distributed.all_reduce(peak, op=torch.distributed.ReduceOp.MAX,
+                                         group=self.tp_cpu_group)
+        return int(peak.item())
+
+    def _probe_fits(self, tile: int, budget: int, retained: int) -> bool:
+        return self._synced_used_bytes() + self._probe_prefill(tile) + tile * retained <= budget
 
     def shutdown(self) -> None:
         if self.dflash is not None:
@@ -1730,6 +2058,18 @@ def _resolve_cpu_layers(config: EngineConfig, num_moe_layers: int) -> frozenset[
 
 # MoE-only knobs and the value each resolves to on a dense model. moe_backend is handled
 # separately (its dense value is 'fused', but 'auto' resolves there without a warning).
+_MAX_AUTO_RUNNING = 4096  # upper bound of a derived --max-running-requests
+_GRAPH_ROWS = 160  # the default largest captured decode batch (engine/graph.py)
+
+
+def _graph_rows(config, running: int) -> int:
+    """The largest decode batch graphs are captured for with ``running`` requests: an explicit
+    batch list as given, else the explicit or default cap, never above ``running``."""
+    if config.cuda_graph_bs is not None:
+        return max(config.cuda_graph_bs, default=0)
+    cap = _GRAPH_ROWS if config.cuda_graph_max_bs is None else config.cuda_graph_max_bs
+    return min(cap, running)
+
 _DENSE_MOE_SETTINGS = {
     "moe_cache_size": 0,
     "moe_cache_rate": None,
@@ -1831,6 +2171,17 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
                 f"experts); ignoring MoE settings: {', '.join(dropped)}"
             )
 
+    if getattr(config, "runtime_cache_gib", None) is not None:
+        from freetoken.kvcache.mha_pool import MHAKVCache
+
+        family = resolve_pool_class(model_config)
+        if family is not MHAKVCache:
+            raise ValueError(f"--runtime-cache-gib: the {family.__name__} attention cache has no "
+                             "shared runtime storage")
+    elif config.max_running_req is None:
+        # A shared runtime resolves an omitted limit from its budget once the weights are in.
+        override("max_running_req", 4)
+
     if single_stream_only:
         # The model runs one sequence at a time: it collapses the batch to one row and the
         # decode CUDA graph is captured at bs=1. Force the runtime knobs so the KV pool, page
@@ -1841,7 +2192,7 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
             override("cuda_graph_bs", [1])
             override("cuda_graph_max_bs", 1)
 
-    if config.cuda_graph_max_bs is None:
+    if config.cuda_graph_max_bs is None and config.max_running_req is not None:
         override("cuda_graph_max_bs", config.max_running_req)
 
     if is_dsv4:
@@ -2186,7 +2537,8 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
         override("speculative_num_steps", 4 if asked else 0)
     if config.speculative_num_steps:
         config.__post_init__()  # re-check the SD constraints against the resolved components
-        if shortfall := _sd_state_shortfall(config):
+        # A shared runtime has no GDN partition: SD rounds are sized from the joint budget.
+        if config.runtime_cache_gib is None and (shortfall := _sd_state_shortfall(config)):
             raise ValueError(shortfall)
 
     if config.speculative_num_steps and config.cuda_graph_max_bs != 0 and config.cuda_graph_bs != []:

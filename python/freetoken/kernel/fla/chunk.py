@@ -18,7 +18,7 @@ from freetoken.kernel.fla.l2norm import l2norm_fwd
 from freetoken.kernel.fla.utils import (
     SUPPRESS_LEVEL,
     autocast_custom_fwd,
-    input_guard,
+    custom_device_ctx,
 )
 
 # NOTE: upstream sglang has an `if is_intel:` branch here that swaps in XPU
@@ -82,7 +82,6 @@ def chunk_gated_delta_rule_fwd(
 class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
 
     @staticmethod
-    @input_guard
     @autocast_custom_fwd
     def forward(
         ctx,
@@ -240,18 +239,21 @@ def chunk_gated_delta_rule(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    o, h = ChunkGatedDeltaRuleFunction.apply(
-        q,
-        k,
-        v,
-        g,
-        beta,
-        scale,
-        initial_state,
-        initial_state_indices,
-        cu_seqlens,
-        use_qk_l2norm_in_kernel,
-    )
+    # Not input_guard: making the strided state-pool view contiguous would update a copy.
+    q, k, v, g, beta = (x.contiguous() for x in (q, k, v, g, beta))
+    with custom_device_ctx(q.device.index):
+        o, h = ChunkGatedDeltaRuleFunction.apply(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            scale,
+            initial_state,
+            initial_state_indices,
+            cu_seqlens,
+            use_qk_l2norm_in_kernel,
+        )
     if head_first:
         o = rearrange(o, "b t h ... -> b h t ...")
     return o, None, h
