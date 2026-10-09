@@ -138,8 +138,23 @@ def expert_math(F, family):
     pytest.skip(f"contract publishes no ExpertMath activation string for {m['family']}")
 
 
-@lru_cache(maxsize=None)
+_LOADED = {}
+
+
 def loaded_banks(base, side):
+    """Load once per (base, side); a failed load is remembered and re-raised, not retried
+    (a retry per test re-reads ~8 GB and holds the memory of each failed attempt)."""
+    if (base, side) not in _LOADED:
+        try:
+            _LOADED[base, side] = _load_banks(base, side)
+        except Exception as error:
+            _LOADED[base, side] = error
+    if isinstance(_LOADED[base, side], Exception):
+        raise _LOADED[base, side]
+    return _LOADED[base, side]
+
+
+def _load_banks(base, side):
     from freetoken.distributed.info import DistributedInfo, set_tp_info, try_get_tp_info
     from freetoken.engine.config import EngineConfig
     from freetoken.moe.expert_banks import load_expert_banks
