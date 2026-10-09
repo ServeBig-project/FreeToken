@@ -36,14 +36,14 @@
 
 - 生成：`POST /v1/completions`、`POST /v1/chat/completions`（OpenAI 兼容：`stream`、`max_tokens`、`temperature`、`stop`、`ignore_eos`、`cache_group`）；`GET /v1/models`。
 - 状态：`GET /v1/cache/status`、`GET /v1/stats`。
-- 维护：`POST /v1/cache/rebuild`，JSON 体。共享模式接受 `runtime_cache_gib`（可同时给 `moe_cache_size`）；`num_pages`、`num_mamba_slots`、`num_swa_pages`、`swa_full_tokens_ratio` 在共享模式被拒绝。只支持 `mode="if_idle"`：调度器不空闲时立即拒绝，不等待；请求体的 `timeout`（默认 300 秒）只是等待调度器答复的上限。响应 `status` 为 `ok`（HTTP 200）、`rejected`（HTTP 503，`error` 为文本）或 `busy`（HTTP 409）。
+- 维护：`POST /v1/cache/rebuild`，JSON 体。共享模式接受 `runtime_cache_gib`（可同时给 `moe_cache_size`）；`num_pages`、`num_mamba_slots`、`num_swa_pages`、`swa_full_tokens_ratio` 在共享模式被拒绝。只支持 `mode="if_idle"`：调度器不空闲时立即拒绝，不等待；请求体的 `timeout`（默认 300 秒）只是等待调度器答复的上限。响应 `status` 为 `ok`（HTTP 200）、`rejected`（HTTP 503，`error` 为文本）或 `busy`：另一次重建或停机进行中为 HTTP 409，有请求在运行、暂停、保存或恢复中为 HTTP 503（沿用既有维护接口）。以 `status` 字段判断，不以状态码区分 busy 与 rejected。
 - 生成错误：非流式返回 OpenAI 风格错误体 `{"error": {"message", "type": "invalid_request_error", "code"}}`（HTTP 4xx）；流式先发一个带 `error` 的 SSE 块再发 `[DONE]`。放不下共享 runtime 的请求以 `code` 为 `context_length_exceeded`、文本含 `does not fit the shared runtime` 或 `no longer fits the shared runtime even alone` 结束；共享模式的多模态请求以文本 `multimodal requests are not supported with --runtime-cache-gib` 拒绝。
 
 ## 共享模式的公开状态字段
 
 `GET /v1/cache/status`：
 - `geometry.runtime_cache_bytes`：共享预算；`geometry.address_pages`、`geometry.address_mamba_slots`：只是地址空间上限；`geometry.num_pages`、`geometry.num_mamba_slots` 在共享模式为 0；`geometry.moe_cache_size`：专家容量。
-- `prefix_cache.runtime`：物理占用 `budget_bytes`、`granularity_bytes`、`free_bytes`、`held_bytes`、`used_bytes`、`waste_bytes`、`idle_bytes`、`protected_bytes`、`components{<组件名>: held_bytes/used_bytes/waste_bytes/idle_bytes/protected_bytes/address_bytes}`（组件名：目标 KV `kv`，GDN 状态 `gdn_conv` 与 `gdn_state`，ReplaySSM 记录 `replay_*`，DFlash 历史 `draft_kv`）、`map_count`、`unmap_count`、`map_ms`；生效上限 `context_tokens`（单请求可执行上限）、`max_running_requests`（生效并发）、`requested_running_requests`（省略 `--max-running-requests` 时为 null）、`resource_running_requests`、`requested_context_tokens`、`model_context_tokens`、`execution_bytes`；暂停统计 `paused`、`restored`、`recompute`、`recomputed_tokens`、`paused_ms`、`short_decode`、`short_prefill`、`compactions`。
+- `prefix_cache.runtime`：物理占用 `budget_bytes`、`granularity_bytes`、`free_bytes`、`held_bytes`、`used_bytes`、`waste_bytes`、`idle_bytes`、`protected_bytes`、`components{<组件名>: held_bytes/used_bytes/waste_bytes/idle_bytes/protected_bytes/address_bytes}`（组件名：目标 KV `kv`，GDN 状态 `gdn_conv` 与 `gdn_state`，ReplaySSM 记录 `replay_*`，DFlash 历史 `draft_kv`）、`map_count`、`unmap_count`、`map_ms`；可回收缓存 `evictable_bytes`（没有请求持有的前缀 KV 与 GDN 检查点，任何申请都可回收；`held_bytes` 包含它）；生效上限 `context_tokens`（单请求可执行上限）、`max_running_requests`（生效并发）、`requested_running_requests`（省略 `--max-running-requests` 时为 null）、`resource_running_requests`、`requested_context_tokens`、`model_context_tokens`、`execution_bytes`；暂停统计 `paused`、`restored`、`recompute`、`recomputed_tokens`、`paused_ms`、`short_decode`、`short_prefill`、`compactions`。
 - `prefix_cache.components[]`：各组件 `device_allocated_bytes` 与 host 字节；`prefix_cache.host_*`：host 预算与使用。
 - `GET /v1/stats`：既有字段（`kv.used_pages/total_pages`、`cuda_graph`、`speculative`、`throughput`、`requests` 等）。
 
