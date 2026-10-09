@@ -210,7 +210,7 @@ class CacheManager:
         if draft_kv is not None and draft_kv.swa_paged:
             # SD targets have no window of their own: the drafter's window rides the tree.
             swa_pool, sliding_window_size = draft_kv, draft_kv.window
-            self.request_window = draft_kv.layout.request_slots
+            self.draft_block = draft_kv.layout.config.speculative_num_steps + 1
         self.swa_pool = swa_pool
         self.sliding_window_size = sliding_window_size
         # swa_paged: the pool keeps window KV behind a full->window mapping with its own slots,
@@ -254,7 +254,7 @@ class CacheManager:
     # ----- capability hooks (defaults; plugged-in pools may narrow them) -----
     supports_runtime_rebuild = True
     prefill_chunk_budget = None  # generic shared page pool: no per-model prefill chunk cap
-    request_window = None  # window slots one running request may grow into (drafter pool)
+    draft_block = 0  # tokens one draft round adds when the window pool is the drafter's
 
     def _make_tree(self) -> RadixCache | None:
         if not self.reuse:
@@ -305,10 +305,6 @@ class CacheManager:
         total = 0
         reservations = getattr(self, "_decode_page_reservations", {})
         for req in reqs:
-            if self.request_window is not None:
-                # The drafter's pool is sized per running request, and a layered wave keeps
-                # decoding without new admissions: keep what each may still grow into.
-                total += max(0, self.request_window - (req.device_len - req.swa_evicted_seqlen))
             first_page = div_ceil(req.cached_len, ps)
             last_page = div_ceil(req.device_len, ps)
             reservation = reservations.get(req) if reservations else None
@@ -318,6 +314,20 @@ class CacheManager:
                 continue
             total += (last_page - first_page) * ps
         return total
+
+    def wave_window_growth(self, reqs: Iterable[Req]) -> int:
+        """Window slots decoding requests may take before their next release while a layered
+        wave runs without new admissions: the rest of a window not filled yet, then one release
+        interval and one draft round, never more than each can still generate. Drafter pool
+        only (it is sized per running request); a reused prefix holds at most one window."""
+        if not self.draft_block:
+            return 0
+        window = self.sliding_window_size
+        steady = _SWA_EVICTION_INTERVAL + self.draft_block + 2 * self.page_size
+        return sum(
+            min(req.max_device_len - req.device_len + self.draft_block,
+                window - min(req.device_len - req.swa_evicted_seqlen, window) + steady)
+            for req in reqs)
 
     def decode_reserved_tokens_for(self, reqs: Iterable[Req]) -> int:
         """Full-token capacity already held for these runnable decode requests."""

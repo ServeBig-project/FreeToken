@@ -125,6 +125,7 @@ class LayeredPipelineExecutor:
             allowed_uids=admission.uids,
             max_reqs=len(admission.members),
             incremental_window_prefill=True,
+            wave=True,
         )
         if prefill_batch is None:
             self._staged_admission = None
