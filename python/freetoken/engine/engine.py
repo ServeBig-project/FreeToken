@@ -562,8 +562,9 @@ class Engine:
         limits = self.runtime_limits = self._runtime_limits(config, budget, execution, {})
         object.__setattr__(config, "max_seq_len_override", limits["context_tokens"])
         object.__setattr__(config, "max_running_req", limits["max_running_requests"])
-        if config.cuda_graph_max_bs is None:
-            object.__setattr__(config, "cuda_graph_max_bs", limits["max_running_requests"])
+        # Graphs are captured for batches the scheduler can form, and no more than the default.
+        object.__setattr__(config, "cuda_graph_max_bs", min(
+            config.cuda_graph_max_bs or _GRAPH_ROWS, limits["max_running_requests"]))
 
     def _init_runtime(self, config: EngineConfig, available: int) -> None:
         """--runtime-cache-gib: one set of physical blocks behind the target KV, GDN states and
@@ -644,11 +645,14 @@ class Engine:
         # Page table and token pool rows, the drafter's index lists, and one SD round's
         # verify logits and probabilities.
         width = _page_table_width(context, ps)
+        vocab = config.model_config.vocab_size
         row_bytes = (8 * width + (draft.index_bytes(width) if draft is not None else 0)
-                     + 2 * 4 * (steps + 1) * config.model_config.vocab_size * (steps > 0))
+                     + 2 * 4 * (steps + 1) * vocab * (steps > 0))
+        # Each graph-captured batch row: fp32 logits and the attention backend's page-table row.
+        executing = lambda c: (c + 1) * row_bytes + min(c, _GRAPH_ROWS) * (4 * vocab + 4 * width)
         resource = largest(lambda c: layout.blocks(
             pages=c + 1, windows=1 + c * window, states=c + 1, rows=c) <= total
-            and (c + 1) * row_bytes <= execution, _MAX_AUTO_RUNNING)
+            and executing(c) <= execution, _MAX_AUTO_RUNNING)
         requested = prior.get("requested_running_requests", config.max_running_req)
         effective = resource if requested is None else min(requested, resource)
         if effective < 1 or (prior and effective < prior["max_running_requests"]):
@@ -659,7 +663,7 @@ class Engine:
         return dict(context_tokens=context, max_running_requests=effective,
                     requested_running_requests=requested, resource_running_requests=resource,
                     requested_context_tokens=asked, model_context_tokens=model_max,
-                    execution_bytes=(effective + 1) * row_bytes)
+                    execution_bytes=executing(effective))
 
     def _compose_page_units(self) -> None:
         """Pages map the target's and the drafter's full-history banks together."""
@@ -1936,6 +1940,7 @@ def _resolve_cpu_layers(config: EngineConfig, num_moe_layers: int) -> frozenset[
 # MoE-only knobs and the value each resolves to on a dense model. moe_backend is handled
 # separately (its dense value is 'fused', but 'auto' resolves there without a warning).
 _MAX_AUTO_RUNNING = 4096  # upper bound of a derived --max-running-requests
+_GRAPH_ROWS = 160  # the default largest captured decode batch (engine/graph.py)
 
 _DENSE_MOE_SETTINGS = {
     "moe_cache_size": 0,
