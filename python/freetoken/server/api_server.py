@@ -179,6 +179,8 @@ class FrontendManager:
     # GDN state storage by kind (compute_gdn_state_geometry): from the ack, then each rebuild.
     gdn_geometry: Dict[str, Any] | None = None
     dflash_geometry: Dict[str, Any] | None = None
+    # Bound expert format and each TP rank's expert storage (Engine.expert_geometry).
+    expert_geometry: Dict[str, Any] | None = None
     # one {index, name, uuid, total_bytes} per TP rank, from the same ack; /v1/stats gpus
     gpus: List[Dict[str, Any]] = field(default_factory=list)
     # Worker-resolved batching/SD settings from the ready ack (Engine.execution_status).
@@ -295,6 +297,8 @@ class FrontendManager:
             self.gdn_geometry = msg.gdn_replayssm
         if msg.dflash is not None:
             self.dflash_geometry = msg.dflash
+        if msg.experts is not None:
+            self.expert_geometry = msg.experts
         if msg.prefix_cache is not None:
             self.stats.prefix_cache = msg.prefix_cache
         if msg.execution is not None:
@@ -831,6 +835,7 @@ def cache_geometry(state: Any) -> dict:
         "reasoning": reasoning,
         "gdn_replayssm": getattr(state, "gdn_geometry", None),
         "dflash": getattr(state, "dflash_geometry", None),
+        "experts": getattr(state, "expert_geometry", None),
     }
     # Per-pool slider bounds, sized against the cache budget the rebuild fit-check actually
     # enforces — NOT the raw post-weights free VRAM, which is larger by the (1-memory_ratio)
@@ -1058,6 +1063,7 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
         _GLOBAL_STATE.gdn_geometry = meta.pop("gdn_replayssm", None)
         _GLOBAL_STATE.stats.prefix_cache = meta.pop("prefix_cache", None)
         _GLOBAL_STATE.dflash_geometry = meta.pop("dflash", None)
+        _GLOBAL_STATE.expert_geometry = meta.pop("experts", None)
         _GLOBAL_STATE.swa_full_tokens_ratio = float(meta.pop("swa_full_tokens_ratio", 0.0) or 0.0)
         _GLOBAL_STATE.cache_budget_bytes = int(meta.pop("cache_budget_bytes", 0) or 0)
         _GLOBAL_STATE.gpus = list(meta.pop("gpus", None) or [])

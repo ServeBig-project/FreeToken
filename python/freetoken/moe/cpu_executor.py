@@ -88,6 +88,8 @@ _NOWAG_BANK_NAMES = (
     "down_input_norm",
     "down_output_norm",
 )
+# Optional per-expert biases; their descriptor slots stay 0 when absent.
+_NOWAG_BIAS_NAMES = ("gate_bias", "up_bias", "down_bias")
 
 
 def _nowag_assignment_words(width: int, d: int) -> int:
@@ -492,8 +494,12 @@ class CpuMoeExecutor:
             "down_assignments": (self.num_experts, _nowag_assignment_words(I, d), H),
             "down_input_norm": (self.num_experts, I),
             "down_output_norm": (self.num_experts, H),
+            "gate_bias": (self.num_experts, I),
+            "up_bias": (self.num_experts, I),
+            "down_bias": (self.num_experts, H),
         }
-        for name in _NOWAG_BANK_NAMES:
+        names = _NOWAG_BANK_NAMES + tuple(n for n in _NOWAG_BIAS_NAMES if n in banks)
+        for name in names:
             want_dtype = torch.int32 if name.endswith("assignments") else torch.bfloat16
             for layer_id, tensor in enumerate(banks[name]):
                 if tensor.dtype != want_dtype or tuple(tensor.shape) != expected[name]:
@@ -504,13 +510,16 @@ class CpuMoeExecutor:
                     )
         descriptor = torch.tensor(
             [
-                [banks[name][layer_id].data_ptr() for name in _NOWAG_BANK_NAMES]
+                [
+                    banks[name][layer_id].data_ptr() if name in banks else 0
+                    for name in _NOWAG_BANK_NAMES + _NOWAG_BIAS_NAMES
+                ]
                 for layer_id in range(self.num_layers)
             ],
             dtype=torch.int64,
         )
         self._banks.append(descriptor)
-        for name in _NOWAG_BANK_NAMES:
+        for name in names:
             self._banks.extend(banks[name])
         self._banks.append(codebook)
         ptrs = dict(

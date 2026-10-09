@@ -201,6 +201,7 @@ def tokenize_worker(
                             dflash=m.dflash,
                             prefix_cache=m.prefix_cache,
                             execution=m.execution,
+                            experts=m.experts,
                         )
                     )
             n_control = sum(

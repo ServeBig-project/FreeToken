@@ -1474,7 +1474,11 @@ enum NowagBank {
   NW_DOWN_ASSIGN = 6,
   NW_DOWN_INPUT_NORM = 7,
   NW_DOWN_OUTPUT_NORM = 8,
-  NW_NUM_BANKS = 9,
+  // Optional [E, N] BF16 biases; a zero pointer means the model has none.
+  NW_GATE_BIAS = 9,
+  NW_UP_BIAS = 10,
+  NW_DOWN_BIAS = 11,
+  NW_NUM_BANKS = 12,
 };
 
 struct NowagMath {
@@ -1494,6 +1498,9 @@ struct NowagLayerBanks {
   const uint32_t* down_assignments;
   const bf16_t* down_input_norm;
   const bf16_t* down_output_norm;
+  const bf16_t* gate_bias;
+  const bf16_t* up_bias;
+  const bf16_t* down_bias;
 };
 
 // Each ctor pointer arg is the address of a CPU int64 array of length
@@ -1885,6 +1892,9 @@ struct CpuMoeExecutor {
         reinterpret_cast<const uint32_t*>(row[NW_DOWN_ASSIGN]),
         reinterpret_cast<const bf16_t*>(row[NW_DOWN_INPUT_NORM]),
         reinterpret_cast<const bf16_t*>(row[NW_DOWN_OUTPUT_NORM]),
+        reinterpret_cast<const bf16_t*>(row[NW_GATE_BIAS]),
+        reinterpret_cast<const bf16_t*>(row[NW_UP_BIAS]),
+        reinterpret_cast<const bf16_t*>(row[NW_DOWN_BIAS]),
     };
   }
 
@@ -2054,17 +2064,24 @@ struct CpuMoeExecutor {
     bf16_t* g_row = g_scratch.data() + (size_t)r * I;
     const float lim = swiglu_limit;
     const float route_scale = nowag_math.router_weight_on_input ? t->w[r] : 1.0f;
+    const bf16_t* gate_bias = banks.gate_bias ? banks.gate_bias + (size_t)e * I : nullptr;
+    const bf16_t* up_bias = banks.up_bias ? banks.up_bias + (size_t)e * I : nullptr;
     for (int i = i0; i < i1; ++i) {
       const int j = i - i0;
-      float gv = bf16_to_f32(f32_to_bf16(
-          gate[j] * bf16_to_f32(gate_out_norm[i]) * route_scale));
-      float uv = bf16_to_f32(f32_to_bf16(
-          up[j] * bf16_to_f32(up_out_norm[i]) * route_scale));
+      float gv = gate[j] * bf16_to_f32(gate_out_norm[i]) * route_scale;
+      float uv = up[j] * bf16_to_f32(up_out_norm[i]) * route_scale;
+      if (gate_bias) {
+        gv += bf16_to_f32(gate_bias[i]);
+        uv += bf16_to_f32(up_bias[i]);
+      }
+      gv = bf16_to_f32(f32_to_bf16(gv));
+      uv = bf16_to_f32(f32_to_bf16(uv));
       if (gv > lim) gv = lim;
       if (uv > lim) uv = lim;
       else if (uv < -lim) uv = -lim;
-      const bf16_t middle = f32_to_bf16(
-          (gv / (1.0f + std::exp(-gv))) * uv);
+      const bf16_t middle = f32_to_bf16(act == ACT_SWIGLUOAI
+          ? gv / (1.0f + std::exp(-gv * swiglu_alpha)) * (uv + 1.0f)
+          : act_apply(act, gv) * uv);
       g_row[i] = nowag_math.preapply_down_norm
           ? f32_to_bf16(bf16_to_f32(middle) * bf16_to_f32(down_in_norm[i]))
           : middle;
@@ -2097,6 +2114,7 @@ struct CpuMoeExecutor {
       const uint32_t* down_assign = banks.down_assignments +
           (size_t)e * nowag_dn_words * H;
       const bf16_t* down_out_norm = banks.down_output_norm + (size_t)e * H;
+      const bf16_t* down_bias = banks.down_bias ? banks.down_bias + (size_t)e * H : nullptr;
       const size_t r = (size_t)tok * top_k + k;
       const bf16_t* g = g_scratch.data() + r * I;
       float part[HBLK];
@@ -2106,7 +2124,8 @@ struct CpuMoeExecutor {
       for (int h = h0; h < h1; ++h) {
         // GPU stores each route output in BF16 before the Top-K reduction.
         const float route = bf16_to_f32(f32_to_bf16(
-            part[h - h0] * bf16_to_f32(down_out_norm[h])));
+            part[h - h0] * bf16_to_f32(down_out_norm[h]) +
+            (down_bias ? bf16_to_f32(down_bias[h]) : 0.0f)));
         sum[h - h0] += route * route_scale;
       }
     }

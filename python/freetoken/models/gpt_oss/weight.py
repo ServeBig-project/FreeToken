@@ -611,3 +611,36 @@ __all__ = [
     "setup_offload_expert_banks",
     "shard_gpt_oss_tensor",
 ]
+
+
+def load_expert_biases(model_path: str, model_config, *, dtype: torch.dtype) -> dict[str, list[torch.Tensor]]:
+    """Pinned ``gate_bias``/``up_bias`` ``[E, I]`` and ``down_bias`` ``[E, H]`` per layer for
+    expert formats that store only the projection weights (NoWAG). The checkpoint
+    interleaves the gate and up columns of ``gate_up_proj_bias``."""
+    from freetoken.moe.host_banks import alloc_layer_banks, pin_banks
+
+    E, I, H, L = (model_config.num_experts, model_config.moe_intermediate_size,
+                  model_config.hidden_size, model_config.num_layers)
+    banks = alloc_layer_banks(
+        {"gate_bias": ((E, I), dtype), "up_bias": ((E, I), dtype), "down_bias": ((E, H), dtype)}, L
+    )
+    seen: set[tuple[int, str]] = set()
+    for file in iter_root_safetensor_files_from_index(model_path):
+        with safetensors.safe_open(file, framework="pt", device="cpu") as f:
+            for name in f.keys():
+                info = _expert_layer_and_name(name)
+                if info is None or info[1] not in ("gate_up_proj_bias", "down_proj_bias"):
+                    continue
+                layer_id, source = info
+                raw = f.get_tensor(name)
+                if source == "down_proj_bias":
+                    banks["down_bias"][layer_id].tensor.copy_(raw)
+                else:
+                    banks["gate_bias"][layer_id].tensor.copy_(raw[:, ::2])
+                    banks["up_bias"][layer_id].tensor.copy_(raw[:, 1::2])
+                seen.add((layer_id, source))
+    missing = {(l, s) for l in range(L) for s in ("gate_up_proj_bias", "down_proj_bias")} - seen
+    if missing:
+        raise ValueError(f"Missing GPT-OSS expert biases: {sorted(missing)[:8]}")
+    pin_banks(banks)
+    return {name: [bank.tensor for bank in per_layer] for name, per_layer in banks.items()}

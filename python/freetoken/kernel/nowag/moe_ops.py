@@ -28,6 +28,8 @@ from .assignment_layout import AssignmentLayout, assignment_layout_info
 from .moe_activation import (
     DOWN_PROLOGUE_NORM,
     GATE_UP_EPILOGUE_NORM,
+    SILU_MUL,
+    ActivationKind,
     ActivationRounding,
     DownNormPlacement,
     MoeActivationMath,
@@ -75,6 +77,7 @@ AUTO_GATE_UP_BACKEND: Final[GateUpBackend] = "auto"
 AUTO_DOWN_BACKEND: Final[DownBackend] = "auto"
 
 UINT32_MASK: Final = (1 << 32) - 1
+_ACTIVATION_IDS: Final = {"silu_mul": 0, "gelu_mul": 1, "gelu_tanh_mul": 2, "swigluoai_mul": 3}
 
 
 @lru_cache(maxsize=4096)
@@ -583,6 +586,8 @@ if triton is not None:
         up_input_norm_ptr,
         up_output_norm_ptr,
         down_input_norm_ptr,
+        gate_bias_ptr,
+        up_bias_ptr,
         sorted_ticket_ids_ptr,
         expert_ids_ptr,
         num_tickets_post_padded_ptr,
@@ -625,6 +630,9 @@ if triton is not None:
         PACKED_12_BLOCK_DECODE: tl.constexpr,
         CLAMP_SWIGLU: tl.constexpr,
         SWIGLU_LIMIT: tl.constexpr,
+        ACTIVATION: tl.constexpr,
+        ACTIVATION_ALPHA: tl.constexpr,
+        HAS_BIAS: tl.constexpr,
         PREAPPLY_DOWN_NORM: tl.constexpr,
         SORTED_MIDDLE_LAYOUT: tl.constexpr,
         ALIGNMENT_BLOCK_RATIO: tl.constexpr,
@@ -637,7 +645,11 @@ if triton is not None:
         D: tl.constexpr,
         PAD_D: tl.constexpr,
     ):
-        """Expert-aware gate/up lookup-dot followed by SiLU(gate) * up."""
+        """Expert-aware gate/up lookup-dot followed by act(gate) * up.
+
+        ``ACTIVATION``: 0 SiLU, 1 GELU (erf), 2 GELU (tanh), 3 SwiGLU-OAI
+        ``gate * sigmoid(alpha * gate) * (up + 1)``.  Bias is ``[E, N]``.
+        """
         pid_m, pid_n = _moe_program_ids(
             NUM_PID_N=NUM_PID_N,
             GROUPED_SCHEDULE=GROUPED_SCHEDULE,
@@ -814,17 +826,30 @@ if triton is not None:
             other=0.0,
         )
 
+        gate = gate_acc * gate_output_norm[None, :]
+        up = up_acc * up_output_norm[None, :]
+        if HAS_BIAS:
+            bias_offsets = expert * n_size + offsets_n
+            gate += tl.load(gate_bias_ptr + bias_offsets, mask=valid_n, other=0.0)[None, :]
+            up += tl.load(up_bias_ptr + bias_offsets, mask=valid_n, other=0.0)[None, :]
         # Match dense FusedMoE's GEMM1 output precision before activation.
-        gate = (gate_acc * gate_output_norm[None, :]).to(COMPUTE_TYPE)
-        up = (up_acc * up_output_norm[None, :]).to(COMPUTE_TYPE)
-        gate_fp32 = gate.to(tl.float32)
-        up_fp32 = up.to(tl.float32)
+        gate_fp32 = gate.to(COMPUTE_TYPE).to(tl.float32)
+        up_fp32 = up.to(COMPUTE_TYPE).to(tl.float32)
         if CLAMP_SWIGLU:
             gate_fp32 = tl.minimum(gate_fp32, SWIGLU_LIMIT)
             up_fp32 = tl.minimum(
                 tl.maximum(up_fp32, -SWIGLU_LIMIT), SWIGLU_LIMIT
             )
-        middle = gate_fp32 * tl.sigmoid(gate_fp32) * up_fp32
+        if ACTIVATION == 0:
+            middle = gate_fp32 * tl.sigmoid(gate_fp32) * up_fp32
+        elif ACTIVATION == 1:
+            middle = 0.5 * gate_fp32 * (1.0 + tl.erf(gate_fp32 * 0.7071067811865476)) * up_fp32
+        elif ACTIVATION == 2:
+            inner = 0.7978845608028654 * (gate_fp32 + 0.044715 * gate_fp32 * gate_fp32 * gate_fp32)
+            # tanh(inner) == 2 * sigmoid(2 * inner) - 1
+            middle = gate_fp32 * tl.sigmoid(2.0 * inner) * up_fp32
+        else:
+            middle = gate_fp32 * tl.sigmoid(ACTIVATION_ALPHA * gate_fp32) * (up_fp32 + 1.0)
         if PREAPPLY_DOWN_NORM:
             # Match the legacy sequence exactly: first round the SiLU*up
             # result as if it had been stored/reloaded, then multiply the
@@ -858,6 +883,7 @@ if triton is not None:
         down_assignments_ptr,
         down_input_norm_ptr,
         down_output_norm_ptr,
+        down_bias_ptr,
         topk_weights_ptr,
         sorted_ticket_ids_ptr,
         expert_ids_ptr,
@@ -886,6 +912,7 @@ if triton is not None:
         COMPUTE_TYPE: tl.constexpr,
         PACKED_12_BLOCK_DECODE: tl.constexpr,
         PREAPPLIED_DOWN_NORM: tl.constexpr,
+        HAS_BIAS: tl.constexpr,
         SORTED_MIDDLE_LAYOUT: tl.constexpr,
         GROUPED_SCHEDULE: tl.constexpr,
         NUM_PID_N: tl.constexpr,
@@ -1021,6 +1048,10 @@ if triton is not None:
             other=0.0,
         )
         accumulator *= output_norm[None, :]
+        if HAS_BIAS:
+            accumulator += tl.load(
+                down_bias_ptr + expert * n_size + offsets_n, mask=valid_n, other=0.0
+            )[None, :]
         accumulator *= router_weight[:, None]
         tl.store(
             route_output_ptr
@@ -1358,6 +1389,11 @@ def nowag_fused_moe(
     gate_up_debug_trace: torch.Tensor | None = None,
     cuda_launch_plan: MoeCudaLaunchPlan | None = None,
     swiglu_limit: float | None = None,
+    activation_kind: ActivationKind = SILU_MUL,
+    activation_alpha: float = 1.702,
+    gate_bias: torch.Tensor | None = None,
+    up_bias: torch.Tensor | None = None,
+    down_bias: torch.Tensor | None = None,
     gate_up_input_rounding: ActivationRounding = NO_ACTIVATION_ROUNDING,
     down_input_rounding: ActivationRounding = NO_ACTIVATION_ROUNDING,
     down_norm_placement: DownNormPlacement | None = None,
@@ -1395,7 +1431,7 @@ def nowag_fused_moe(
     caller_owned_alignment_storage: bool = False,
     sum_routes: Callable[[torch.Tensor, torch.Tensor], object] | None = None,
 ) -> torch.Tensor:
-    """Run bias-free NoWag FusedMoE and return ``[tokens, hidden]``.
+    """Run NoWag FusedMoE and return ``[tokens, hidden]``.
 
     The keyword API deliberately mirrors the test-owned ``PackedMoERequest``
     adapter.  Gate, up, and down use independent codebooks, packed assignments,
@@ -1415,14 +1451,17 @@ def nowag_fused_moe(
     Under TP, Gate/Up are already output-sharded and Down returns this rank's
     partial output for vLLM to all-reduce. ``down_input_group_start_lane``
     preserves a global D-wide codeword when a row-shard boundary cuts through
-    it. EP and bias/zero-point variants remain outside this contract.
+    it. EP and zero-point variants remain outside this contract.
 
     ``pad_down_to_k48=True`` stores the logical expert middle after a zero
     prefix at ``down_input_group_start_lane`` and rounds its physical width to
     K48.  It is intended for an exact Gate/Up + exact Down pair when TP cuts a
     global D6 codeword; no dense weight or inference-time repacking is added.
 
-    ``swiglu_limit`` selects clamped SwiGLU.  The two rounding fields describe
+    ``swiglu_limit`` clamps gate (max) and up (both signs) before the
+    activation.  ``activation_kind`` other than ``silu_mul`` and the optional
+    contiguous ``[E, N]`` biases run on the Triton kernels only; ``auto``
+    resolves to Triton for them.  The two rounding fields describe
     optional storage round-trips around the expert math; their callables do
     the actual conversion without tying this kernel to one serving runtime.
     When Down is rounded, its normalizer belongs in ``down_prologue`` so the
@@ -1485,6 +1524,8 @@ def nowag_fused_moe(
             GATE_UP_EPILOGUE_NORM if structural_down else DOWN_PROLOGUE_NORM
         )
     activation_math = MoeActivationMath(
+        activation_kind=activation_kind,
+        activation_alpha=activation_alpha,
         gate_up_input_rounding=gate_up_input_rounding,
         swiglu_limit=swiglu_limit,
         down_input_rounding=down_input_rounding,
@@ -1519,6 +1560,15 @@ def nowag_fused_moe(
                 "dtype, and contiguity"
             )
         hidden_states = transformed_input
+    if (gate_bias is None) != (up_bias is None):
+        raise ValueError("gate_bias and up_bias must be provided together")
+    if activation_kind != SILU_MUL or gate_bias is not None or down_bias is not None:
+        if gate_up_backend == AUTO_GATE_UP_BACKEND:
+            gate_up_backend = TRITON_GATE_UP_BACKEND
+        if down_backend == AUTO_DOWN_BACKEND:
+            down_backend = TRITON_DOWN_BACKEND
+        if (gate_up_backend, down_backend) != (TRITON_GATE_UP_BACKEND, TRITON_DOWN_BACKEND):
+            raise ValueError("non-SiLU activations and expert biases require the Triton backends")
     if (align_routes is None) != (sum_routes is None):
         raise ValueError("align_routes and sum_routes must be provided together")
     if caller_owned_alignment_storage and align_routes is None:
@@ -1677,6 +1727,13 @@ def nowag_fused_moe(
         expected_assignment_words=physical_down_assignment_words,
     )
 
+    for name, bias, width in (
+        ("gate_bias", gate_bias, intermediate_size),
+        ("up_bias", up_bias, intermediate_size),
+        ("down_bias", down_bias, hidden_size),
+    ):
+        if bias is not None:
+            _require_tensor(bias, name=name, device=device, dtype=dtype, shape=(num_experts, width))
     if topk_ids.ndim != 2:
         raise ValueError(f"topk_ids must be [M, top_k], got {tuple(topk_ids.shape)}")
     top_k = topk_ids.shape[1]
@@ -2396,6 +2453,8 @@ def nowag_fused_moe(
             up_input_norm,
             up_output_norm,
             down_input_norm,
+            gate_output_norm if gate_bias is None else gate_bias,
+            up_output_norm if up_bias is None else up_bias,
             sorted_tickets,
             expert_ids,
             num_tickets_post_padded,
@@ -2434,6 +2493,9 @@ def nowag_fused_moe(
             PACKED_12_BLOCK_DECODE=use_block12_decoder,
             CLAMP_SWIGLU=swiglu_limit is not None,
             SWIGLU_LIMIT=(0.0 if swiglu_limit is None else float(swiglu_limit)),
+            ACTIVATION=_ACTIVATION_IDS[activation_math.activation_kind],
+            ACTIVATION_ALPHA=float(activation_math.activation_alpha),
+            HAS_BIAS=gate_bias is not None,
             PREAPPLY_DOWN_NORM=preapply_down_norm,
             SORTED_MIDDLE_LAYOUT=structural_down,
             ALIGNMENT_BLOCK_RATIO=alignment_block_ratio,
@@ -2520,6 +2582,7 @@ def nowag_fused_moe(
             down_packed_assignments,
             down_input_norm,
             down_output_norm,
+            down_output_norm if down_bias is None else down_bias,
             topk_weights,
             sorted_tickets,
             expert_ids,
@@ -2546,6 +2609,7 @@ def nowag_fused_moe(
             COMPUTE_TYPE=compute_type,
             PACKED_12_BLOCK_DECODE=use_block12_decoder,
             PREAPPLIED_DOWN_NORM=preapply_down_norm,
+            HAS_BIAS=down_bias is not None,
             SORTED_MIDDLE_LAYOUT=structural_down,
             GROUPED_SCHEDULE=grouped_schedule,
             NUM_PID_N=down_num_pid_n,

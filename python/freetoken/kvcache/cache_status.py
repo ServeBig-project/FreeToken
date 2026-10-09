@@ -238,6 +238,7 @@ def compute_cache_status_meta(engine: "Engine") -> Dict[str, Any]:
     meta["cuda_graph"] = engine.graph_runner.stats_snapshot()
     meta["gdn_replayssm"] = compute_gdn_state_geometry(engine)
     meta["dflash"] = compute_dflash_geometry(engine)
+    meta["experts"] = getattr(engine, "expert_geometry", None)
     # Current window/full reuse ratio (the tunable knob), for DSV4 and radix-SWA; 0.0 otherwise.
     cfg = engine.config
     has_swa_ratio = cfg is not None and _supports_swa_ratio(cfg)

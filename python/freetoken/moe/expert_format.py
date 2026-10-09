@@ -7,7 +7,7 @@ in the callers, which only hand the bound method bank views whose rows the route
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Callable
 
@@ -73,6 +73,9 @@ _BANK_SCHEMAS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Banks a format carries only when the model has them (expert biases).
+_OPTIONAL_BANKS: dict[str, tuple[str, ...]] = {"nowag": ("gate_bias", "up_bias", "down_bias")}
+
 # Dynamic per-token, per-128-lane E4M3 quantize/dequantize with UE8M0 scales
 # (DeepSeek-V4 expert inputs).
 E4M3_GROUP128_UE8M0 = "dynamic_e4m3_per_token_group128_ue8m0"
@@ -113,6 +116,10 @@ class ExpertMethod:
     # The grouped kernel sorts logical ids and maps them through ``expert_map``,
     # so a resident group sorts over E experts rather than every cache slot.
     logical_sort: bool = False
+    # Reported by /v1/cache/status: the kernels this method may dispatch to and the
+    # format's own encoding parameters.
+    kernel_backends: tuple[str, ...] = ()
+    format_parameters: dict = field(default_factory=dict)
 
 
 def expert_math(layer) -> ExpertMath:
@@ -284,7 +291,8 @@ def bind_expert_method(
     if layout.format not in _RUNS:
         raise ValueError(f"no expert compute method for format {layout.format!r}")
     run = partial(_RUNS[layout.format], math, backend == "fused")
-    return ExpertMethod(run, _no_workspace, logical_sort=layout.format in _LOGICAL_SORT)
+    return ExpertMethod(run, _no_workspace, logical_sort=layout.format in _LOGICAL_SORT,
+                        kernel_backends=(layout.format,))
 
 
 __all__ = [

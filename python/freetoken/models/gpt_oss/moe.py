@@ -191,6 +191,10 @@ class GptOssMLP(BaseOP):
         if is_offload_moe_backend(config.moe_backend):
             assert layer_id is not None
             self.experts = GptOssMxfp4OffloadMoELayer(config, layer_id)
+        elif config.expert_quant == "nowag":
+            raise NotImplementedError(
+                "gpt-oss serves NoWAG experts only through the offload/cpu/hybrid backends"
+            )
         else:
             self.experts = GptOssMxfp4TritonMoELayer(config)
         self._layer_id = layer_id

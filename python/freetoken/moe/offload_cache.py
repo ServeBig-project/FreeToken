@@ -30,7 +30,7 @@ _SMALL_BANK_FEAT_BYTES = 256 * 1024
 # converts the complete working set back to a finite tie-break epoch.
 _RESIDENT_PINNED_USAGE = (1 << 63) - 1
 
-from freetoken.moe.expert_format import _BANK_SCHEMAS
+from freetoken.moe.expert_format import _BANK_SCHEMAS, _OPTIONAL_BANKS
 from freetoken.utils import init_logger
 
 logger = init_logger(__name__)
@@ -623,6 +623,10 @@ class OffloadMoeCache:
         """
         from freetoken.moe.host_banks import HostResidency
 
+        optional = _OPTIONAL_BANKS.get(self.quant_format, ())
+        self.bank_schema = _BANK_SCHEMAS[self.quant_format] + tuple(
+            name for name in optional if name in sources
+        )
         assert set(sources) == set(self.bank_schema), (
             f"banks {sorted(sources)} do not match the {self.quant_format!r} "
             f"schema {self.bank_schema}"
@@ -2255,7 +2259,7 @@ class OffloadMoeCache:
 
 
 def iter_offload_moe_layers(model) -> Iterator:
-    from freetoken.layers import BaseOP, OffloadMoELayer
+    from freetoken.layers import OffloadMoELayer
 
     # A model whose MoE blocks are bespoke nn.Modules (not OffloadMoELayer) declares its
     # offload layers explicitly via this hook (e.g. DeepSeek-V4-Flash); attach_offload_moe_cache
@@ -2264,8 +2268,14 @@ def iter_offload_moe_layers(model) -> Iterator:
     if hook is not None:
         yield from hook()
         return
+    yield from iter_moe_layers(model, OffloadMoELayer)
 
-    if isinstance(model, OffloadMoELayer):
+
+def iter_moe_layers(model, layer_cls) -> Iterator:
+    """Every ``layer_cls`` instance under ``model``, in model order."""
+    from freetoken.layers import BaseOP
+
+    if isinstance(model, layer_cls):
         yield model
 
     if not isinstance(model, BaseOP):
@@ -2273,10 +2283,10 @@ def iter_offload_moe_layers(model) -> Iterator:
 
     for value in model.__dict__.values():
         if isinstance(value, BaseOP):
-            yield from iter_offload_moe_layers(value)
+            yield from iter_moe_layers(value, layer_cls)
         elif isinstance(value, (list, tuple)):
             for item in value:
-                yield from iter_offload_moe_layers(item)
+                yield from iter_moe_layers(item, layer_cls)
 
 
 def attach_offload_moe_cache(model, cache: OffloadMoeCache) -> list:

@@ -11,6 +11,9 @@ ActivationRounding = Literal[
     "dynamic_e4m3_per_token_group128_ue8m0",
 ]
 DownNormPlacement = Literal["gate_up_epilogue", "down_prologue"]
+ActivationKind = Literal["silu_mul", "gelu_mul", "gelu_tanh_mul", "swigluoai_mul"]
+
+SILU_MUL: ActivationKind = "silu_mul"
 
 NO_ACTIVATION_ROUNDING: ActivationRounding = "none"
 DYNAMIC_E4M3_GROUP128_UE8M0: ActivationRounding = (
@@ -31,12 +34,16 @@ class MoeActivationMath:
     different calls that happen to share E/H/I/top-k.
     """
 
+    activation_kind: ActivationKind = SILU_MUL
+    activation_alpha: float = 1.702
     gate_up_input_rounding: ActivationRounding = NO_ACTIVATION_ROUNDING
     swiglu_limit: float | None = None
     down_input_rounding: ActivationRounding = NO_ACTIVATION_ROUNDING
     down_norm_placement: DownNormPlacement = GATE_UP_EPILOGUE_NORM
 
     def __post_init__(self) -> None:
+        if self.activation_kind not in ("silu_mul", "gelu_mul", "gelu_tanh_mul", "swigluoai_mul"):
+            raise ValueError(f"unsupported activation_kind {self.activation_kind!r}")
         for field, value in (
             ("gate_up_input_rounding", self.gate_up_input_rounding),
             ("down_input_rounding", self.down_input_rounding),
@@ -67,7 +74,7 @@ class MoeActivationMath:
 
     def profile_identity(self) -> dict[str, Any]:
         return {
-            "activation_kind": "silu_mul",
+            "activation_kind": self.activation_kind,
             "gate_up_input_rounding": self.gate_up_input_rounding,
             "swiglu_limit": self.swiglu_limit,
             "down_input_rounding": self.down_input_rounding,

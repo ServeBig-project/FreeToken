@@ -17,7 +17,12 @@ from freetoken.models import create_model, load_weight
 from freetoken.moe import create_moe_backend, is_offload_moe_backend
 from freetoken.moe.expert_format import ExpertLayout, bind_expert_method, expert_math
 from freetoken.moe.expert_banks import load_expert_banks
-from freetoken.moe.offload_cache import OffloadMoeCache, attach_offload_moe_cache
+from freetoken.moe.offload_cache import (
+    OffloadMoeCache,
+    attach_offload_moe_cache,
+    iter_moe_layers,
+    iter_offload_moe_layers,
+)
 from freetoken.utils import align_ceil, init_logger, is_sm90_family, is_sm100_family, mem_GB, torch_dtype
 
 from .config import _LEGACY_SD_CONTROLS, EngineConfig
@@ -376,8 +381,11 @@ class Engine:
         self._post_weights_free = post_weights_free
         self.moe_offload_cache = None
         self.cpu_moe_executor = None
+        self._resident_expert_host_bytes = 0
         if is_offload_moe_backend(config.moe_backend):
             self._init_offload_moe_cache(config)
+        elif config.model_config.expert_quant == "nowag":
+            self._init_resident_expert_banks(config)
         if hasattr(self.model, "prepare_for_runtime"):
             self.model.prepare_for_runtime()
 
@@ -494,6 +502,7 @@ class Engine:
         if config.attention_backend.split(",")[0] == "triton":
             # Prefill runs on the first comma part; warm its autotune cache.
             self._warmup_prefill()
+        self.expert_geometry = self._gather_expert_geometry()
 
     def _load_dflash(self, config: EngineConfig) -> None:
         self.dflash_model = self.dflash = None
@@ -595,7 +604,8 @@ class Engine:
             load_weight(
                 config.model_path,
                 self.device,
-                include_moe_experts=not is_offload_moe_backend(config.moe_backend),
+                include_moe_experts=not is_offload_moe_backend(config.moe_backend)
+                and config.model_config.expert_quant != "nowag",
             ),
             device=self.device,
         )
@@ -632,6 +642,93 @@ class Engine:
             page_extra_bytes=(self.dflash_layout.total_bytes if self.dflash_layout is not None
                               else lambda pages: 0),
         )
+
+    def _gather_expert_geometry(self) -> dict | None:
+        """``geometry.experts`` for /v1/cache/status: the bound format and each TP rank's
+        actual expert storage. Collective over the TP CPU group -- every rank calls it."""
+        from freetoken.layers import MoELayer
+
+        cache = self.moe_offload_cache
+        layers = (list(iter_offload_moe_layers(self.model)) if cache is not None
+                  else list(iter_moe_layers(self.model, MoELayer)))
+        if not layers or layers[0].expert_method is None:
+            return None
+        method = layers[0].expert_method
+
+        def nbytes(tensors) -> int:
+            return sum(t.numel() * t.element_size() for t in tensors)
+
+        if cache is not None:
+            fmt = cache.quant_format
+            host = nbytes(t for per_layer in cache.bank_sources.values() for t in per_layer)
+            device = nbytes(cache.bank_caches.values()) + nbytes(cache.prefill_bank_buffers)
+            shared_host, shared_device = nbytes(cache.host_shared.values()), nbytes(cache.shared.values())
+        else:
+            fmt = layers[0].weight_format
+            host = self._resident_expert_host_bytes
+            device = nbytes(
+                t for layer in layers
+                for t in [*(layer.expert_banks or {}).values(),
+                          *(v for v in vars(layer).values() if isinstance(v, torch.Tensor))]
+            )
+            shared = layers[0].expert_shared
+            shared_host, shared_device = 0, nbytes(shared.values())
+        rank = {
+            "rank": self.config.tp_info.rank,
+            "device": str(self.device),
+            "compute_backend": self.config.moe_backend,
+            "kernel_backend": [*method.kernel_backends, *(["cpu"] if self.cpu_moe_executor else [])],
+            "storage_mode": "slot_cache" if cache is not None else "resident",
+            "expert_host_bytes": host,
+            "expert_device_bytes": device,
+            "shared_host_bytes": shared_host,
+            "shared_device_bytes": shared_device,
+            # Expert kernels still allocate their scratch per call; nothing is reserved yet.
+            "workspace_device_bytes": 0,
+        }
+        ranks = [None] * self.config.tp_info.size
+        torch.distributed.all_gather_object(ranks, rank, group=self.tp_cpu_group)
+        return {"format": fmt, "format_parameters": dict(method.format_parameters), "ranks": ranks}
+
+    def _init_resident_expert_banks(self, config: EngineConfig) -> None:
+        """Hold format-loaded experts (NoWAG) whole on the GPU: each layer reads its own
+        banks; logical expert ids are the bank rows. Host copies are released per layer."""
+        from freetoken.layers import MoELayer
+
+        layers = list(iter_moe_layers(self.model, MoELayer))
+        uploaded: list[dict[str, torch.Tensor]] = [{} for _ in layers]
+
+        def upload(layer_id: int, banks: dict) -> None:
+            for name, bank in banks.items():
+                uploaded[layer_id][name] = bank.tensor.to(self.device)
+                bank.release()
+
+        banks = load_expert_banks(config.model_path, config.model_config, device=self.device,
+                                  dtype=self.dtype, layer_sink=upload)
+        sample = layers[0]
+        method = bind_expert_method(
+            expert_math(sample),
+            ExpertLayout(banks.quant_format, sample.hidden_size, sample.intermediate_size,
+                         sample.num_experts),
+            banks.format_state,
+            device=self.device,
+            backend=config.moe_backend,
+        )
+        shared = {name: t.to(self.device) for name, t in banks.shared.items()}
+        # Only the model-supplied banks (expert biases) keep a pinned host copy.
+        self._resident_expert_host_bytes = sum(
+            t.numel() * t.element_size()
+            for name, per_layer in banks.sources.items()
+            if name not in uploaded[0]
+            for t in per_layer
+        )
+        for layer_id, layer in enumerate(layers):
+            # Banks the model supplies itself (expert biases) arrive whole, not streamed.
+            for name, per_layer in banks.sources.items():
+                uploaded[layer_id].setdefault(name, per_layer[layer_id].to(self.device))
+            layer.expert_banks = uploaded[layer_id]
+            layer.expert_shared = shared
+            layer.expert_method = method
 
     def _init_offload_moe_cache(self, config: EngineConfig) -> OffloadMoeCache:
         # A model may fully own cache construction via make_offload_moe_cache.
@@ -1111,6 +1208,7 @@ class Engine:
         self.graph_runner.eager_counts = prior_eager
         if self.dflash is not None:
             self.dflash.capture_graphs(self.graph_runner)
+        self.expert_geometry = self._gather_expert_geometry()
 
     def compute_logits(self, batch: Batch) -> torch.Tensor:
         assert torch.cuda.current_stream() == self.stream
@@ -1967,7 +2065,7 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
 
     if (
         is_moe
-        and expert_quant not in ("none", "fp8_block")
+        and expert_quant not in ("none", "fp8_block", "nowag")
         and not is_offload_moe_backend(config.moe_backend)
     ):
         raise ValueError(

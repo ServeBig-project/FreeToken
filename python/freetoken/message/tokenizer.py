@@ -110,6 +110,7 @@ class CacheRebuildResultMsg(BaseTokenizerMsg):
     dflash: dict | None = None
     prefix_cache: dict | None = None
     execution: dict | None = None  # Engine.execution_status after the rebuild
+    experts: dict | None = None  # Engine.expert_geometry after the rebuild
 
 
 @dataclass

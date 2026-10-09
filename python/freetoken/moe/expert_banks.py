@@ -282,18 +282,25 @@ def _dsfp4_banks(model_path, model_config, device, dtype, dummy, parallel=False,
 def _nowag_banks(model_path, model_config, device, dtype, dummy, parallel=False, workers=8, chunk=_PARALLEL_CHUNK, decode_target="gpu", layer_sink=None) -> ExpertBanks:
     if dummy:
         raise ValueError("NoWAG experts require a completed quantization output")
-    if layer_sink is not None:
-        raise NotImplementedError("FTW conversion does not yet write NoWAG expert banks")
     from freetoken.moe.nowag.weights import load_nowag_expert_sources
 
     path = getattr(model_config, "nowag_expert_path", None)
     if not path:
         raise ValueError("NoWAG expert path was not configured")
-    sources, shared, state = load_nowag_expert_sources(path, model_config, dtype=dtype)
-    return ExpertBanks("nowag", sources, shared=shared, format_state=state)
+    sources, shared, state = load_nowag_expert_sources(
+        path, model_config, dtype=dtype, layer_sink=layer_sink
+    )
+    # The sidecar carries only the projections; a model with expert biases supplies
+    # them from the original checkpoint.
+    load_biases = _model_hook(model_config, "load_expert_biases")
+    if load_biases is not None:
+        sources.update(load_biases(model_path, model_config, dtype=dtype))
+    return ExpertBanks(
+        "nowag", sources, shared=shared, format_state=state, streamed=layer_sink is not None
+    )
 
 
-def _model_setup_override(model_config):
+def _model_hook(model_config, name: str):
     architectures = getattr(model_config, "architectures", None)
     if not architectures:
         return None
@@ -305,7 +312,7 @@ def _model_setup_override(model_config):
     except ValueError:
         return None
     try:
-        return _load_attr(spec.module, "setup_offload_expert_banks")
+        return _load_attr(spec.module, name)
     except AttributeError:
         return None
 
@@ -327,7 +334,11 @@ def _build_expert_banks(model_path, model_config, device, dtype, dummy, parallel
     (native, non-GPU-tiled) bank layouts. ``layer_sink`` (converter only) is forwarded to
     setups/providers that declare the parameter; the rest ignore it and stay on the
     materialize-and-write path (``ExpertBanks.streamed`` reports which happened)."""
-    setup = _model_setup_override(model_config)
+    # A model's own setup reads its checkpoint's native experts; a separately supplied
+    # format (NoWAG) is read by that format's provider.
+    setup = None
+    if model_config.expert_quant != "nowag":
+        setup = _model_hook(model_config, "setup_offload_expert_banks")
     if setup is not None:
         import inspect
 

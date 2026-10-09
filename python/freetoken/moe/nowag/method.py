@@ -16,7 +16,11 @@ from freetoken.moe.expert_format import (
 
 from freetoken.kernel import moe_sum_reduce_triton
 from freetoken.kernel.nowag import cuda_ops
-from freetoken.kernel.nowag.moe_ops import nowag_fused_moe
+from freetoken.kernel.nowag.moe_ops import (
+    MAX_STRUCTURAL_DOWN_BLOCK_M,
+    moe_middle_workspace_layout,
+    nowag_fused_moe,
+)
 from freetoken.kernel.triton.dsv4.fp8_linear import (
     act_quant_fp8_inplace,
     act_quant_fp8_roundtrip,
@@ -38,9 +42,21 @@ _GATE_UP_EPILOGUE_NORM = "gate_up_epilogue"
 _DOWN_PROLOGUE_NORM = "down_prologue"
 
 
+# Model activation name -> the NoWAG kernels' gated activation.
+_ACTIVATION_KINDS = {
+    "silu": "silu_mul",
+    "swish": "silu_mul",
+    "gelu": "gelu_mul",
+    "gelu_tanh": "gelu_tanh_mul",
+    "gelu_pytorch_tanh": "gelu_tanh_mul",
+    "gpt_oss_swiglu": "swigluoai_mul",
+    "swigluoai": "swigluoai_mul",
+}
+
+
 def check_nowag_math(math: ExpertMath) -> None:
     """Raise for expert math the NoWAG kernels cannot compute yet."""
-    if math.activation not in ("silu", "swish"):
+    if math.activation not in _ACTIVATION_KINDS:
         raise NotImplementedError(
             f"NoWAG experts cannot compute activation {math.activation!r} yet"
         )
@@ -84,15 +100,50 @@ def bind_nowag_method(
     backend: str,
 ) -> ExpertMethod:
     check_nowag_math(math)
-    if backend == "fused":
-        raise NotImplementedError("NoWAG experts cannot be fully GPU-resident yet")
     kernel_backend = os.environ.get("FREETOKEN_NOWAG_BACKEND", "auto")
     if kernel_backend not in ("triton", "auto"):
         raise ValueError("FREETOKEN_NOWAG_BACKEND must be 'triton' or 'auto'")
     if device.type == "cuda":
         cuda_ops._extension()  # compile before warmup and graph capture, not mid-forward
     run = partial(_run, math, layout, state, kernel_backend)
-    return ExpertMethod(run=run, workspace_spec=lambda rows, top_k, *, bank_rows: {})
+    # Auto picks the CUDA Exact-K48 kernels from measured profiles, which exist only for
+    # D6 SiLU experts.
+    exact = kernel_backend == "auto" and state.d == 6 and math.activation in ("silu", "swish")
+    return ExpertMethod(
+        run=run,
+        workspace_spec=partial(_workspace_spec, layout),
+        kernel_backends=("triton", "cuda_exact_k48") if exact else ("triton",),
+        format_parameters={"d": state.d, "assignment_bits": state.assignment_bits},
+    )
+
+
+def _workspace_spec(
+    layout: ExpertLayout, rows: int, top_k: int, *, bank_rows: int
+) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
+    """Scratch for ``rows`` physical token rows over ``bank_rows`` addressable bank rows:
+    the bound over every backend the kernel may pick for this geometry (two compute
+    slabs, the largest Down alignment tile, either adaptive task queue)."""
+    if rows == 0:
+        return {}
+    routes = rows * top_k
+    middle_rows = max(
+        moe_middle_workspace_layout(
+            num_routes=routes,
+            num_experts=bank_rows,
+            alignment_block_m=MAX_STRUCTURAL_DOWN_BLOCK_M,
+            physical_intermediate_size=layout.intermediate_size,
+            structural_down=True,
+            compute_slabs=2,
+            adaptive_m_tiles=True,
+            caller_owned_alignment_storage=False,
+            adaptive_residual_policy=policy,
+        ).total_rows
+        for policy in ("bm16", "tail64")
+    )
+    return {
+        "middle": ((middle_rows, layout.intermediate_size), torch.bfloat16),
+        "route_output": ((routes, layout.hidden_size), torch.bfloat16),
+    }
 
 
 def _run(
@@ -112,6 +163,13 @@ def _run(
     sort_rows: int | None = None,
     expert_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    if x.shape[0] == 0:
+        return torch.empty_like(x) if out is None else out
+    # The aligners drop negative (padding) routes, leaving their outputs unwritten:
+    # send them to row 0 with zero weight instead.
+    padding = slots < 0
+    slots = slots.clamp_min(0)
+    topk_weights = topk_weights.masked_fill(padding, 0.0)
     # The rounded input is staged in ``out`` until the final sum overwrites it.
     if (math.gate_up_input_rounding is not None and out is not None
             and out.untyped_storage().data_ptr() == x.untyped_storage().data_ptr()):
@@ -148,7 +206,16 @@ def _run(
         gate_up_backend=kernel_backend,
         down_backend=kernel_backend,
         output=out,
+        middle_workspace=workspace["middle"] if workspace else None,
+        route_output_workspace=(
+            workspace["route_output"][: slots.numel()] if workspace else None
+        ),
         swiglu_limit=math.activation_limit,
+        activation_kind=_ACTIVATION_KINDS[math.activation],
+        activation_alpha=math.activation_alpha,
+        gate_bias=banks.get("gate_bias"),
+        up_bias=banks.get("up_bias"),
+        down_bias=banks.get("down_bias"),
         gate_up_input_rounding=math.gate_up_input_rounding or "none",
         down_input_rounding=math.down_input_rounding or "none",
         down_norm_placement=(

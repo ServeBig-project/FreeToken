@@ -54,8 +54,11 @@ class MoELayer(BaseOP):
         self.activation = activation
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.weight_format = weight_format
-        # Bound by make_moe_layer (resident) or the engine (offload family).
+        # Bound by make_moe_layer (resident) or the engine (offload family and
+        # resident formats loaded through load_expert_banks, which also sets the banks).
         self.expert_method = None
+        self.expert_banks: dict[str, torch.Tensor] | None = None
+        self.expert_shared: dict[str, torch.Tensor] = {}
         intermediate_size_per_partition = div_even(intermediate_size, tp_size)
         if allocate_experts:
             self._alloc_resident_experts(intermediate_size_per_partition)
@@ -100,6 +103,8 @@ class MoELayer(BaseOP):
         return hidden_states
 
     def _resident_banks(self) -> dict[str, torch.Tensor]:
+        if self.expert_banks is not None:
+            return self.expert_banks
         if self.weight_format == "fp8_block":
             return {
                 "gate_up": self.gate_up_proj, "gate_up_scale": self.gate_up_scale_inv,
@@ -114,7 +119,7 @@ class MoELayer(BaseOP):
         topk_ids: torch.Tensor,
     ) -> torch.Tensor:
         return self.expert_method.run(
-            hidden_states, topk_ids, topk_weights, self._resident_banks(), {},
+            hidden_states, topk_ids, topk_weights, self._resident_banks(), self.expert_shared,
             prefill=get_global_ctx().batch.uses_extend_path,
             sort_rows=self.num_experts,
         )
@@ -527,9 +532,13 @@ def make_moe_layer(
         activation=activation,
         apply_router_weight_on_input=apply_router_weight_on_input,
     )
+    # NoWAG experts come from their own loader (engine), never from this checkpoint.
+    nowag = getattr(config, "expert_quant", "none") == "nowag"
     if offload:
         assert layer_id is not None, "offload MoE backends need the layer_id"
         kwargs["layer_id"] = layer_id
+    elif nowag:
+        kwargs.update(weight_format="nowag", allocate_experts=False)
     else:
         kwargs["weight_format"] = weight_format
     layer = layer_cls(**kwargs)
@@ -540,7 +549,7 @@ def make_moe_layer(
         layer.router = ROUTERS[config.moe_router](layer.top_k, layer.renormalize)
     for name, value in (extra_attrs or {}).items():
         setattr(layer, name, value)
-    if not offload:
+    if not offload and not nowag:
         bind_resident_method(layer)
     return layer
 

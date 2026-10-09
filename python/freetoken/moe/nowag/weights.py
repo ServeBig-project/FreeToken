@@ -90,8 +90,12 @@ def load_nowag_expert_sources(
     model_config,
     *,
     dtype: torch.dtype = torch.bfloat16,
+    layer_sink=None,
 ) -> tuple[dict[str, list[torch.Tensor]], dict[str, torch.Tensor], NowagState]:
     """Load and pin the nine per-expert banks plus one model-wide codebook.
+
+    With ``layer_sink``, each completed layer's unpinned host banks go to
+    ``layer_sink(layer, {name: HostBank})`` instead, which owns (and may release) them.
 
     Assignment banks are always returned as contiguous ``[E, W, N]`` tensors.
     Existing sidecars store each expert as ``[N, W]`` and are transposed while
@@ -148,8 +152,13 @@ def load_nowag_expert_sources(
         if not isinstance(file, str):
             raise TypeError("NoWAG layer file must be a string")
         files_by_layer[layer] = root / file
-    if set(files_by_layer) != set(range(layers)):
-        raise ValueError("NoWAG layer indices are incomplete")
+    # Layer numbers are decoder layers; models with leading dense layers start
+    # their MoE layers at first_k_dense_replace.
+    first = int(getattr(model_config, "first_k_dense_replace", 0))
+    if set(files_by_layer) != set(range(first, first + layers)):
+        raise ValueError(
+            f"NoWAG layers must be the MoE decoder layers [{first}, {first + layers})"
+        )
 
     gate_words = _words(hidden, group_size, assignment_bits)
     down_words = _words(intermediate, group_size, assignment_bits)
@@ -174,7 +183,7 @@ def load_nowag_expert_sources(
     }
     with PinPipeline() as pins:
         for layer in range(layers):
-            path = files_by_layer[layer]
+            path = files_by_layer[first + layer]
             if not path.is_file():
                 raise FileNotFoundError(path)
             with safe_open(path, framework="pt", device="cpu") as handle:
@@ -183,13 +192,13 @@ def load_nowag_expert_sources(
                     for projection, bank in _PROJECTION_BANK.items():
                         keys = {
                             "assignments": _tensor_key(
-                                layer, expert, projection, "assignments"
+                                first + layer, expert, projection, "assignments"
                             ),
                             "input_norm": _tensor_key(
-                                layer, expert, projection, "normalizer.norms.0"
+                                first + layer, expert, projection, "normalizer.norms.0"
                             ),
                             "output_norm": _tensor_key(
-                                layer, expert, projection, "normalizer.norms.1"
+                                first + layer, expert, projection, "normalizer.norms.1"
                             ),
                         }
                         missing = [name for name in keys.values() if name not in available]
@@ -216,7 +225,11 @@ def load_nowag_expert_sources(
                                 target.copy_(loaded.transpose(0, 1))
                             else:
                                 target.copy_(loaded)
-            pins(layer, {name: per[layer] for name, per in host_banks.items()})
+            layer_banks = {name: per[layer] for name, per in host_banks.items()}
+            if layer_sink is not None:
+                layer_sink(layer, layer_banks)
+            else:
+                pins(layer, layer_banks)
 
     codebook_entry = manifest.get("codebook")
     if not isinstance(codebook_entry, dict):
