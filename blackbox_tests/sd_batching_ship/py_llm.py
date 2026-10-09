@@ -13,7 +13,6 @@ try:
 except Exception as e:  # report the public error text to the parent test
     print("RESULT " + json.dumps({"error": f"{type(e).__name__}: {e}"}))
     sys.stdout.flush()
-os._exit(0)
     os._exit(3)
 out = llm.generate(["Continue the list: 1, 2, 3,", "Once upon a time"],
                    SamplingParams(temperature=0.0, ignore_eos=True, max_tokens=24))

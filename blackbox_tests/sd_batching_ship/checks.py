@@ -249,6 +249,8 @@ def geometry(se):
 def maintenance(se, has_state, after=None):
     """Section 5: idle rebuild variants, busy rejection, illegal geometry rejection, real SD afterwards."""
     g0 = geometry(se)
+    if not has_state:  # no recurrent-state pool: a slot count is not part of this model's geometry
+        g0.pop("num_mamba_slots", None)
     assert "num_pages" in g0 and "moe_cache_size" in g0, f"cache status lacks geometry: {se.c.cache_status()}"
     log = {}
     # busy: a long generation is running
@@ -262,7 +264,7 @@ def maintenance(se, has_state, after=None):
         code, j = _rebuild(se, {**g0, **bad})
         log[f"bad{bad}"] = (code, j)
         assert not _ok(code, j), f"illegal rebuild {bad} accepted: {code} {j}"
-        assert geometry(se) == g0
+        assert all(geometry(se).get(k) == v for k, v in g0.items())
         exact_len(se.c.complete(count_prompt(), 16), 16)
     # legal idle rebuilds: same, KV-only, expert-only, state-only
     targets = [dict(g0), {**g0, "num_pages": int(g0["num_pages"] * 0.9)},
@@ -407,11 +409,13 @@ def graph_ladder(se, max_bs):
     want = list(range(1, cover + 1))
     assert (got or []) == want, f"target-decode Graph ladder {got}, expected {want}"
     seen = {}
+    # layered admits one prompt per wave, so the c-th request joins decode only after c-1 waves:
+    # outputs must outlast those waves for all c requests to decode together
     for c in range(1, 5):
         b = se.c.stats()
-        res = se.c.parallel([(se.c.complete, (count_prompt(10 * i + 1), 48), {}) for i in range(c)])
+        res = se.c.parallel([(se.c.complete, (count_prompt(10 * i + 1), 240), {}) for i in range(c)])
         for r in res:
-            exact_len(r, 48)
+            exact_len(r, 240)
         a = se.c.stats()
         sb, sa = _shapes(b), _shapes(a)
         grew = {k: v - sb.get(k, 0) for k, v in sa.items() if v > sb.get(k, 0)}
