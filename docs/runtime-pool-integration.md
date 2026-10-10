@@ -1,8 +1,8 @@
 # 共享 runtime：当前基座与实现交接
 
-2026-10-09最终文档复核：batching＋SD已通过PR #6合入`main@c320fbb`；DFlash当前为`32646f6`，已跟进main，相对上次审查的`696c164`没有生产代码变化。文档可移交实现，本轮没有运行GPU或读写测试。
+当前实现基线为 `main@732f1ee`，已经包含 batching＋SD 和 DFlash。生产实现位于 `.worktrees/runtime-pool`（`feat/runtime-pool`，PR #9），正在收尾及独立验收。
 
-本文给实现agent使用，配合[主设计](runtime-pool-design.md)与[内核协议](runtime-pool-kernel-design.md)。本设计worktree的生产代码仍基于旧`63156df`，**不能直接在这里开始实现或把这里的旧代码移植回main**。DFlash合入并完成其承诺验收后，从届时main新建实现worktree、记录提交并移入设计文档；只核对本次快照之后的相关改动。独立测试作者只接收[公开契约](runtime-pool-public-contract.md)。
+本文保留基座行为与实现要求，配合[主设计](runtime-pool-design.md)与[内核协议](runtime-pool-kernel-design.md)使用；其中的历史失败不等于当前验收结论。独立测试作者只接收[公开契约](runtime-pool-public-contract.md)。
 
 ## 1. 已解决的差异与保留边界
 
@@ -16,11 +16,11 @@
 | 窗口 | `_draft_lengths`同时裁剪目标页与窗口；提交保留实际接受数、输出数和拒绝尾部释放语义。 |
 | Graph | 独立SD覆盖、分层verify、重建上限和`full_stores/protect_capture`均已保留；普通AR也已覆盖1到`min(C,8)`的小批次。 |
 
-源码入口均在[DFlash当前实现](../../dflash-mainline/python/freetoken/)：`engine/{config,engine,graph,speculative_graph}.py`、`speculative/{dflash,dflash_cache}.py`、`scheduler/speculative.py`。旧结论及固定提交证据保留在[历史审计](runtime-pool-integration-audit.md)，不再作为当前缺陷列表。
+源码入口均在[当前实现](../python/freetoken/)：`engine/{config,engine,graph,speculative_graph}.py`、`speculative/{dflash,dflash_cache}.py`、`scheduler/speculative.py`。
 
 第六项自适应交叉已明确范围：**保留、默认关闭，仅legacy且沿用现有后端限制（当前为offload）；layered自适应不在这次交付范围。** 不再等待前置功能补齐，也不由共享runtime顺手实现或调参。自适应收益／决策开销优化已有单独后续事项，不能把它变成本feature的性能门槛。
 
-实现前置条件不要求先修好已经转交内存预算工作的OOM，否则会形成相互等待。该问题纳入第6节的共享模式验收；DFlash自身承诺的接口／功能验收仍需完成。源码收口不等于合流GPU矩阵已通过。
+已经转交内存预算工作的 OOM 纳入第6节的共享模式验收；不能用源码收口替代 GPU 运行证据。
 
 **目标模型SWA后续接入，不等于DFlash的窗口不接入。** 最新DFlash用`HybridSWAKVCache`承载草稿窗口，CacheManager也会暴露`swa_paged`；必须按目标／drafter组件角色判断支持，不能看到这个标志或类名就拒绝共享runtime。
 
@@ -82,7 +82,7 @@ SD＋batching的静态能力检查当前仍通过`_linear_pool_num_slots`等独�
 
 资源裁剪沿用阶段规则：legacy／波次外可逐请求缩短；波次内仍要求整批达到配置最大草稿宽度，否则本轮整批AR。不改`SpeculativeDecoder.admit(full_width=True)`与分层verify图的宽度语义，不新增波次内自适应或可变宽度调度。
 
-每轮先按联合预算形成合法的候选，再由已支持的drafter／控制器选择。最终Graph padding、`batch×(max(lengths)+1)`概率缓冲及verify状态一起计价；不只检查页／槽数。控制器记录实际执行长度，取消／恢复／重算不能冒充完成样本。现有`verify_positions/verify_physical_positions`只覆盖波次外，波次内另有phase计数和Graph形状；不能在内存验收中混用统计范围。
+每轮先形成候选，由已支持的 drafter／控制器决定是否 SD；选中 SD 后按联合预算取得资源，先回收冷缓存，不足再裁剪。选择 AR 不为草稿回收缓存。最终 Graph padding、`batch×(max(lengths)+1)`概率缓冲及 verify 状态一起计价；不只检查页／槽数。控制器记录资源裁剪后的实际执行长度，取消／恢复／重算不能冒充完成样本。现有`verify_positions/verify_physical_positions`只覆盖波次外，波次内另有phase计数和Graph形状；不能在内存验收中混用统计范围。
 
 物理块改供另一用途不会改变数学／Graph几何，不重置控制器全部历史。明确池几何或Graph集合重建仍遵守原控制器的失效规则；暂停等待／冷恢复／重算时间另报，不直接记成对应不了执行形状的普通AR／SD样本。
 
@@ -99,7 +99,7 @@ SD＋batching的静态能力检查当前仍通过`_linear_pool_num_slots`等独�
 
 ### 必须处理的运行期峰值
 
-[主线性能报告](../../../FreeToken/docs/sd-batching-performance-20261008.md)已有实际失败：Qwen3.6 NVFP4、hybrid、C上限8、DFlash4/outwave、Replay、prefill8192、目标98304 tokens、GDN 6e9；后续prefill中申请64 MiB失败。报告尚未隔离完整峰值根因，不能说只是漏算features，也不能声称新窗口已经修好。
+[基座性能报告](sd-batching-performance-20261008.md)已有实际失败：Qwen3.6 NVFP4、hybrid、C上限8、DFlash4/outwave、Replay、prefill8192、目标98304 tokens、GDN 6e9；后续prefill中申请64 MiB失败。报告尚未隔离完整峰值根因，不能说只是漏算features，也不能声称新窗口已经修好。
 
 现有`PrefillMemoryBudget.token_budget`在未测量时直接放行配置tile，测量后仍以`max(tile_tokens, ...)`兜底；其`record`只测PyTorch，并且波次内SD的`start`在`memory.start`之前。**这些测量可用于估算，不能作为共享模式的容量保证。**
 

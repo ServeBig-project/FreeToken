@@ -185,8 +185,10 @@ class DFlashDrafter:
                         if engine.config.speculative_adaptive_cost else None)
         self.positions = [0, 0]  # real and physical draft positions
 
-    def plan(self, batch, lengths):
-        return self.control.plan(batch, lengths) if self.control is not None else lengths
+    def plan(self, batch, lengths, *, reserve=None):
+        if self.control is not None:
+            return self.control.plan(batch, lengths, reserve=reserve)
+        return reserve(lengths) if reserve is not None else lengths
 
     def propose(self, batch, views, starts, lengths):
         engine, sampler = self.engine, self.engine.sampler

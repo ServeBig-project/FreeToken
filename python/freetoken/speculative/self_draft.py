@@ -46,7 +46,7 @@ class SelfDrafter:
     def observe_acceptance(self, lengths, accepted):
         self.cost.observe_acceptance(lengths, accepted)
 
-    def plan(self, batch: Batch, lengths: list[int]) -> list[int]:
+    def plan(self, batch: Batch, lengths: list[int], *, reserve=None) -> list[int]:
         engine = self.engine
         expert_cache = engine.moe_offload_cache
         self.available = None
@@ -67,7 +67,7 @@ class SelfDrafter:
                     self.residency_stops += sum(length > 0 for length in lengths)
                 return [0] * batch.size
             lengths = [min(length, limit) for length in lengths]
-        return lengths
+        return reserve(lengths) if reserve is not None else lengths
 
     def propose(
         self,

@@ -793,7 +793,7 @@ class CacheManager:
             if last_page > first_page:
                 info.append((req, first_page, last_page))
         got = self.claim(sum(last - first for _, first, last in info),
-                         window=_ALL if self.swa_paged else None, states=states, evict=False)
+                         window=_ALL if self.swa_paged else None, states=states)
         if got is None:
             return False
         allocated, self.speculative_slots, _ = got
@@ -1283,7 +1283,7 @@ class CacheManager:
         return allocated
 
     def claim(self, pages: int = 0, *, window=None, states: int = 0, table=None,
-              evict: bool = True, payload_pages: int | None = None):
+              payload_pages: int | None = None):
         """Shared runtime: one operation's units, held together or not at all -- ``pages``
         pages (as token locations), window slots for the locations ``window(tokens)`` names,
         ``states`` GDN state slots, and ``table``'s next row with its records.
@@ -1291,11 +1291,11 @@ class CacheManager:
         before any is recorded as taken. Returns (tokens, slots, row), or None."""
         begin = time.perf_counter()
         try:
-            return self._claim(pages, window, states, table, evict, payload_pages)
+            return self._claim(pages, window, states, table, payload_pages)
         finally:  # time on the scheduler thread spent taking memory, evictions included
             self.paused_stats["claim_ms"] += (time.perf_counter() - begin) * 1e3
 
-    def _claim(self, pages, window, states, table, evict, payload_pages):
+    def _claim(self, pages, window, states, table, payload_pages):
         pool, ps, out = self.linear_state_pool, self.page_size, {}
 
         def build():
@@ -1331,13 +1331,10 @@ class CacheManager:
             out.update(tokens=tokens, slots=state, row=row)
             return claim
 
-        blocks = self.page_units.blocks
         # Cached data goes one entry at a time, and only while the claim really lacks ids or
-        # blocks: never more than the operation needs. A speculative round takes only spare
-        # memory: it never evicts cached prefixes for drafts it may not run.
-        while (claim := build()) is None or blocks.shortfall(claim.plan) or not blocks.acquire(
-                claim.plan):
-            if not evict or not (self._evict_any(ps) or
+        # blocks: never more than the operation needs.
+        while (claim := build()) is None or not self.page_units.blocks.acquire(claim.plan):
+            if not (self._evict_any(ps) or
                     (self.residency is not None and self.residency.evict_one())):
                 claim = None
                 break
