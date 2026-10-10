@@ -83,11 +83,29 @@ class StartupFailed(RuntimeError):
         self.code, self.log = code, log
 
 
+def settle_gpus(gpu, timeout=60):
+    """Wait until memory.used of the approved GPUs reads the same twice, 1 s apart. The driver
+    returns an exited server's memory asynchronously; a TP>1 start right after a one-GPU run
+    otherwise sees unequal free memory per rank. Best effort: never fails the run."""
+    query = ["nvidia-smi", f"--id={gpu}", "--query-gpu=memory.used", "--format=csv,noheader,nounits"]
+    deadline, last = time.monotonic() + timeout, None
+    while time.monotonic() < deadline:
+        try:
+            now = subprocess.run(query, capture_output=True, text=True, check=True).stdout
+        except (OSError, subprocess.CalledProcessError):
+            return
+        if now == last:
+            return
+        last = now
+        time.sleep(1)
+
+
 class Server:
     def __init__(self, label, args, gpu, timeout=1800, source=None, port=PORT):
         with socket.socket() as probe:
             if probe.connect_ex(("127.0.0.1", port)) == 0:
                 raise RuntimeError(f"port {port} busy; one server at a time")
+        settle_gpus(gpu)
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         self.label, self.url = label, f"http://127.0.0.1:{port}"
         self.log_path = LOG_DIR / f"{label}.log"
@@ -238,16 +256,40 @@ def experts(status):
 #   neither loops; at least half the prompts must be identical.
 # * Task check: the expected answer appears in the greedy continuation; a run passes when at
 #   least 3 of the 4 prompts do. Loop check: no word 4-gram repeats more than 3 times.
-# Amendment 2026-10-10 (coordinator request, after TP2 results): untrained random models have
-#   many near-tied logits, so a different reduction order (TP2 vs TP1, or even TP1 offload vs
-#   cpu, both seen to diverge only after 13-18 identical tokens) splits greedy text late. For
-#   such weights, cross-path comparisons whose numerics are proven at component level (TP2:
-#   rank-sum and bind numeric tests) use common_prefix: every prompt's first PREFIX_WORDS
-#   generated words must agree (whole text if shorter). Basis for 8 of 32: a wrong shard -- a
-#   lost rank contribution, a doubled down bias, boundary lanes regrouped -- changes the hidden
-#   state by percents (missing bias alone is 4-8% Frobenius in the GPT-OSS fixture), which
-#   moves a random model's greedy choice within the first few tokens on most prompts, while
-#   the observed legal divergence starts at 13 or later. No numeric tolerance changes.
+# Amendment 2026-10-10 (coordinator request, after TP2 results; replaces a per-prompt prefix
+#   rule that failed): on untrained random models greedy text splits at near-tied logits even
+#   for a same-device backend change (TP1 offload vs cpu: 3/24 prompts within 8 words, as early
+#   as word 2), so per-prompt equality cannot separate legal reduction-order noise from a bug.
+#   For such weights, paths whose numerics are proven at component level (TP2: rank-sum and
+#   bind numeric tests) use noise_referenced: over many prompts, the share agreeing with the
+#   reference on the first AGREE_WORDS words must reach max(AGREE_FLOOR, noise - NOISE_MARGIN),
+#   where noise is the same share for a TP1 backend change on the same weights. Basis: with 24
+#   prompts and a legal divergence rate near 15-20%, two independent shares differ by about
+#   0.1 (one SD of their difference), so a 0.25 margin is ~2 SD; a wrong shard (lost rank
+#   contribution, doubled down bias, regrouped boundary lanes) perturbs the hidden state by
+#   percents and splits nearly every prompt within a few words, far below the floor of 0.5.
+#   No numeric tolerance changes.
+AGREE_WORDS, AGREE_FLOOR, NOISE_MARGIN = 8, 0.5, 0.25
+
+
+def agreement(a, b, words=AGREE_WORDS):
+    """Share of prompts whose first `words` generated words agree (whole text if shorter)."""
+    def agree(x, y):
+        wx, wy = x.split(), y.split()
+        need = min(words, len(wx), len(wy))
+        return wx[:need] == wy[:need] and (need == words or x == y)
+    return sum(agree(x, y) for x, y in zip(a, b)) / len(a)
+
+
+def noise_referenced(reference, candidate, alternate, label=""):
+    """candidate vs reference, judged against the alternate (legal noise) vs reference."""
+    for outputs in (reference, candidate, alternate):
+        assert all(o.strip() for o in outputs), f"{label}: empty output {outputs}"
+    noise, got = agreement(reference, alternate), agreement(reference, candidate)
+    assert got >= max(AGREE_FLOOR, noise - NOISE_MARGIN), \
+        f"{label}: agreement {got:.2f}, same-weights backend change {noise:.2f}"
+    return got, noise
+
 
 PROMPTS = [("The capital of France is", "Paris"),
            ("1, 2, 3, 4, 5, 6,", "7"),
@@ -275,20 +317,6 @@ def cross_path(a, b, label="", task=True):
     if task:
         assert task_ok(a) and task_ok(b), f"{label}: task check failed\n{a}\n{b}"
     assert sum(same) * 2 >= len(same), f"{label}: only {sum(same)}/{len(same)} identical\n{a}\n{b}"
-
-
-PREFIX_WORDS = 8
-
-
-def common_prefix(a, b, label="", words=PREFIX_WORDS):
-    """Random-weight cross-path rule (see amendment above): non-empty outputs whose first
-    `words` generated words agree on every prompt."""
-    for x, y in zip(a, b):
-        assert x.strip() and y.strip(), f"{label}: empty output\n{a}\n{b}"
-        wx, wy = x.split(), y.split()
-        need = min(words, len(wx), len(wy))
-        assert wx[:need] == wy[:need] and (need == words or x == y), \
-            f"{label}: diverged within the first {words} words\n{x!r}\n{y!r}"
 
 
 def run_prompts(server, max_tokens=32):

@@ -66,14 +66,12 @@ def test_stop_group_waits_for_children_that_outlive_the_leader():
     assert not H.group_alive(proc.pid)
 
 
-def test_common_prefix_rule():
-    words = " ".join(f"w{i}" for i in range(32))
-    late = " ".join(f"w{i}" for i in range(13)) + " x" * 19
-    H.common_prefix([words], [late])                       # diverges after 13 words: allowed
-    with pytest.raises(AssertionError):
-        H.common_prefix([words], ["w0 w1 w2 x" + words[11:]])
-    H.common_prefix(["w0 w1"], ["w0 w1"])                  # stopped early, identical
-    with pytest.raises(AssertionError):
-        H.common_prefix(["w0 w1"], ["w0 w1 w2"])           # shorter than 8 must match fully
-    with pytest.raises(AssertionError):
-        H.common_prefix([words], [""])
+def test_noise_referenced_rule():
+    ref = [f"w{i} a b c d e f g h" for i in range(24)]
+    noisy = [("x " + r) if i < 3 else r for i, r in enumerate(ref)]      # 21/24 agree
+    H.noise_referenced(ref, [("y " + r) if i < 8 else r for i, r in enumerate(ref)], noisy)  # 16/24
+    with pytest.raises(AssertionError):                                   # 14/24 < 0.875-0.25
+        H.noise_referenced(ref, [("y " + r) if i < 10 else r for i, r in enumerate(ref)], noisy)
+    with pytest.raises(AssertionError):                                   # wrong shard: all split
+        H.noise_referenced(ref, ["z " + r for r in ref], ["z " + r for r in ref])
+    assert H.agreement(["w0 w1"], ["w0 w1"]) == 1 and H.agreement(["w0 w1"], ["w0 w1 w2"]) == 0
