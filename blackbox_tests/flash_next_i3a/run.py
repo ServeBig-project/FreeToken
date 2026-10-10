@@ -83,6 +83,10 @@ class Suite:
             body["chat_template_kwargs"] = {"enable_thinking": False}
         if stream:
             body["stream_options"] = {"include_usage": True}
+        return await self.send(name, path, body, expected, len(prompt) if isinstance(prompt, list) else None, started)
+
+    async def send(self, name, path, body, expected=None, prompt_tokens=None, started=None):
+        stream, max_tokens = body["stream"], body["max_tokens"]
         self.record("request", name=name, path=path, body=body)
         if not stream:
             response = await self.client.post(path, json=body)
@@ -125,8 +129,8 @@ class Suite:
         assert usage is not None, "missing usage"
         assert 0 <= usage["completion_tokens"] <= max_tokens
         assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
-        if isinstance(prompt, list):
-            assert usage["prompt_tokens"] == len(prompt), (usage, len(prompt))
+        if prompt_tokens is not None:
+            assert usage["prompt_tokens"] == prompt_tokens, (usage, prompt_tokens)
         if expected is not None:
             assert_answer(text, expected)
         self.record("validated", name=name, text=text, usage=usage, finish_reason=finish)
@@ -310,7 +314,7 @@ class Suite:
                     pending=["Exact non-aligned pause positions require public evidence."] if observed else ["No actual pause and resume observed."])
         print(f"Long-history trace completed; pause/resume observed: {observed}.")
 
-    async def run(self):
+    async def prepare(self):
         health = await self.client.get("/health")
         health.raise_for_status()
         assert health.json()["status"] == "ok", health.text
@@ -323,6 +327,10 @@ class Suite:
         assert self.args.pressure_tokens + 4 + self.args.output_limit <= runtime["context_tokens"]
         assert not self.first_stats["speculative"]["enabled"]
         assert bool(self.first_stats["cuda_graph"]["enabled"]) == (self.args.graph == "on")
+        return runtime
+
+    async def run(self):
+        runtime = await self.prepare()
         if self.args.scenario == "pause":
             await self.pause()
             return
@@ -363,7 +371,7 @@ class Suite:
         print("I3a preparation cases completed; full acceptance remains incomplete. See JSONL report.")
 
 
-async def main():
+def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", required=True)
     parser.add_argument("--tokenizer", default="/data1/yuchen/models/Qwen3.8-Flash-Next-NVFP4")
@@ -376,7 +384,11 @@ async def main():
     parser.add_argument("--scenario", choices=("full", "maintenance", "pause"), default="full")
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--report", type=Path, required=True)
-    args = parser.parse_args()
+    return parser
+
+
+async def main():
+    args = arguments().parse_args()
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, local_files_only=True)
     with args.report.open("x", encoding="utf-8") as report:
         async with httpx.AsyncClient(base_url=args.url, timeout=args.timeout) as client:
