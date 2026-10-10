@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import gc
 import math
 import os
@@ -2524,6 +2525,11 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
                              "MTP layers this server can draft with")
         # The MTP layers keep their attention history in the target's pages.
         model_config = model_config.with_mtp_history()
+        override("model_config", model_config)
+    elif any(spec.draft for spec in getattr(model_config, "slot_states", ())):
+        # A drafter's own states exist only while that drafter runs; AR does not pay for them.
+        model_config = dataclasses.replace(model_config, slot_states=tuple(
+            spec for spec in model_config.slot_states if not spec.draft))
         override("model_config", model_config)
     if config.speculative_num_steps:
         config.__post_init__()  # re-check the SD constraints against the resolved components
