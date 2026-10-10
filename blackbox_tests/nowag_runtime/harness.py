@@ -31,12 +31,50 @@ def env(source=None):
 
 
 def ft(args, timeout=7200, source=None, label="ft"):
-    """Run `ft <args>`; returns CompletedProcess with the combined log also saved to LOG_DIR."""
+    """Run `ft <args>` in its own session; returns CompletedProcess with the combined log also
+    saved to LOG_DIR. Returns only after every process of that session has exited."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.run([PYTHON, "-c", FT, *map(str, args)], env=env(source), timeout=timeout,
-                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    (LOG_DIR / f"{label}.log").write_text(proc.stdout)
-    return proc
+    proc = subprocess.Popen([PYTHON, "-c", FT, *map(str, args)], env=env(source), text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    finally:
+        stop_group(proc)
+    (LOG_DIR / f"{label}.log").write_text(out)
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out)
+
+
+def group_alive(pgid):
+    """Any non-zombie process left in the process group (same PID namespace as ours)."""
+    for stat in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            fields = stat.read_text().rsplit(")", 1)[1].split()
+        except OSError:
+            continue
+        if int(fields[2]) == pgid and fields[0] != "Z":
+            return True
+    return False
+
+
+def stop_group(proc, term_timeout=90, kill_timeout=30):
+    """SIGTERM the whole session started for `proc`, wait until every member has exited
+    (SIGKILL after term_timeout), and reap the leader. A server's scheduler child can outlive
+    the leader and keep its GPU memory; the next server would then OOM."""
+    pgid = proc.pid
+    for sig, limit in ((signal.SIGTERM, term_timeout), (signal.SIGKILL, kill_timeout)):
+        if not group_alive(pgid):
+            break
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            break
+        deadline = time.monotonic() + limit
+        while group_alive(pgid) and time.monotonic() < deadline:
+            proc.poll()
+            time.sleep(0.2)
+    proc.wait()
+    if group_alive(pgid):
+        raise RuntimeError(f"process group {pgid} survived SIGKILL")
 
 
 class StartupFailed(RuntimeError):
@@ -45,33 +83,11 @@ class StartupFailed(RuntimeError):
         self.code, self.log = code, log
 
 
-def smi(*query):
-    return subprocess.run(["nvidia-smi", *query, "--format=csv,noheader"], capture_output=True,
-                          text=True, check=True).stdout.split("\n")
-
-
-def gpu_uuids(gpu):
-    """--gpu takes UUIDs or nvidia-smi indices, comma-separated."""
-    index = dict(line.replace(" ", "").split(",") for line in smi("--query-gpu=index,uuid") if line)
-    return {index.get(g.strip(), g.strip()) for g in str(gpu).split(",")}
-
-
-def wait_gpu_idle(gpu, timeout=180):
-    """A server that just exited can hold its memory for seconds; the next one would then OOM."""
-    uuids = gpu_uuids(gpu)
-    deadline = time.monotonic() + timeout
-    while uuids & {line.strip() for line in smi("--query-compute-apps=gpu_uuid")}:
-        if time.monotonic() > deadline:
-            raise RuntimeError(f"GPU {gpu} still has compute processes after {timeout}s")
-        time.sleep(1)
-
-
 class Server:
     def __init__(self, label, args, gpu, timeout=1800, source=None, port=PORT):
         with socket.socket() as probe:
             if probe.connect_ex(("127.0.0.1", port)) == 0:
                 raise RuntimeError(f"port {port} busy; one server at a time")
-        wait_gpu_idle(gpu)
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         self.label, self.url = label, f"http://127.0.0.1:{port}"
         self.log_path = LOG_DIR / f"{label}.log"
@@ -88,6 +104,7 @@ class Server:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:
+                stop_group(self.proc)
                 self._log.close()
                 raise StartupFailed(self.label, self.proc.returncode, self.log_path.read_text())
             try:
@@ -100,13 +117,7 @@ class Server:
         raise RuntimeError(f"{self.label} not serving after {timeout}s; log {self.log_path}")
 
     def close(self):
-        if self.proc.poll() is None:
-            os.killpg(self.proc.pid, signal.SIGTERM)
-            try:
-                self.proc.wait(90)
-            except subprocess.TimeoutExpired:
-                os.killpg(self.proc.pid, signal.SIGKILL)
-                self.proc.wait(30)
+        stop_group(self.proc)
         if not self._log.closed:
             self._log.close()
 
