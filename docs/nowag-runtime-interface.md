@@ -84,9 +84,9 @@ TP时 `run`返回本rank的局部贡献；仅rank0贡献down bias，公共调用
 
 FTW新增的NoWAG数据使用现有tensor存储和metadata机制：`quant_format="nowag"`、原有模型配置与bank条目提供几何／层映射，`experts_shared`类别保存具名共享tensor，`expert_format_state`由格式模块编码／解析；通用writer只写出这些记录和tensor。bank继续逐层保存，codebook只写一次，必要bias不遗漏。旧非NoWAG FTW的字段语义不改变。
 
-NoWAG FTW存全局编码，不存转换时的TP局部切片；运行时按目标TP生成layout。`BASE`配置／tokenizer／非专家权重一并保留，源NoWAG绝对路径只可作来源说明，不能成为加载依赖。
+NoWAG FTW存全局编码，只在TP1下服务；TP>1在加载前报公开错误，因为FTW按TP1整块保存非专家权重，需要TP时使用原checkpoint。`BASE`配置／tokenizer／非专家权重一并保留，源NoWAG绝对路径只可作来源说明，不能成为加载依赖。
 
-模型的 `load_expert_biases.bank_names` 声明必要bias组；FTW在TP分片及rank1省略down bias之前检查全局bank完整性。显式SIDE优先于BASE FTW保存的专家格式／bank，BASE仅供非专家与模型必需bias。普通weight式FTW通过现有专家参数名过滤被替换专家，未知条目继续参与严格权重检查。GPT-OSS模型hook读取BASE自身的普通weight、MXFP4 bank或NoWAG bank，不回读来源目录；未显式指定SIDE时保持原FTW加载。
+模型的 `load_expert_biases.bank_names` 声明必要bias组；加载FTW时先检查这些bank齐全。显式SIDE优先于BASE FTW保存的专家格式／bank，BASE仅供非专家与模型必需bias。普通weight式FTW通过现有专家参数名过滤被替换专家，未知条目继续参与严格权重检查。GPT-OSS模型hook读取BASE自身的普通weight、MXFP4 bank或NoWAG bank，不回读来源目录；未显式指定SIDE时保持原FTW加载。
 
 状态接口固定见公开契约。状态里的物理字节来自实际分配，不能把逻辑压缩率换算值当实际显存；多rank分别报告，不能用某rank乘TP假定所有rank相同。
 

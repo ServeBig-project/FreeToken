@@ -405,7 +405,9 @@ class Engine:
             self._init_offload_moe_cache(config)
         elif has_expert_weight_override(config.model_config.expert_quant):
             self._init_resident_expert_banks(config)
-            self._weights_bytes = self._baseline_free - self._sync_get_memory()[0]
+            # Resident experts are weights: both baselines move past them.
+            self._post_weights_free = self._sync_get_memory()[0]
+            self._weights_bytes = self._baseline_free - self._post_weights_free
         if hasattr(self.model, "prepare_for_runtime"):
             self.model.prepare_for_runtime()
 

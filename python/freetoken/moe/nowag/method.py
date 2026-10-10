@@ -20,6 +20,7 @@ from freetoken.kernel.nowag.moe_ops import (
     MAX_STRUCTURAL_DOWN_BLOCK_M,
     moe_middle_workspace_layout,
     nowag_fused_moe,
+    structural_down_block_m,
 )
 from freetoken.kernel.triton.dsv4.fp8_linear import (
     act_quant_fp8_inplace,
@@ -114,7 +115,7 @@ def bind_nowag_method(
              and not math.router_weight_on_down_input)
     return ExpertMethod(
         run=run,
-        workspace_spec=partial(_workspace_spec, layout, state),
+        workspace_spec=partial(_workspace_spec, layout, state, exact),
         kernel_backends=("triton", "cuda_exact_k48") if exact else ("triton",),
         format_parameters={"d": state.d, "assignment_bits": state.assignment_bits},
         speculative_graphs=True,
@@ -124,27 +125,33 @@ def bind_nowag_method(
 
 
 def _workspace_spec(
-    layout: ExpertLayout, state: NowagState, rows: int, top_k: int, *, bank_rows: int
+    layout: ExpertLayout, state: NowagState, exact: bool, rows: int, top_k: int, *,
+    bank_rows: int,
 ) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
     """Scratch for ``rows`` physical token rows over ``bank_rows`` addressable bank rows:
-    the bound over every backend the kernel may pick for this geometry (two compute
-    slabs, the largest Down alignment tile, either adaptive task queue)."""
+    the bound over the plans this binding can run. Exact-K48 may take two compute slabs,
+    the largest Down tile and either adaptive task queue; Triton alone uses one slab and
+    a Down tile that grows with the batch, so ``rows`` bounds it."""
     if rows == 0:
         return {}
     routes = rows * top_k
+    if exact:
+        plans = [dict(alignment_block_m=MAX_STRUCTURAL_DOWN_BLOCK_M, compute_slabs=2,
+                      adaptive_m_tiles=True, adaptive_residual_policy=policy)
+                 for policy in ("bm16", "tail64")]
+    else:
+        plans = [dict(alignment_block_m=structural_down_block_m(rows, top_k, layout.num_experts),
+                      compute_slabs=1, adaptive_m_tiles=False)]
     middle_rows = max(
         moe_middle_workspace_layout(
             num_routes=routes,
             num_experts=bank_rows,
-            alignment_block_m=MAX_STRUCTURAL_DOWN_BLOCK_M,
             physical_intermediate_size=state.intermediate_size,
             structural_down=True,
-            compute_slabs=2,
-            adaptive_m_tiles=True,
             caller_owned_alignment_storage=False,
-            adaptive_residual_policy=policy,
+            **plan,
         ).total_rows
-        for policy in ("bm16", "tail64")
+        for plan in plans
     )
     return {
         "middle": ((middle_rows, state.intermediate_size), torch.bfloat16),
