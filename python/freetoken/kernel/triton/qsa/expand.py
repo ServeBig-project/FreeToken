@@ -28,6 +28,7 @@ def _expand_qsa_indices_kernel(
     TOKEN_TOPK: tl.constexpr,
     OUTPUT_WIDTH: tl.constexpr,
     COLUMN_BLOCK: tl.constexpr,
+    TOKEN_SHIFT: tl.constexpr,
 ) -> None:
     # row * stride can overflow int32 for large row counts.
     row = tl.program_id(0).to(tl.int64)
@@ -77,7 +78,7 @@ def _expand_qsa_indices_kernel(
     )
     tl.store(
         output_ptr + row * stride_output_row + columns * stride_output_column,
-        tl.where(valid, token, -1),
+        tl.where(valid, token + TOKEN_SHIFT, -1),
         mask=(row < rows) & (columns < OUTPUT_WIDTH),
     )
 
@@ -90,8 +91,10 @@ def expand_qsa_block_indices(
     compress_ratio: int,
     token_topk: int,
     out: torch.Tensor,
+    shift: int = 0,
 ) -> torch.Tensor:
-    """Expand compressed blocks and compact the causal tail of the open group."""
+    """Expand compressed blocks and compact the causal tail of the open group; each token is
+    written as its storage slot, ``shift`` past its position."""
 
     if token_topk % compress_ratio:
         raise ValueError("QSA token top-k must be divisible by compression ratio")
@@ -123,6 +126,7 @@ def expand_qsa_block_indices(
         TOKEN_TOPK=token_topk,
         OUTPUT_WIDTH=output_width,
         COLUMN_BLOCK=column_block,
+        TOKEN_SHIFT=shift,
         num_warps=4,
     )
     return out

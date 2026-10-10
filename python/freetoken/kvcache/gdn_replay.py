@@ -6,7 +6,8 @@ from freetoken.kernel.triton.gdn_replay import gdn_replay_advance, gdn_replay_fo
 
 
 def replay_shapes(n_layers, conv_dim, v_heads, k_heads, key_dim, value_dim, kernel, dtype,
-                  rows, ring, draft_steps, graph_batch) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
+                  rows, ring, draft_steps, graph_batch,
+                  slot_states=()) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
     """Shape and dtype of every ReplaySSM buffer; allocation and byte budgets both use it."""
     shapes = {
         "u": ((n_layers, rows, v_heads, ring, value_dim), dtype),
@@ -19,6 +20,13 @@ def replay_shapes(n_layers, conv_dim, v_heads, k_heads, key_dim, value_dim, kern
         # Raw conv inputs by absolute position: the target's kernel-1 inputs before a round
         # plus the round's draft/verify inputs.
         shapes["window"] = ((n_layers, rows, kernel - 1 + draft_steps + 1, conv_dim), dtype)
+        # The target's declared slot states after every verify input, plus a sink input for a
+        # captured graph's padding rows; the committed one becomes the live state (the records
+        # above only stand in for the GDN state).
+        for spec in (spec for spec in slot_states if not spec.draft):
+            shapes[f"verify_{spec.name}"] = (
+                (max(1, len(spec.layer_ids)), rows, draft_steps + 2, *spec.shape),
+                spec.dtype if spec.dtype is not None else dtype)
     if graph_batch:
         # Fixed per-sequence rows, slots and offsets that captured graphs read; decode, draft
         # and verify replays run in stream order, each staging its own values right before.
@@ -28,7 +36,8 @@ def replay_shapes(n_layers, conv_dim, v_heads, k_heads, key_dim, value_dim, kern
     return shapes
 
 
-_ROW_MAJOR = ("u", "k", "g", "window")
+# Buffers that are not per record row; every other buffer keeps each row's layers adjacent.
+FIXED = ("start", "stats", "graph_rows", "graph_slots", "graph_cu")
 
 
 def _device(values, device) -> torch.Tensor:
@@ -55,7 +64,7 @@ class GdnReplay:
         # runtime a row is mapped while a request holds its table row.
         buffers, banks = {}, []
         for name, (shape, dtype) in shapes.items():
-            if name not in _ROW_MAJOR:
+            if name in FIXED:
                 buffers[name] = torch.zeros(shape, dtype=dtype, device=device)
             elif runtime is None:
                 buffers[name] = slot_major(shape, dtype, device)
@@ -68,6 +77,8 @@ class GdnReplay:
         self.u, self.k, self.g = buffers["u"], buffers["k"], buffers["g"]
         self.start, self.stats = buffers["start"], buffers["stats"]
         self.window = buffers.get("window")
+        self.verify_states = {name.removeprefix("verify_"): buffer
+                              for name, buffer in buffers.items() if name.startswith("verify_")}
         self.graph_rows = buffers.get("graph_rows")
         self.graph_slots = buffers.get("graph_slots")
         self.graph_cu = buffers.get("graph_cu")
@@ -210,7 +221,13 @@ class _ReplayRound:
         self.replay, self.rows, self.slots, self.firsts = replay, rows, slots, firsts
 
     def prepare_verify(self, batch, lengths) -> None:
-        pass  # verify reads the same rows through the batch's own metadata
+        # Verify reads the GDN rows through the batch's own metadata; the other slot states
+        # after input j of a request go to its record (row, j).
+        if self.replay.verify_states:
+            rows = [row for row, n in zip(self.rows, lengths, strict=True) for _ in range(n + 1)]
+            inputs = [j for n in lengths for j in range(n + 1)]
+            batch.verify_records = tuple(_device(v, self.replay.pool.device).long()
+                                         for v in (rows, inputs))
 
     def commit(self, retained) -> None:
         replay = self.replay
@@ -221,7 +238,11 @@ class _ReplayRound:
         rows, slots, firsts, ends = zip(*kept)
         device = replay.pool.device
         cols = _device([replay._window_cols(end) for end in ends], device)
-        replay.pool.conv_states[:, _device(slots, device)] = (
-            replay.window[:, _device(rows, device)[:, None], cols].transpose(-1, -2))
+        rows_t, slots_t = _device(rows, device), _device(slots, device)
+        replay.pool.conv_states[:, slots_t] = (
+            replay.window[:, rows_t[:, None], cols].transpose(-1, -2))
+        last = _device([end - first - 1 for first, end in zip(firsts, ends)], device)
+        for name, records in replay.verify_states.items():
+            replay.pool.slot_states[name][:, slots_t] = records[:, rows_t, last]
         for row, first, end in zip(rows, firsts, ends):
             replay.window_span[row] = (first, end)

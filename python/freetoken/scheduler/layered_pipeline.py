@@ -434,6 +434,7 @@ class LayeredPipelineExecutor:
             or self._execution.state_stage(state) != self._execution.num_stages
         ):
             raise RuntimeError("layered pipeline wave completed without final model state")
+        self._execution.advance_draft(wave.prefill_input, state)
 
         selected_requests: list[int] = []
         aborted_owners: list[Req] = []

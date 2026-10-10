@@ -1081,6 +1081,7 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
         _GLOBAL_STATE.cache_budget_bytes = int(meta.pop("cache_budget_bytes", 0) or 0)
         _GLOBAL_STATE.gpus = list(meta.pop("gpus", None) or [])
         _GLOBAL_STATE.execution = meta.pop("execution", None)
+        _GLOBAL_STATE.stats.speculative.update(meta.pop("speculative", None) or {})
         _GLOBAL_STATE.unit_bytes = meta
 
     # Early-bind: supervise the backend on a daemon thread so uvicorn can bind

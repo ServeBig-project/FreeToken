@@ -265,6 +265,10 @@ def parse_args(
              "(default; AR inside them), in both, or only inside them.",
     )
     parser.add_argument(
+        "--speculative-method", choices=["mtp"], default=ServerArgs.speculative_method,
+        help="Draft with the checkpoint's native MTP layers (all BF16, resident on the GPU).",
+    )
+    parser.add_argument(
         "--speculative-draft-model-path", type=str,
         default=ServerArgs.speculative_draft_model_path,
         help="DFlash checkpoint directory or Hugging Face model; omitted uses self drafting.",

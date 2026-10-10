@@ -27,6 +27,9 @@ class EngineConfig:
     # Where layered batching may run SD: outside prefill waves, in both, or only inside.
     speculative_phase: str = "outwave"
     speculative_draft_model_path: str | None = None
+    # Draft source by name: "mtp" drafts with the checkpoint's native MTP layers. None keeps the
+    # draft path's DFlash, or self drafting.
+    speculative_method: str | None = None
     speculative_draft_experts: int = 3
     speculative_draft_residency: str = "off"
     speculative_adaptive_cost: bool = False
@@ -146,6 +149,12 @@ class EngineConfig:
             raise ValueError("--gdn-replay-buffer-len must be a power of two >= 4")
         if self.gdn_state_budget_bytes is not None and self.gdn_state_budget_bytes <= 0:
             raise ValueError("--gdn-state-budget-bytes must be positive")
+        if self.speculative_method not in (None, "mtp"):
+            raise ValueError(f"--speculative-method must be mtp, got {self.speculative_method!r}")
+        if (self.speculative_method and self.speculative_draft_model_path is not None
+                and self.speculative_num_steps != 0):
+            raise ValueError("--speculative-method mtp drafts with the model's own MTP layers; "
+                             "drop --speculative-draft-model-path (a DFlash drafter)")
         if self.speculative_num_steps is None:
             return  # the engine resolves it against the model's components, then validates
         # An explicit 0 turns SD off even beside a draft path, which is then ignored.
@@ -167,6 +176,11 @@ class EngineConfig:
                 raise ValueError("DFlash does not use target-expert residency, missing loads or route prefetch")
             if self.dtype != torch.bfloat16 or self.page_size != 1:
                 raise ValueError("DFlash requires BF16 and page size 1")
+        if self.speculative_drafter == "mtp" and (
+                self.speculative_draft_residency != "off" or self.speculative_draft_load_missing
+                or self.speculative_verify_prefetch or self.speculative_adaptive_cost):
+            raise ValueError("native MTP drafting does not use target-expert residency, missing "
+                             "loads, route prefetch or the self-drafting cost model")
         if self.speculative_draft_residency not in ("off", "router"):
             raise ValueError("speculative_draft_residency must be off or router")
         if self.speculative_draft_residency != "off" and self.speculative_num_steps <= 0:
@@ -192,7 +206,7 @@ class EngineConfig:
         if not self.speculative_num_steps:
             return
         if self.tp_info.size != 1:
-            raise ValueError("self-speculative decoding requires a single GPU (tp_size=1)")
+            raise ValueError("speculative decoding requires a single GPU (tp_size=1)")
         policy = getattr(self, "batching_policy", "legacy")
         if policy not in ("auto", "legacy", "layered-pipeline"):
             raise ValueError("speculative decoding requires --batching-policy legacy or layered-pipeline")
@@ -204,14 +218,16 @@ class EngineConfig:
         from freetoken.moe.routing import ROUTERS
 
         model = self.model_config
-        if not external_draft and (not model.num_experts or model.moe_router not in ROUTERS):
+        self_draft = self.speculative_drafter == "self"
+        if self_draft and (not model.num_experts or model.moe_router not in ROUTERS):
             raise ValueError("self-speculative decoding requires a shared MoE router component")
-        unsupported = {model.attn_type_for_layer(i) for i in range(model.num_layers)} - {
-            AttnType.FULL, AttnType.LINEAR,
-        }
+        # A target verifies drafts over QSA; drafting from its own state there is not served.
+        served = {AttnType.FULL, AttnType.LINEAR} | (set() if self_draft else {AttnType.QSA})
+        unsupported = {model.attn_type_for_layer(i) for i in range(model.num_layers)} - served
         if unsupported:
-            raise ValueError(f"self-speculative state handling is unavailable for {unsupported}")
-        if not external_draft and self.speculative_draft_experts > self.model_config.num_experts_per_tok:
+            action = "draft from its own state" if self_draft else "verify drafts"
+            raise ValueError(f"the target cannot {action} over {unsupported} attention yet")
+        if self_draft and self.speculative_draft_experts > self.model_config.num_experts_per_tok:
             raise ValueError(
                 "speculative_draft_experts must not exceed the target's experts per token "
                 f"({self.model_config.num_experts_per_tok})"
@@ -244,6 +260,13 @@ class EngineConfig:
         return config
 
     @property
+    def speculative_drafter(self) -> str | None:
+        """What drafts when SD is on: mtp, dflash (a draft checkpoint) or self; None for AR."""
+        if not self.speculative_num_steps:
+            return None
+        return self.speculative_method or ("dflash" if self.speculative_draft_model_path else "self")
+
+    @property
     def legacy_sd_controls(self) -> bool:
         """Whether an SD control that only legacy batching runs is requested."""
         return bool(self.speculative_draft_residency != "off" or self.speculative_adaptive_cost
@@ -254,13 +277,15 @@ class EngineConfig:
         from freetoken.attention import attention_backend_info
 
         backend = self.attention_backend
-        graph_attention = (backend != "auto" and "," not in backend
-                           and attention_backend_info(backend).speculative_graphs)
+        info = attention_backend_info(backend) if backend != "auto" and "," not in backend else None
+        # A backend with its own fixed page size captures at it; the others need single tokens.
+        graph_attention = (info is not None and info.speculative_graphs
+                           and (self.page_size == 1 or info.page_sizes is not None))
         return bool(
             0 < self.speculative_num_steps <= 8
             and self.dtype == torch.bfloat16
             and graph_attention and self.moe_backend in ("offload", "hybrid")
-            and self.page_size == 1 and self.tp_info.size == 1
+            and self.tp_info.size == 1
             and getattr(self, "batching_policy", "legacy") in ("legacy", "layered-pipeline")
             and self.cuda_graph_max_bs != 0 and self.cuda_graph_bs != []
         )

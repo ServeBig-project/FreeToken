@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import gc
 import math
 import os
@@ -397,6 +398,11 @@ class Engine:
         self.model.load_state_dict(self._load_weight_state_dict(config))
         # The drafter's own weights count as resident weights in every budget.
         self._load_dflash(config)
+        self.mtp = None
+        if config.speculative_drafter == "mtp":
+            from freetoken.speculative.mtp import MTPRuntime
+
+            self.mtp = MTPRuntime(self, self.model.load_mtp(config.model_path, self.device))
         post_weights_free = self._sync_get_memory()[0]
         self._weights_bytes = self._baseline_free - post_weights_free
         # Pool-budget baseline for the desktop cache sliders: free VRAM after the weights are
@@ -1641,6 +1647,8 @@ class Engine:
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         logits = self.compute_logits(batch)
+        if self.mtp is not None:
+            self.mtp.advance(batch, batch.draft_features)
         for req in batch.reqs:
             req.complete_one()
 
@@ -1830,7 +1838,7 @@ class Engine:
                 dense_quant=effective_dense_precision(config.model_config),
                 kv_dtype=kv_storage_name(config.kv_dtype, config.dtype),
                 kv_placement=config.kv_placement,
-                drafter=("dflash" if config.speculative_draft_model_path else "self") if steps else None,
+                drafter=config.speculative_drafter,
                 speculative_num_steps=steps,
                 speculative_phase=(config.speculative_phase if layered else "outwave") if steps else None,
                 cuda_graph=dict(
@@ -2712,23 +2720,32 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
 
     if config.speculative_num_steps == 0:
         override("speculative_draft_model_path", None)
+        override("speculative_method", None)
     elif config.speculative_num_steps is None:
-        # A draft model, an SD phase or an SD (or DFlash) control asks for SD; without one the
+        # A draft source, an SD phase or an SD (or DFlash) control asks for SD; without one the
         # default is AR because self-drafting measured slower than AR.
-        asked = (config.speculative_draft_model_path or config.speculative_phase != "outwave"
+        asked = (config.speculative_draft_model_path or config.speculative_method
+                 or config.speculative_phase != "outwave"
                  or config.legacy_sd_controls or config.dflash_attention_window
                  or config.dflash_adaptive_observe_only)
         override("speculative_num_steps", 4 if asked else 0)
+    if config.speculative_num_steps and config.speculative_method == "mtp":
+        if not model_config.mtp_layers:
+            raise ValueError(f"--speculative-method mtp: {model_config.model_type} has no native "
+                             "MTP layers this server can draft with")
+        # The MTP layers keep their attention history in the target's pages.
+        model_config = model_config.with_mtp_history()
+        override("model_config", model_config)
+    elif any(spec.draft for spec in getattr(model_config, "slot_states", ())):
+        # A drafter's own states exist only while that drafter runs; AR does not pay for them.
+        model_config = dataclasses.replace(model_config, slot_states=tuple(
+            spec for spec in model_config.slot_states if not spec.draft))
+        override("model_config", model_config)
     if config.speculative_num_steps:
         config.__post_init__()  # re-check the SD constraints against the resolved components
         # A shared runtime has no GDN partition: SD rounds are sized from the joint budget.
         if config.runtime_cache_gib is None and (shortfall := _sd_state_shortfall(config)):
             raise ValueError(shortfall)
-        if AttnType.QSA in required_attn_types:
-            raise ValueError(
-                "speculative decoding is not implemented for QSA sparse attention "
-                f"({model_config.model_type}); pass --speculative-num-steps 0"
-            )
 
     if config.speculative_num_steps and config.cuda_graph_max_bs != 0 and config.cuda_graph_bs != []:
         # Never fall back silently: eager SD is far slower and would mislead comparisons.

@@ -17,6 +17,7 @@ class SpeculativeGraphs:
         self.router = (config.speculative_draft_residency == "router"
                        and not config.speculative_draft_load_missing)
         self.graphs = {}
+        self.features = {}
         # Full-window verify rows over the decode layer ranges, for rounds beside a wave.
         self.ranges: dict[tuple[int, int, int], _LayerRangeCapture] = {}
         self.range_inputs = None
@@ -65,7 +66,7 @@ class SpeculativeGraphs:
             for bs in reversed(self.batch_sizes):
                 if bs > max_tokens:
                     continue
-                if config.speculative_draft_model_path is None:
+                if config.speculative_drafter == "self":
                     self._capture(model, "draft", [1] * bs)
                 limit = min(bs * self.query_width, max_tokens)
                 # Exact shapes where the admission policy could flip, and the full window. The
@@ -106,6 +107,8 @@ class SpeculativeGraphs:
             with torch.cuda.graph(graph, pool=self.runner.pool, stream=self.runner.stream):
                 self.buffer.logits[:tokens] = forward_model(model)
         self.graphs[(phase, len(lengths), tokens)] = graph
+        # The model's final features of every row, rewritten by each replay (native MTP).
+        self.features[(phase, len(lengths), tokens)] = batch.draft_features
 
     def _capture_ranges(self, model, batch_sizes):
         runner = self.runner
@@ -165,11 +168,15 @@ class SpeculativeGraphs:
         reqs = []
         offset = 0
         self.buffer.input_ids[:tokens].zero_()
+        # Single-token pages: requests take consecutive slots. Larger pages: every request
+        # writes the dummy page, at its in-page positions.
+        dummy = int(self.dummy_slot) if get_global_ctx().page_size > 1 else None
         for index, length in enumerate(lengths):
             req = copy(runner.dummy_req)
             req.table_idx, req.cached_len, req.device_len = index, 0, length
             reqs.append(req)
-            table[index, :length] = torch.arange(offset, offset + length, device=runner.device)
+            first = offset if dummy is None else dummy
+            table[index, :length] = torch.arange(first, first + length, device=runner.device)
             self.buffer.out_loc[offset : offset + length] = table[index, :length]
             self.buffer.positions[offset : offset + length] = torch.arange(length, device=runner.device)
             offset += length
@@ -212,6 +219,7 @@ class SpeculativeGraphs:
         key = self._key(batch)
         self._stage(batch, key[2])
         self.graphs[key].replay()
+        batch.draft_features = self.features[key]
         return self.buffer.logits[:batch.positions.numel()]
 
     def _stage(self, batch, physical):

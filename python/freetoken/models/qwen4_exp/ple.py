@@ -155,6 +155,8 @@ class PLEMetadata:
       state_slots    [B] int64 device, linear-state slot per request
       fresh_slots    [B] bool device or None: the request starts a new sequence
       is_decode      one token per request, read off the persistent decode view
+      verify         speculative verify: the record of each row's state (``batch.verify_records``);
+                     the live states stay as they are
     """
 
     input_ids: torch.Tensor
@@ -164,6 +166,7 @@ class PLEMetadata:
     state_slots: torch.Tensor
     fresh_slots: torch.Tensor | None
     is_decode: bool
+    verify: tuple[torch.Tensor, ...] | None = None
 
 
 def build_ple_metadata(batch: Batch, context_pool: torch.Tensor, eos: int) -> PLEMetadata:
@@ -171,8 +174,14 @@ def build_ple_metadata(batch: Batch, context_pool: torch.Tensor, eos: int) -> PL
     the two states always index the same slots. The decode-only view is pure device
     arithmetic over the persistent decode buffers (capture-safe)."""
     fla = batch.fla_metadata
-    if fla.verify is not None:
-        raise NotImplementedError("qwen4_exp does not serve speculative verify")
+    if batch.is_speculative_verify:
+        # Rows continue each request's live state (ReplaySSM views them as one decode path).
+        path = fla.prefill if fla.prefill is not None else fla.decode
+        slots = path.cache_indices.long()
+        return PLEMetadata(batch.input_ids, path.cu_seqlens.long(),
+                           tuple(r.extend_len for r in batch.reqs),
+                           context_pool.index_select(0, slots).long(), slots, None, False,
+                           batch.verify_records)
     device = batch.input_ids.device
     if fla.prefill is None:
         slots = fla.decode.cache_indices.long()
@@ -359,8 +368,19 @@ class PLELayer(BaseOP):
             track = (prefill.track_boundary_row + batch.decode_size, prefill.track_dst)
             self._write_track_snapshot(states, x, *track)
         out = gated + self._short_conv(x, meta, states)
-        commit_ngram_context(meta, context_pool, track)
+        if meta.verify is None:
+            commit_ngram_context(meta, context_pool, track)
+        else:
+            rows, req = self._verify_rows(meta, x.shape[0])
+            pool.write_verify(PLE_NGRAM_STATE, None, meta.verify, ngram_context_after(meta, rows, req))
         return out
+
+    @staticmethod
+    def _verify_rows(meta: PLEMetadata, total: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Every row and its request; a captured graph's padding rows join the last request."""
+        rows = torch.arange(total, device=meta.cu_seqlens.device)
+        req = torch.searchsorted(meta.cu_seqlens, rows, right=True) - 1
+        return rows, req.clamp_(max=len(meta.seq_lens) - 1)
 
     def _write_track_snapshot(self, states: torch.Tensor, x: torch.Tensor, rows: torch.Tensor,
                               dst: torch.Tensor) -> None:
@@ -380,6 +400,8 @@ class PLELayer(BaseOP):
         """silu of the dilated depthwise conv over [state | x]; rolls the per-request state."""
         if meta.is_decode:
             return self._decode_conv(x, meta, states)
+        if meta.verify is not None:
+            return self._verify_conv(x, meta, states)
         return self._prefill_conv(x, meta, states)
 
     def _decode_conv(self, x: torch.Tensor, meta: PLEMetadata, states: torch.Tensor) -> torch.Tensor:
@@ -389,6 +411,23 @@ class PLELayer(BaseOP):
         window = torch.cat([state[..., :: self.dilation], column], dim=-1).float()
         out = (window * self.conv1d.weight.squeeze(1).float()).sum(-1)
         states.index_copy_(0, meta.state_slots, torch.cat([state[..., 1:], column], dim=-1).to(states.dtype))
+        return F.silu(out.to(x.dtype))
+
+    def _verify_conv(self, x: torch.Tensor, meta: PLEMetadata, states: torch.Tensor) -> torch.Tensor:
+        """Verify rows: each row's window comes from its request's earlier rows or live history,
+        gathered on the device (the row layout changes per round, so a captured graph cannot
+        bake host-built indices). The history after each row goes to its verify record."""
+        rows, req = self._verify_rows(meta, x.shape[0])
+        first = meta.cu_seqlens[req].unsqueeze(1)
+        source = rows.unsqueeze(1) + torch.arange(-self.state_len, 1, device=x.device)
+        state = states.index_select(0, meta.state_slots.index_select(0, req)).to(x.dtype)
+        column = (source - first + self.state_len).clamp_(0, self.state_len - 1)
+        window = torch.where((source >= first).unsqueeze(1),
+                             x[source.clamp_min(0)].transpose(1, 2),
+                             state.gather(2, column.unsqueeze(1).expand(-1, x.shape[1], -1)))
+        get_global_ctx().linear_state_pool.write_verify(
+            PLE_CONV_STATE, self.layer_id, meta.verify, window[..., 1:])
+        out = (window[..., :: self.dilation].float() * self.conv1d.weight.squeeze(1).float()).sum(-1)
         return F.silu(out.to(x.dtype))
 
     def _prefill_conv(self, x: torch.Tensor, meta: PLEMetadata, states: torch.Tensor) -> torch.Tensor:

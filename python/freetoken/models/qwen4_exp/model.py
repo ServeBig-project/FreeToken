@@ -73,9 +73,14 @@ class Qwen4ExpDecoderLayer(BaseOP):
     def forward(self, R: torch.Tensor, batch: Batch) -> torch.Tensor:
         if self.ple is not None:
             R = R + self.ple.forward(R, batch)
+        if self._is_linear:
+            return self.residual(R, self.linear_attn.forward)
+        return self.residual(R, lambda x: self.self_attn.forward(x, batch))
+
+    def residual(self, R: torch.Tensor, attention) -> torch.Tensor:
+        """The attention and MLP blocks around their hyper-connections (the MTP layer's too)."""
         x, s = self.attn_hyper_connection.mix(R)
-        y = self.linear_attn.forward(x) if self._is_linear else self.self_attn.forward(x, batch)
-        R = self.attn_hyper_connection.combine(R, y, s)
+        R = self.attn_hyper_connection.combine(R, attention(x), s)
         x, s = self.mlp_hyper_connection.mix(R)
         return self.mlp_hyper_connection.combine(R, self.mlp.forward(x), s)
 
@@ -101,11 +106,21 @@ class Qwen4ExpModel(BaseOP):
 
 
 class Qwen4ExpForCausalLM(BaseLLMModel):
+    # With a native MTP drafter every forward leaves its rows' final streams on its batch.
+    keeps_streams = False
+
     def __init__(self, config: ModelConfig) -> None:
         self._config = config
         self.model = Qwen4ExpModel(config)
         self.lm_head = make_lm_head(config, self.model.embed_tokens)
         super().__init__()
+
+    def load_mtp(self, model_path: str, device: torch.device):
+        """The checkpoint's MTP draft layer; from now on forwards keep their final streams."""
+        from .mtp import load_mtp
+
+        self.keeps_streams = True
+        return load_mtp(model_path, self._config, device)
 
     def load_host_tables(self, engine_config) -> None:
         """Attach the PLE n-gram table: the pinned checkpoint bank, or zeros for dummy weights."""
@@ -161,6 +176,11 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
         return state.next_layer
 
     @staticmethod
+    def layer_group_features(state: StreamState) -> torch.Tensor:
+        """The final streams of a state that ran every layer: a native MTP drafter's input."""
+        return state.streams
+
+    @staticmethod
     def layer_group_merge_states(decode: StreamState, prefill: StreamState) -> StreamState:
         if decode.next_layer != prefill.next_layer:
             raise RuntimeError("decode and prefill states are at different layers")
@@ -210,6 +230,8 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
     ) -> torch.Tensor:
         if state.next_layer != self.layer_group_num_layers:
             raise ValueError("cannot finish layer-group prefill before every decoder layer ran")
+        if self.keeps_streams:
+            get_global_ctx().batch.draft_features = state.streams
         if output_indices is None:
             hidden = self.model.hyper_connection_mixer.mix(state.streams)[0]
             return self.lm_head.forward(hidden)

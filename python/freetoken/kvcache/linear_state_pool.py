@@ -38,13 +38,14 @@ def _linear_local_dims(
     return len(group.layer_ids), local_conv_dim, local_v_heads, local_k_heads
 
 
-def _replay_shapes(group, tp_size, dtype, records):
+def _replay_shapes(group, tp_size, dtype, records, slot_states=()):
     """ReplaySSM buffers for ``records = (rows, ring, draft_steps, graph_rows)``."""
     from .gdn_replay import replay_shapes
 
     n_layers, conv_dim, v_heads, k_heads = _linear_local_dims(group, tp_size)
     return replay_shapes(n_layers, conv_dim, v_heads, k_heads, group.key_head_dim,
-                         group.value_head_dim, group.conv_kernel_dim, dtype, *records)
+                         group.value_head_dim, group.conv_kernel_dim, dtype, *records,
+                         slot_states)
 
 
 class LinearStatePool:
@@ -98,7 +99,7 @@ class LinearStatePool:
         self.padding_slot = fixed_slots
         self.replay = None
         # ReplaySSM: each live slot is a checkpoint completed by its request's update records.
-        self._replay_shapes = (_replay_shapes(group, tp_size, dtype, records)
+        self._replay_shapes = (_replay_shapes(group, tp_size, dtype, records, slot_states)
                                if records is not None else None)
         self._allocate(conv, rec, runtime)
 
@@ -153,6 +154,14 @@ class LinearStatePool:
         """One declared sibling state, ``[num_slots, *shape]``; ``layer_id`` picks its layer row."""
         layers = self._state_layer_index[name]
         return self.slot_states[name][0 if layer_id is None else layers[layer_id]]
+
+    def write_verify(self, name: str, layer_id: int | None, records, values) -> None:
+        """Verify: a declared state after each input (``values [inputs, *shape]``) into the
+        records ``batch.verify_records`` names, the scratch slots or with ReplaySSM its own;
+        the round's commit makes the retained one live."""
+        layer = 0 if layer_id is None else self._state_layer_index[name][layer_id]
+        target = (self.slot_states if self.replay is None else self.replay.verify_states)[name][layer]
+        target[records] = values.to(target.dtype)
 
     def capture_position(self, start: int, target: int) -> int:
         """Deepest position at or before ``target`` whose state a prefill extend starting at
@@ -400,10 +409,13 @@ def record_banks(config) -> list[tuple[int, int]]:
     records = replay_records(config)
     if records is None:
         return []
+    from .gdn_replay import FIXED
+
     shapes = _replay_shapes(config.model_config.linear_attention_group(), config.tp_info.size,
-                            config.dtype, (1, records[1], records[2], 0))
+                            config.dtype, (1, records[1], records[2], 0),
+                            getattr(config.model_config, "slot_states", ()))
     return [(1, math.prod(shape) * dtype.itemsize) for name, (shape, dtype) in shapes.items()
-            if name in ("u", "k", "g", "window")]
+            if name not in FIXED]
 
 
 __all__ = ["LinearStatePool", "linear_state_bytes_per_req"]
@@ -444,7 +456,7 @@ def replay_buffer_bytes(config) -> int:
     if records is None:
         return 0
     shapes = _replay_shapes(config.model_config.linear_attention_group(), config.tp_info.size,
-                            config.dtype, records)
+                            config.dtype, records, getattr(config.model_config, "slot_states", ()))
     return sum(math.prod(shape) * dtype.itemsize for shape, dtype in shapes.values())
 
 
@@ -526,6 +538,10 @@ class LinearSpeculativeState:
             self.states.append((live, self.slots[offset:offset + length + 1]))
             offset += length + 1
         batch.speculative_states = self.states
+        if self.pool.slot_states:
+            # Declared slot states after input j ride its scratch slot like the GDN state.
+            batch.verify_records = (torch.tensor(self.slots[:offset], dtype=torch.int64,
+                                                 pin_memory=True).to(self.pool.device, non_blocking=True),)
 
     def commit(self, retained):
         # Output token j was sampled after computing position j. A stop at output j
@@ -538,4 +554,8 @@ class LinearSpeculativeState:
             for layer in range(self.pool.num_linear_layers):
                 for tensor in (self.pool.recurrent_states[layer], self.pool.conv_states[layer]):
                     tensor.index_copy_(0, live, tensor.index_select(0, src))
+            for spec in self.pool._slot_specs:
+                if not spec.draft:
+                    tensor = self.pool.slot_states[spec.name]
+                    tensor[:, live] = tensor[:, src]
         self.pool.free(self.claimed if self.claimed is not None else self.slots)

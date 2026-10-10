@@ -113,6 +113,8 @@ def _run_scheduler(
                 meta["gpus"] = gpus
                 meta["prefix_cache"] = scheduler.cache_manager.status()
                 meta["execution"] = scheduler.engine.execution_status()
+                if scheduler.speculative is not None:  # drafter facts before the first round
+                    meta["speculative"] = scheduler.speculative.snapshot()
                 ack_queue.put(("meta", meta))
             except Exception:  # noqa: BLE001 -- metadata is a nicety; readiness is not
                 pass

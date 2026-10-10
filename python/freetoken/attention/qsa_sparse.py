@@ -79,6 +79,9 @@ class QSASparseMetadata(BaseAttnMetadata):
     cmp_rows:         torch.Tensor | None = None  # [T] int32, compressed slab destination
     ring_rows:        torch.Tensor | None = None  # [T] int32, flat pending row or -1
     positions:        torch.Tensor | None = None  # [T] int32, logical query positions
+    verify_records:   tuple | None = None         # speculative verify: per-row pending records
+    snapshots:        tuple | None = None         # (rows, slots): the open group after a row
+    shift:            int = 0  # storage slot - logical position of the rows' K/V (MTP: 1)
     # fmt: on
 
     def get_last_indices(self, bs: int) -> torch.Tensor:
@@ -88,7 +91,7 @@ class QSASparseMetadata(BaseAttnMetadata):
 class QSASparseAttnBackend(BaseAttnBackend):
     def __init__(self, config: ModelConfig) -> None:
         from freetoken.kvcache.qsa_pool import QSAKVCache
-        from freetoken.models.qwen4_exp.config import QSA_PENDING_STATE
+        from freetoken.models.qwen4_exp.config import MTP_PENDING_STATE, QSA_PENDING_STATE
 
         args = config.qwen4_args
         assert args is not None, "qsa_sparse backend needs ModelConfig.qwen4_args"
@@ -119,6 +122,9 @@ class QSASparseAttnBackend(BaseAttnBackend):
         group = [g for g in config.attention_groups if getattr(g, "index_ratio", 1) > 1]
         assert len(group) == 1, f"expected one QSA attention group, got {len(group)}"
         self._idx_slot = {lid: i for i, lid in enumerate(group[0].layer_ids)}
+        # The MTP layers' history (ids past the target's) keeps its open group in its own state.
+        self._pending_states = {lid: QSA_PENDING_STATE if lid < config.num_layers
+                                else MTP_PENDING_STATE for lid in group[0].layer_ids}
         self.rotary_config = group[0].rotary_config
         self._index_cos_sin: torch.Tensor | None = None
         self._block_topk_kernel = _resolve_block_topk()
@@ -134,7 +140,7 @@ class QSASparseAttnBackend(BaseAttnBackend):
 
     def _pending(self, layer_id: int) -> torch.Tensor:
         """This layer's pending raw index keys: ``[num_state_slots, ratio, dim]``."""
-        return get_global_ctx().linear_state_pool.slot_state(self.pending_state, layer_id)
+        return get_global_ctx().linear_state_pool.slot_state(self._pending_states[layer_id], layer_id)
 
     def _index_rope_cache(self) -> torch.Tensor:
         """cos/sin table of the indexer rope: the attention's frequencies and rotary_dim over
@@ -259,12 +265,8 @@ class QSASparseAttnBackend(BaseAttnBackend):
         layer_id: int,
         batch: Batch,
     ) -> torch.Tensor:
-        from freetoken.kernel.triton.qsa import qsa_sparse_paged_attention
-
         md = batch.attn_metadata
         assert isinstance(md, QSASparseMetadata)
-        slot = self._idx_slot[layer_id]
-        self.kvcache.store_kv(k, v, batch.out_loc, layer_id)
         if md.block_table is None:
             self._snapshot_decode(md, batch)
         if md.cmp_rows is None:
@@ -274,10 +276,23 @@ class QSASparseAttnBackend(BaseAttnBackend):
             self._plan_index_writes(md, batch)
         if batch.fla_metadata.prefill is not None:
             batch.fla_metadata.prefill.keep_start(self._pending(layer_id))
-        self._update_index_cache(index, md, layer_id, slot)
-        indices = self._select(index, md, slot)
+        self.write_history(k, v, index, layer_id, batch.out_loc, md)
+        return self.attend(q, self.select(index, md, layer_id), md, layer_id)
+
+    def write_history(self, k, v, index, layer_id: int, out_loc: torch.Tensor,
+                      md: QSASparseMetadata) -> None:
+        """Everything a later query reads of these rows: their K/V at ``out_loc``, the
+        compressed key of each group they close and the open group's raw keys."""
+        self.kvcache.store_kv(k, v, out_loc, layer_id)
+        self._update_index_cache(index, md, layer_id, self._idx_slot[layer_id])
+
+    def attend(self, q: torch.Tensor, indices: torch.Tensor, md: QSASparseMetadata,
+               layer_id: int) -> torch.Tensor:
+        """Attention of ``q`` over the stored rows ``indices`` names."""
+        from freetoken.kernel.triton.qsa import qsa_sparse_paged_attention
+
         if self.kvcache.residency is not None:
-            return self._attend_tiered(q, indices, md, layer_id, slot)
+            return self._attend_tiered(q, indices, md, layer_id, self._idx_slot[layer_id])
         return qsa_sparse_paged_attention(
             q,
             self.kvcache.k_cache(layer_id),
@@ -332,25 +347,28 @@ class QSASparseAttnBackend(BaseAttnBackend):
         return out
 
     def _plan_index_writes(self, md: QSASparseMetadata, batch: Batch) -> None:
-        """Per-token slab row and pending row for this forward (layer-invariant). Pure device
-        arithmetic: no host sync, graph-capturable. The pending slot per request is the GDN
-        state slot of the batch's linear metadata (decode rows first, then prefill rows)."""
+        """The pending slot per request is the GDN state slot of the batch's linear metadata
+        (decode rows first, then prefill rows)."""
         fla = batch.fla_metadata
-        if fla.verify is not None:
-            raise NotImplementedError("qsa_sparse does not serve speculative verify")
+        md.verify_records = batch.verify_records
         slots = fla.decode.cache_indices if fla.prefill is None else (
             fla.prefill.cache_indices if fla.decode is None
             else torch.cat([fla.decode.cache_indices, fla.prefill.cache_indices])
         )
+        self.plan_writes(md, batch.out_loc, batch.positions, slots)
+
+    def plan_writes(self, md: QSASparseMetadata, out_loc: torch.Tensor, positions: torch.Tensor,
+                    slots: torch.Tensor) -> None:
+        """Per-row slab row and pending row (layer-invariant). Pure device arithmetic: no host
+        sync, graph-capturable. A row closes its group at the group's last logical position;
+        the group's compressed key goes to the slab row of that row's storage slot."""
         md.state_slots = slots
-        md.positions = batch.positions
-        out_loc = batch.out_loc.to(torch.int64)
-        positions = batch.positions.to(torch.int64)
+        md.positions = positions
+        out_loc = out_loc.to(torch.int64)
+        positions = positions.to(torch.int64)
         rows = torch.arange(out_loc.numel(), device=self.device)
         req = md.token_to_req.to(torch.int64)
-        # out_loc % page_size == position % page_size and index_ratio divides page_size, so a
-        # group closes exactly on out_loc % index_ratio == index_ratio - 1.
-        closing = out_loc % self.ratio == self.ratio - 1
+        closing = positions % self.ratio == self.ratio - 1
         scratch = self.kvcache.cmp_scratch_base + md.table_idx.to(torch.int64).index_select(0, req)
         md.cmp_rows = torch.where(closing, out_loc // self.ratio, scratch).to(torch.int32)
         # Only a request's last index_ratio rows survive to the next forward; the rest are
@@ -380,18 +398,42 @@ class QSASparseAttnBackend(BaseAttnBackend):
             pooled, first, self._index_rope_cache(), index.k_norm_weight, index.eps,
             self.kvcache.cmp_k_cache(slot), dest_rows=md.cmp_rows,
         )
+        if md.verify_records is not None:
+            rings = self._rings(index.k, pending, md, torch.arange(rows, device=self.device))
+            get_global_ctx().linear_state_pool.write_verify(
+                self.pending_state, layer_id, md.verify_records, rings)
+            return
+        if md.snapshots is not None:
+            snapshot_rows, slots = md.snapshots
+            pending.index_copy_(0, slots, self._rings(index.k, pending, md, snapshot_rows))
         # After the compression read: the pending rows this forward overwrites are exactly the
         # ones a straddling group just consumed.
         qsa_store_rows(pending, md.ring_rows, index.k)
 
-    def _select(self, index, md: QSASparseMetadata, slot: int) -> torch.Tensor:
-        """Score complete visible blocks, take the top-k, expand them to token indices."""
+    def _rings(self, keys, pending, md: QSASparseMetadata, rows: torch.Tensor) -> torch.Tensor:
+        """The open group's raw keys once each of ``rows`` is stored: the untouched live keys
+        updated with the request's rows of this forward up to it."""
+        req = md.token_to_req.long()[rows]
+        first = md.cu_seqlens.long()[req]
+        positions = md.positions.long()
+        ring = pending.index_select(0, md.state_slots.long()[req])
+        n = torch.arange(rows.numel(), device=self.device)
+        for back in range(self.ratio):
+            src = (rows - back).clamp_min(0)
+            column = positions[src] % self.ratio
+            ring[n, column] = torch.where((rows - back >= first).unsqueeze(1), keys[src],
+                                          ring[n, column])
+        return ring
+
+    def select(self, index, md: QSASparseMetadata, layer_id: int) -> torch.Tensor:
+        """Score complete visible blocks, take the top-k, expand them to the stored rows."""
         from freetoken.kernel.triton.qsa import (
             expand_qsa_block_indices,
             qsa_index_norm_rope,
             qsa_mqa_paged,
         )
 
+        slot = self._idx_slot[layer_id]
         rows = index.q.shape[0]
         positions = md.positions
         q_index = self._scratch("q_index", rows, self.index_heads, self.index_head_dim, dtype=self.dtype)
@@ -412,12 +454,13 @@ class QSASparseAttnBackend(BaseAttnBackend):
             qsa_mqa_paged(
                 q_index[chunk], cmp_pages, md.block_table, md.token_to_req[chunk],
                 positions[chunk], md.seq_lens, self.ratio, logits, visible,
+                block_shift=md.shift,
             )
             blocks = self._scratch("blocks", end - start, self.block_topk, dtype=torch.int32)
             self._top_blocks(logits, visible, blocks)
             expand_qsa_block_indices(
                 blocks, positions[chunk], md.seq_lens, md.token_to_req[chunk],
-                self.ratio, self.token_topk, indices[chunk],
+                self.ratio, self.token_topk, indices[chunk], shift=md.shift,
             )
         return indices
 
@@ -521,6 +564,53 @@ class QSASparseAttnBackend(BaseAttnBackend):
     def reset_capture(self) -> None:
         super().reset_capture()
         self._graph = {}
+
+    def create_speculative_graphs(self, max_seq_len: int, max_batch_size: int):
+        return QSASpeculativeGraphs(self)
+
+
+class QSASpeculativeGraphs:
+    """Verify graphs: the rows' request map, lengths, page rows and write plan sit in static
+    buffers restaged before each replay (a layer-range graph may replay alone, as for decode).
+    A capture reads and writes only the dummy page; padding rows join the last request and
+    write the scratch rows."""
+
+    _NAMES = ("token_to_req", "cu_seqlens", "seq_lens", "table_idx", "block_table")
+
+    def __init__(self, backend: QSASparseAttnBackend) -> None:
+        self.backend = backend
+        self.static: dict[str, torch.Tensor] | None = None
+
+    def _stage(self, md: QSASparseMetadata, batch: Batch) -> None:
+        if self.static is None:  # the first capture is the largest
+            width = -(-get_global_ctx().page_table.shape[1] // self.backend.page_size)
+            self.static = {name: torch.zeros_like(getattr(md, name)) for name in self._NAMES}
+            self.static["block_table"] = md.block_table.new_zeros(md.block_table.shape[0], width)
+            self.static["cmp_rows"], self.static["ring_rows"] = (
+                torch.zeros_like(md.token_to_req) for _ in range(2))
+        bs, rows = md.seq_lens.numel(), md.token_to_req.numel()
+        static = self.static
+        static["token_to_req"][rows:].fill_(bs - 1)
+        static["cmp_rows"][rows:].fill_(self.backend.kvcache.cmp_scratch_base)
+        static["ring_rows"][rows:].fill_(-1)
+        for name in self._NAMES:
+            source = getattr(md, name)
+            target = static[name][tuple(slice(0, n) for n in source.shape)]
+            target.copy_(source)
+            setattr(md, name, target)
+        self.backend._plan_index_writes(md, batch)
+        for name in ("cmp_rows", "ring_rows"):
+            target = static[name][:rows]
+            target.copy_(getattr(md, name))
+            setattr(md, name, target)
+
+    def prepare_capture(self, batch: Batch, table: torch.Tensor) -> None:
+        self.backend.prepare_metadata(batch)
+        batch.attn_metadata.block_table[:] = table[:, :1] // self.backend.page_size
+        self._stage(batch.attn_metadata, batch)
+
+    def prepare_replay(self, batch: Batch) -> None:
+        self._stage(batch.attn_metadata, batch)
 
 
 __all__ = ["QSASparseAttnBackend", "QSASparseMetadata"]

@@ -187,7 +187,7 @@ def create_kvcache_pool(
             raise ValueError("QSA pools need num_req_slots (max_running_req + 1)")
         return QSAKVCache(
             num_kv_heads=spec.num_kv_heads,
-            num_layers=model_config.num_layers,
+            num_layers=max(spec.layer_ids) + 1,  # an MTP layer's history follows the target's
             head_dim=spec.head_dim,
             num_pages=num_pages,
             page_size=page_size,

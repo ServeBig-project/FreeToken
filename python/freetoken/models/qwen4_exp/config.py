@@ -64,11 +64,15 @@ class Qwen4ExpArgs:
 PLE_CONV_STATE = "ple_conv"
 PLE_NGRAM_STATE = "ple_ngram_ctx"
 QSA_PENDING_STATE = "qsa_pending"
+MTP_PENDING_STATE = "mtp_pending"
+MTP_TAIL_STATE = "mtp_tail"
 
 
-def slot_states(args: Qwen4ExpArgs, qsa_layer_ids: Tuple[int, ...]) -> Tuple[SlotStateSpec, ...]:
+def slot_states(args: Qwen4ExpArgs, qsa_layer_ids: Tuple[int, ...],
+                mtp_layer_ids: Tuple[int, ...] = ()) -> Tuple[SlotStateSpec, ...]:
     """Per-request state beyond the GDN recurrence, riding the linear-state slots: the PLE
-    conv history and n-gram context, and the raw index keys of each QSA layer's open group."""
+    conv history and n-gram context, the raw index keys of each QSA layer's open group, and
+    the MTP layer's open group and the target's last streams it pairs with the next token."""
     specs = []
     if args.ple_layer_ids:
         specs += [
@@ -92,6 +96,12 @@ def slot_states(args: Qwen4ExpArgs, qsa_layer_ids: Tuple[int, ...]) -> Tuple[Slo
             layer_ids=qsa_layer_ids,
         )
     )
+    if mtp_layer_ids:
+        specs += [
+            SlotStateSpec(name=MTP_PENDING_STATE, shape=(args.index_ratio, args.index_head_dim),
+                          layer_ids=mtp_layer_ids, draft=True),
+            SlotStateSpec(name=MTP_TAIL_STATE, shape=(args.stream_width,), draft=True),
+        ]
     return tuple(specs)
 
 
@@ -185,6 +195,7 @@ def parse_config(hf_config: Any) -> ModelConfig:
     if isinstance(eos_token_id, (list, tuple)):
         eos_token_id = eos_token_id[0]
 
+    mtp_layers = int(getattr(text, "mtp_num_hidden_layers", 0) or 0)
     qwen4_args = Qwen4ExpArgs(
         hidden_size=text.hidden_size,
         hc_count=int(text.hc_count),
@@ -228,11 +239,15 @@ def parse_config(hf_config: Any) -> ModelConfig:
         attention_groups=groups,
         expert_quant=expert_quant,
         qwen4_args=qwen4_args,
-        slot_states=slot_states(qwen4_args, full_ids),
+        slot_states=slot_states(qwen4_args, full_ids, tuple(range(
+            text.num_hidden_layers, text.num_hidden_layers + mtp_layers))),
+        mtp_layers=mtp_layers,
     )
 
 
 __all__ = [
+    "MTP_PENDING_STATE",
+    "MTP_TAIL_STATE",
     "PLE_CONV_STATE",
     "PLE_NGRAM_STATE",
     "QSA_PENDING_STATE",

@@ -1158,9 +1158,12 @@ class Scheduler(SchedulerIOMixin):
                     # rather than re-read the freed page-table row (and on hybrid, deref the
                     # released GDN state slots).
                     self.cache_manager.cache_req(req, finished=False)
+                page = self.config.page_size
                 if (not finished and req.table_idx != -1
                     and getattr(self.cache_manager, "residency", None) is not None
-                    and (i >= batch.decode_size or req.cached_len % self.config.page_size == 0)
+                    # a prefill, or a decode round that completed a page (SD may skip past it)
+                    and (i >= batch.decode_size
+                         or (req.cached_len - retained[i]) // page < req.cached_len // page)
                 ):
                     self.cache_manager.backup_completed(req, req.cached_len)
 

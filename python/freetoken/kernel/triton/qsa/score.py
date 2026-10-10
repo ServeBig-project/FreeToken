@@ -46,6 +46,7 @@ def _qsa_mqa_paged_kernel(
     STAGES: tl.constexpr,
     MAX_N: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
+    BLOCK_SHIFT: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
     dims = tl.arange(0, BLOCK_D)
@@ -84,8 +85,9 @@ def _qsa_mqa_paged_kernel(
     for tile in tl.range(tile_start, tile_end, num_stages=STAGES):
         columns = tile * BLOCK_N + column_offsets
         live = columns < visible
-        logical_page = tl.minimum(columns // PAGE_SIZE, PAGE_TABLE_WIDTH - 1)
-        page_offset = columns % PAGE_SIZE
+        stored = columns + BLOCK_SHIFT
+        logical_page = tl.minimum(stored // PAGE_SIZE, PAGE_TABLE_WIDTH - 1)
+        page_offset = stored % PAGE_SIZE
         physical_page = tl.load(
             page_table_ptr
             + safe_request * stride_table_req
@@ -126,8 +128,10 @@ def qsa_mqa_paged(
     logits: torch.Tensor,
     visible_blocks: torch.Tensor,
     score_scale: float | None = None,
+    block_shift: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute QSA scores directly from a paged compressed-key cache."""
+    """Compute QSA scores directly from a paged compressed-key cache. Block ``b``'s key is
+    stored at slab block ``b + block_shift``."""
 
     if q.ndim != 3 or q.shape[1] <= 0 or q.shape[2] <= 0:
         raise ValueError("QSA query must be [rows, heads, head_dim]")
@@ -183,6 +187,7 @@ def qsa_mqa_paged(
         STAGES=2,
         MAX_N=MAX_N,
         COMPRESS_RATIO=compress_ratio,
+        BLOCK_SHIFT=block_shift,
         num_warps=2,
     )
     return logits, visible_blocks

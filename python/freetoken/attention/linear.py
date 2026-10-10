@@ -242,6 +242,11 @@ class FLASpeculativeGraphs:
         self.dst = torch.zeros(shape, dtype=torch.int32, device=device)
         self.cu = torch.arange(max_batch + 1, dtype=torch.int32, device=device)
         self.draft_slots = torch.zeros(max_batch, dtype=torch.int32, device=device)
+        # The verify rows' request offsets and live slots (what the model's other declared
+        # states read), and each row's record of them: the scratch slot, padding into the sink.
+        self.req_cu = torch.zeros(max_batch + 1, dtype=torch.int64, device=device)
+        self.live = torch.zeros(max_batch, dtype=torch.int32, device=device)
+        self.records = torch.zeros(max_batch * query_width, dtype=torch.int64, device=device)
 
     def prepare_capture(self, batch, lengths, tokens):
         bs = batch.size
@@ -258,10 +263,16 @@ class FLASpeculativeGraphs:
         self.write[:, :bs] = tokens
         self.prev[:, :bs] = self.pool.padding_slot
         self.dst[:, :bs] = self.pool.padding_slot
-        batch.fla_metadata = FLAMetadata(verify=[FLAVerifyStep(
-            rows=self.rows[j, :bs], write=self.write[j, :bs], prev=self.prev[j, :bs],
-            path=FLAPathMetadata(cu_seqlens=self.cu[:bs + 1], cache_indices=self.dst[j, :bs]))
-            for j in range(self.query_width)])
+        self.req_cu[: bs + 1] = torch.tensor([*offsets, tokens], device=self.device)
+        self.live[:bs] = self.pool.padding_slot
+        self.records.fill_(self.pool.padding_slot)
+        batch.fla_metadata = FLAMetadata(
+            prefill=FLAPathMetadata(cu_seqlens=self.req_cu[: bs + 1], cache_indices=self.live[:bs]),
+            verify=[FLAVerifyStep(
+                rows=self.rows[j, :bs], write=self.write[j, :bs], prev=self.prev[j, :bs],
+                path=FLAPathMetadata(cu_seqlens=self.cu[:bs + 1], cache_indices=self.dst[j, :bs]))
+                for j in range(self.query_width)])
+        batch.verify_records = (self.records[:tokens],)
 
     def prepare_replay(self, batch, physical_tokens):
         bs = batch.size
@@ -272,6 +283,13 @@ class FLASpeculativeGraphs:
                              physical_tokens, self.query_width, {"device": "cpu", "pin_memory": True})
         for buffer, tensor in zip((self.rows, self.write, self.prev, self.dst), host, strict=True):
             buffer[:, :bs].copy_(tensor, non_blocking=True)
+        prefill = batch.fla_metadata.prefill
+        self.req_cu[: bs + 1].copy_(prefill.cu_seqlens)
+        self.live[:bs].copy_(prefill.cache_indices)
+        if batch.verify_records is not None:
+            real = batch.verify_records[0].numel()
+            self.records[:real].copy_(batch.verify_records[0])
+            self.records[real:].fill_(self.pool.padding_slot)
 
 
 class ReplaySpeculativeGraphs:
@@ -282,6 +300,13 @@ class ReplaySpeculativeGraphs:
         replay = pool.replay
         self.pool = pool
         self.cu, self.slots, self.rows = replay.graph_cu, replay.graph_slots, replay.graph_rows
+        # Each verify row's (record row, input) of the other declared states; padding rows
+        # write record row 0's last input, a sink no round reads.
+        inputs = next(iter(replay.verify_states.values())).shape[2] if replay.verify_states else 1
+        self.sink = inputs - 1
+        self.record_rows = torch.zeros(self.rows.numel() * self.sink, dtype=torch.int64,
+                                       device=self.rows.device)
+        self.record_inputs = torch.full_like(self.record_rows, self.sink)
 
     def prepare_capture(self, batch, lengths, tokens):
         bs = batch.size
@@ -291,9 +316,17 @@ class ReplaySpeculativeGraphs:
         batch.fla_metadata = FLAMetadata(decode=FLAPathMetadata(
             cu_seqlens=self.cu[: bs + 1], cache_indices=self.slots[:bs],
             rows=self.rows[:bs], speculative=True))
+        if self.pool.replay.verify_states:
+            batch.verify_records = (self.record_rows[:tokens], self.record_inputs[:tokens])
 
     def prepare_replay(self, batch, physical_tokens):
         bs, source = batch.size, batch.fla_metadata.decode
         self.cu[: bs + 1].copy_(source.cu_seqlens)
         self.slots[:bs].copy_(source.cache_indices)
         self.rows[:bs].copy_(source.rows)
+        if batch.verify_records is not None:
+            rows, inputs = batch.verify_records
+            self.record_rows[: rows.numel()].copy_(rows)
+            self.record_inputs[: rows.numel()].copy_(inputs)
+            self.record_rows[rows.numel():].zero_()
+            self.record_inputs[rows.numel():].fill_(self.sink)
