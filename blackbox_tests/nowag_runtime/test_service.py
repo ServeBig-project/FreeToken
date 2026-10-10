@@ -17,7 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 from cases import (QWEN36_BASE, QWEN36_BF16, QWEN36_SIDE, DSV4_BASE, DSV4_SIDE,  # noqa: E402
                    DFLASH_DRAFT, need_gpu, need_path, need_tp2)
-from harness import (noise_referenced, BASELINE_SOURCE, LOG_DIR, PROMPTS, Server, StartupFailed, cross_path,  # noqa: E402
+from harness import (assert_agreement, BASELINE_SOURCE, LOG_DIR, PROMPTS, Server, StartupFailed, cross_path,  # noqa: E402
                      experts, get, loops, run_prompts, same_execution, task_ok, text)
 from test_cache_status import sizes  # noqa: E402
 
@@ -214,8 +214,8 @@ def check_sd_observed(server, before, graph=None):
     (LOG_DIR / f"{server.label}-stats.json").write_text(json.dumps(stats, indent=2))
 
 
-# 24 prompts in the tiny model's word vocabulary (word4..word255), 12 greedy tokens each.
-TINY_PROMPTS = [" ".join(f"word{4 + (17 * i + 29 * j) % 252}" for j in range(6)) for i in range(24)]
+# 48 prompts in the tiny model's word vocabulary (word4..word255), 12 greedy tokens each.
+TINY_PROMPTS = [" ".join(f"word{4 + (17 * i + 29 * j) % 252}" for j in range(6)) for i in range(48)]
 _TINY = {}
 
 
@@ -235,17 +235,15 @@ def tiny_run(d, backend, tp):
 @pytest.mark.parametrize("d", [4, 6])
 @pytest.mark.parametrize("backend", ["offload", "cpu", "hybrid"])
 def test_tp2_native(d, backend):
-    """TP2 vs TP1 on the same backend, judged against a TP1 backend change on the same weights
-    (harness noise_referenced; TP2 numerics are proven by the component tests)."""
+    """TP2 vs TP1 on the same backend; numerics are owned by the component TP2 tests, this row
+    catches a grossly wrong shard (harness assert_agreement)."""
     need_tp2()
     reference = tiny_run(d, backend, 1)[0]
-    alternate = tiny_run(d, "cpu" if backend == "offload" else "offload", 1)[0]
     out, ranks = tiny_run(d, backend, 2)
     assert sorted(r["rank"] for r in ranks) == [0, 1]
     assert len({str(r["device"]) for r in ranks}) == 2
-    got, noise = noise_referenced(reference, out, alternate, f"tiny Qwen3MoE D{d} {backend} TP1 vs TP2")
-    (LOG_DIR / f"tiny-tp2-d{d}-{backend}.json").write_text(json.dumps(
-        {"agreement_tp2": got, "agreement_backend_change": noise}))
+    got = assert_agreement(reference, out, f"tiny Qwen3MoE D{d} {backend} TP1 vs TP2")
+    (LOG_DIR / f"tiny-tp2-d{d}-{backend}.json").write_text(json.dumps({"agreement_tp2": got}))
 
 
 @pytest.mark.parametrize("backend", ["offload", "cpu", "hybrid", "fused"])

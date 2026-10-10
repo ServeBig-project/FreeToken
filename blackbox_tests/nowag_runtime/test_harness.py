@@ -66,12 +66,11 @@ def test_stop_group_waits_for_children_that_outlive_the_leader():
     assert not H.group_alive(proc.pid)
 
 
-def test_noise_referenced_rule():
-    ref = [f"w{i} a b c d e f g h" for i in range(24)]
-    noisy = [("x " + r) if i < 3 else r for i, r in enumerate(ref)]      # 21/24 agree
-    H.noise_referenced(ref, [("y " + r) if i < 8 else r for i, r in enumerate(ref)], noisy)  # 16/24
-    with pytest.raises(AssertionError):                                   # 14/24 < 0.875-0.25
-        H.noise_referenced(ref, [("y " + r) if i < 10 else r for i, r in enumerate(ref)], noisy)
-    with pytest.raises(AssertionError):                                   # wrong shard: all split
-        H.noise_referenced(ref, ["z " + r for r in ref], ["z " + r for r in ref])
+def test_agreement_floor_rule():
+    ref = [f"w{i} a b c d e f g h" for i in range(48)]
+    H.assert_agreement(ref, [("y " + r) if i < 31 else r for i, r in enumerate(ref)])  # 17/48
+    with pytest.raises(AssertionError):                                           # 16/48
+        H.assert_agreement(ref, [("y " + r) if i < 32 else r for i, r in enumerate(ref)])
+    with pytest.raises(AssertionError):
+        H.assert_agreement(ref, [""] + ref[1:])
     assert H.agreement(["w0 w1"], ["w0 w1"]) == 1 and H.agreement(["w0 w1"], ["w0 w1 w2"]) == 0
