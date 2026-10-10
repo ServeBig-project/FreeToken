@@ -69,7 +69,7 @@ def test_shared_prefix_outputs_match_solo_runs(svc):
     suffix's enumeration without gaps or prompt text."""
     prefix = enum_prompt(1000, 600)
     suffixes = [" " + enum_prompt(5000 + 1000 * i, 40) for i in range(4)]
-    out = 2500
+    out = 4500  # 3000 shared + 2 x 4700 private tokens cannot stay resident together; 2500 did
     solo = []
     svc.c.complete(prefix, 1, cache_group="solo")
     for sfx in suffixes:
