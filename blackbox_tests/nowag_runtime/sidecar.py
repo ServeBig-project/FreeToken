@@ -183,15 +183,22 @@ def synth_dir(geom, out, d, kind, layout="row_major"):
 
 
 def link_copy(src, dst, mutable=("manifest.json",)):
-    """dst/ with symlinks to every file of src/ except `mutable` ones (copied)."""
+    """A stand-in for src/ that looks like a real checkpoint directory: subdirectories are real
+    directories, weight files (*.safetensors or >64 MiB) are symlinks to the originals, every
+    other file -- and any top-level name in `mutable` -- is copied. Tools that copy a
+    checkpoint's non-weight files (e.g. DSV4 inference/config.json) then see them all."""
     src, dst = Path(src), Path(dst)
     shutil.rmtree(dst, ignore_errors=True)
-    dst.mkdir(parents=True)
-    for item in src.iterdir():
-        if item.name in mutable:
-            shutil.copy2(item, dst / item.name)
-        else:
-            os.symlink(item.resolve(), dst / item.name)
+    for root, _, files in os.walk(src, followlinks=True):
+        target = dst / Path(root).relative_to(src)
+        target.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            item = Path(root) / name
+            top_mutable = target == dst and name in mutable
+            if not top_mutable and (name.endswith(".safetensors") or item.stat().st_size > 64 << 20):
+                os.symlink(item.resolve(), target / name)
+            else:
+                shutil.copy2(item, target / name)
     return dst
 
 
