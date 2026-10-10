@@ -1,6 +1,6 @@
 # Flash-Next 第一期状态
 
-当前：实现已进入 I3b 独立 GPU 验收，**尚未交付**。生产快照 `0abb433`，共享 runtime 基座 `d912bbe`；功能 PR #10。第一阶段只做普通生成，完成后再进入投机解码。
+当前：I3b原157K失败已精确复验通过，正在进入多用户与完整配置验收，**尚未交付**。生产快照 `0abb433`，共享 runtime 基座 `d912bbe`；功能 PR #10。第一阶段只做普通生成，完成后再进入投机解码。
 
 FTW 已按用户决定暂缓。本期直接加载现有 RadixArk safetensors，不转换权重，也不改变文件读取回退。设计与独立作者入口见[主设计](flash-next-design.md)、[公开契约](flash-next-public-contract.md)。
 
@@ -11,15 +11,15 @@ FTW 已按用户决定暂缓。本期直接加载现有 RadixArk safetensors，�
 - I3b `cb26f83`：同一主机缓存预算保存活跃K/V、前缀与暂停副本。GPU只取得选中的主机组；申请不足时先冷缓存、再已备份活跃载荷、最后暂停。完整页备份与回收时序已通过独立源码复核。
 - 合流定向CPU回归421通过、24跳过。扩展回归1264通过、338跳过；另14失败、4错误涉及未安装的NoWAG依赖或无GPU环境，未当作通过。
 
-## 当前必须关闭的失败
+## 157K原失败已关闭
 
 旧候选 `7139b31` 公布262144-token范围，但唯一157309-token输入在R2 GiB／H4 GiB／2048专家槽下被拒绝；前40项短服务与11项独立算子检查通过，不能抵消该失败。
 
-修复已包含在当前生产快照。必须用原输入、原4096输出上限、原预算复验，并观察活跃生成期间主机读取字节增加。[原公开复现](/data2/servebig-envs/flash_next_i3_acceptance/i3b_blackbox/7139b31-157309-public-repro.json)。通过前不增加预算掩盖问题，不宣称157K支持完成。
+当前候选用原请求body、原4096输出上限、原预算通过：157309输入、1792输出，128条早段记录逐字正确，finish_reason=stop、零暂停。累计选中主机读取41,113,435,200字节；首次活跃主机条件输出后仍增加25,318,960,032字节。独立gather／attention及读取计数11/11通过，I1／I2 CPU量化数学6/6通过。该结论只关闭单请求失败，多用户仍待完成。[原公开复现](/data2/servebig-envs/flash_next_i3_acceptance/i3b_blackbox/7139b31-157309-public-repro.json) · [精确复验](/data2/servebig-envs/flash_next_i3_acceptance/i3b_blackbox/0abb433-exact-repro-002.jsonl)。
 
 ## 接下来
 
-1. 复验主机gather、注意力及读取字节计数，再关闭上述157K失败。
+1. 补齐真实24-query-head几何的量化→主机读取→attention数值集成。
 2. 固定交付预算完成157K多用户持续到达、取消、冷恢复、非对齐暂停恢复与Replay循环；模型质量、协议和实际性能一并记录。
 3. 运行八组关键配置，覆盖dense／KV精度、GPU／tiered、offload／hybrid、legacy／layered、Graph／eager、Replay和naive缓存；复用独立作者已有任务与冻结判定。
 4. 完成公共组件回归与容量对照，合回 `feat/flash-next`，再更新交付结论。FTW不在本轮待办中。
