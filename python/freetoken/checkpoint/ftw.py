@@ -346,7 +346,7 @@ def _transient_buffer(nbytes: int) -> mmap.mmap:
 
 
 def iter_ftw_weights(path: str, *, kinds=("weight",), workers: int = 8,
-                       chunk: int = _DEFAULT_CHUNK, prefetch: int = 2):
+                       chunk: int = _DEFAULT_CHUNK, prefetch: int = 2, include_name=None):
     """Yield ``(name, host_tensor)`` for the requested kinds, reading each tensor via
     chunked O_DIRECT. A background thread prefetches the next ``prefetch`` tensors so the
     disk stays busy while the consumer copies the current one to the GPU. Transient buffers
@@ -358,6 +358,8 @@ def iter_ftw_weights(path: str, *, kinds=("weight",), workers: int = 8,
 
     reader = FTWReader(path)
     entries = reader.entries(*kinds)
+    if include_name is not None:
+        entries = [entry for entry in entries if include_name(entry["name"])]
     q: queue.Queue = queue.Queue(maxsize=max(1, prefetch))
     _DONE = object()
     err: list[BaseException] = []

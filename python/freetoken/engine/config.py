@@ -227,14 +227,14 @@ class EngineConfig:
         config = parse_config(self.hf_config)
         from freetoken.checkpoint.ftw import ftw_quant_format
 
-        if ftw_quant_format(self.model_path) == "nowag":
-            # A converted NoWAG checkpoint carries its experts itself.
-            object.__setattr__(config, "expert_quant", "nowag")
-        elif self.nowag_expert_path is not None:
+        if self.nowag_expert_path is not None:
             # The routed experts come from the NoWAG output; the base checkpoint
             # supplies everything else.
             object.__setattr__(config, "expert_quant", "nowag")
             object.__setattr__(config, "nowag_expert_path", self.nowag_expert_path)
+        elif ftw_quant_format(self.model_path) == "nowag":
+            # Without an explicit replacement, the checkpoint supplies its own experts.
+            object.__setattr__(config, "expert_quant", "nowag")
         return config
 
     @property

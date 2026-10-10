@@ -322,6 +322,8 @@ def cpu_expert_format(model_path: str, model_config) -> str:
     """The CPU-readable bank format selected by the source component."""
     from freetoken.checkpoint.ftw import ftw_quant_format
 
+    if model_config.nowag_expert_path is not None:
+        return model_config.expert_quant
     stored = ftw_quant_format(model_path)
     if stored is not None:
         return stored
@@ -441,6 +443,9 @@ def load_expert_banks(
     """
     from freetoken.checkpoint.ftw import is_ftw_checkpoint, load_ftw_banks, ftw_quant_format
 
+    if model_config.nowag_expert_path is not None:
+        return _build_expert_banks(model_path, model_config, device, dtype, dummy,
+                                   False, workers, chunk, decode_target, layer_sink)
     if model_path and is_ftw_checkpoint(model_path) and not dummy:
         prepare = _FTW_PREPARE.get(ftw_quant_format(model_path))
         banks = load_ftw_banks(

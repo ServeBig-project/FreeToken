@@ -621,6 +621,41 @@ def expert_intermediate_range(intermediate_size: int, *, rank: int, world_size: 
     return start, max(start, end)
 
 
+def _expert_bias_source(name: str):
+    info = _expert_layer_and_name(name)
+    if info is not None:
+        source = {"gate_up_proj_bias": "gate_up_bias", "down_proj_bias": "down_bias"}.get(info[1])
+        return (info[0], source) if source is not None else None
+    bank, separator, layer = name.partition("#L")
+    if bank in ("gate_up_bias", "gate_bias", "up_bias", "down_bias"):
+        return (int(layer) if separator else None, bank)
+    return None
+
+
+def _iter_expert_biases(model_path: str, model_config):
+    from freetoken.checkpoint.ftw import is_ftw_checkpoint, iter_ftw_weights
+
+    if is_ftw_checkpoint(model_path):
+        for name, tensor in iter_ftw_weights(
+            model_path, kinds=("weight", "experts_bank"),
+            include_name=lambda name: _expert_bias_source(name) is not None,
+        ):
+            layer, source = _expert_bias_source(name)
+            if layer is not None:
+                yield layer, source, tensor
+            else:
+                per_layer = tensor.reshape(model_config.num_layers, model_config.num_experts, -1)
+                for layer, value in enumerate(per_layer):
+                    yield layer, source, value
+        return
+    for file in iter_root_safetensor_files_from_index(model_path):
+        with safetensors.safe_open(file, framework="pt", device="cpu") as f:
+            for name in f.keys():
+                info = _expert_bias_source(name)
+                if info is not None:
+                    yield *info, f.get_tensor(name)
+
+
 def load_expert_biases(model_path: str, model_config, *, dtype: torch.dtype) -> dict[str, list[torch.Tensor]]:
     """Pinned ``gate_bias``/``up_bias`` ``[E, I_rank]`` and ``down_bias`` ``[E, H]`` per layer
     for expert formats that store only the projection weights (NoWAG). The checkpoint
@@ -638,22 +673,17 @@ def load_expert_biases(model_path: str, model_config, *, dtype: torch.dtype) -> 
         specs["down_bias"] = ((E, H), dtype)
     banks = alloc_layer_banks(specs, L)
     seen: set[tuple[int, str]] = set()
-    for file in iter_root_safetensor_files_from_index(model_path):
-        with safetensors.safe_open(file, framework="pt", device="cpu") as f:
-            for name in f.keys():
-                info = _expert_layer_and_name(name)
-                if info is None or info[1] not in ("gate_up_proj_bias", "down_proj_bias"):
-                    continue
-                layer_id, source = info
-                raw = f.get_tensor(name)
-                if source == "down_proj_bias":
-                    if "down_bias" in banks:
-                        banks["down_bias"][layer_id].tensor.copy_(raw)
-                else:
-                    banks["gate_bias"][layer_id].tensor.copy_(raw[:, ::2][:, start:end])
-                    banks["up_bias"][layer_id].tensor.copy_(raw[:, 1::2][:, start:end])
-                seen.add((layer_id, source))
-    missing = {(l, s) for l in range(L) for s in ("gate_up_proj_bias", "down_proj_bias")} - seen
+    for layer_id, source, raw in _iter_expert_biases(model_path, model_config):
+        if source == "gate_up_bias":
+            for lane, name in enumerate(("gate_bias", "up_bias")):
+                banks[name][layer_id].tensor.copy_(raw[:, lane::2][:, start:end])
+                seen.add((layer_id, name))
+        else:
+            if source in banks:
+                value = raw if source == "down_bias" else raw[:, start:end]
+                banks[source][layer_id].tensor.copy_(value)
+            seen.add((layer_id, source))
+    missing = {(l, s) for l in range(L) for s in load_expert_biases.bank_names} - seen
     if missing:
         raise ValueError(f"Missing GPT-OSS expert biases: {sorted(missing)[:8]}")
     pin_banks(banks)
