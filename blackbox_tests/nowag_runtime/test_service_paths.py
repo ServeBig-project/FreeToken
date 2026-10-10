@@ -148,21 +148,17 @@ def test_layered_sd_phases(phase, backend):
         assert get(server.url, "/v1/stats")["body"]["execution"]["effective"]["batching_policy"] == "layered-pipeline"
 
 
-def test_dflash_phase_all_hybrid():
-    """DFlash accepts only fi attention while layered-pipeline needs Triton prefill, so phase
-    "all" is covered with the legal legacy policy."""
+@pytest.mark.parametrize("policy,attention", [("legacy", "fi"), ("layered-pipeline", "triton,fi")])
+def test_dflash_phase_all_rejected(policy, attention):
+    """No public combination exists: phase "all" needs layered-pipeline batching, which needs
+    Triton prefill, while DFlash accepts only fi attention. Each combination must be refused
+    before ready (DFlash serving is covered by test_dflash_speculative)."""
     gpu = need_gpu()
-    reference = offload_reference()
-    options = ["--batching-policy", "legacy", "--attention-backend", "fi", "--page-size", 1,
+    options = ["--batching-policy", policy, "--attention-backend", attention, "--page-size", 1,
                "--speculative-num-steps", 4, "--speculative-phase", "all",
                "--speculative-draft-model-path", need_path(DFLASH_DRAFT, "Qwen3.6 DFlash"),
                "--enable-gdn-replayssm", "--gdn-state-budget-bytes", 3000000000]
-    with Server("dflash_all_hybrid", qwen(*options, backend="hybrid"), gpu) as server:
-        before = get(server.url, "/v1/stats")["body"]
-        cross_path(reference, run_prompts(server), "dflash all")
-        mixed_load(server)
-        check_sd_observed(server, before)
-        assert get(server.url, "/v1/stats")["body"]["execution"]["effective"]["batching_policy"] == "legacy"
+    expect_rejected(f"dflash_all_{policy}", qwen(*options, backend="hybrid"), gpu)
 
 
 def test_layered_sd_with_graph_and_triton_attention_rejected():
