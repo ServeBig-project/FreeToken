@@ -45,18 +45,15 @@ parsers all resolve automatically from the checkpoint and the GPU.
 | `--max-running-requests` | 4 | Max concurrently running requests |
 | `--max-output-tokens` | 32768 | Default output budget for requests that omit one |
 | `--max-seq-len-override` | from checkpoint | Max sequence length |
-| `--max-prefill-length` | 8192 | Per-request prefill chunk-token limit for legacy/mixed/layered/joint. `layered-pipeline` uses it only to estimate wave admission; each admitted request's complete current uncached range is one ragged-batch row segment |
-| `--batching-policy` | auto | `auto` uses `layered-pipeline` when the model and MoE backend support it, else `legacy`; the choice and any reason appear in `/v1/stats` `execution`. `legacy` prioritizes prefill; `mixed` combines decode with one prefill chunk; `layered` runs separate forwards; `joint` carries one mixed wave through resident groups; `layered-pipeline` freezes one ragged prompt wave and advances the complete wave by one resident group per iteration |
+| `--max-prefill-length` | 8192 | Per-request prefill chunk-token limit for legacy/mixed/layered. `layered-pipeline` uses it only to estimate wave admission; each admitted request's complete current uncached range is one ragged-batch row segment |
+| `--batching-policy` | auto | `auto` uses `layered-pipeline` when the model and MoE backend support it, else `legacy`; the choice and any reason appear in `/v1/stats` `execution`. `legacy` prioritizes prefill; `mixed` combines decode with one prefill chunk; `layered` runs separate forwards; `layered-pipeline` freezes one ragged prompt wave and advances the complete wave by one resident group per iteration |
 | `--speculative-num-steps` | omitted | Maximum draft tokens per SD round, 1–8. Omitted runs 4 when a draft path, a non-default phase or an SD control is given, else AR; `0` turns SD off and ignores (never downloads) `--speculative-draft-model-path`; a positive value, a draft path or a non-default phase is an explicit SD request and fails at startup if unsupported. Without a draft path SD drafts with the target itself |
 | `--speculative-phase` | outwave | With `layered-pipeline`: `outwave` runs AR beside a prefill wave and SD otherwise; `all` also runs SD beside a wave; `inwave` runs SD only beside a wave. A round beside a wave needs a full window for every request, else that iteration stays AR. `legacy` batching accepts only `outwave` |
-| `--prefill-layer-group-size` | 2 | Requested consecutive decoder layers per `layered`/`joint`/`layered-pipeline` group. `joint` caps it at `floor(shared slots / experts per layer)`; `layered-pipeline` reserves one full expert layer for decode, requires at least two layers of shared-cache capacity, and caps the group at `floor(shared slots / experts per layer) - 1` |
-| `--prefill-wave-max-chunks` | 1 | Soft admission cap for `joint` or `layered-pipeline`. Multiple complete requests may share a wave when the sum of their planned chunks fits; a first request larger than the cap remains intact and runs alone. In `layered-pipeline`, planned chunks do not create physical forward boundaries; only observed prefill memory can end a wave inside a prompt (the first wave uses one tile until memory is measured), and the rest continues in the next wave |
+| `--prefill-layer-group-size` | 2 | Requested consecutive decoder layers per `layered`/`layered-pipeline` group. `layered-pipeline` reserves one full expert layer for decode, requires at least two layers of shared-cache capacity, and caps the group at `floor(shared slots / experts per layer) - 1` |
+| `--prefill-wave-max-chunks` | 1 | Soft admission cap for `layered-pipeline`. Multiple complete requests may share a wave when the sum of their planned chunks fits; a first request larger than the cap remains intact and runs alone. In `layered-pipeline`, planned chunks do not create physical forward boundaries; only observed prefill memory can end a wave inside a prompt (the first wave uses one tile until memory is measured), and the rest continues in the next wave |
 | `--prefill-execution` | serial | `layered` compute mode; `concurrent` is the explicit two-stream A/B mode |
 | `--cuda-graph-max-bs`, `--graph` | = max running requests | Max batch size captured as CUDA graphs. The ladder holds every size up to min(max running requests, 8), then every multiple of 8. Layered resident policies' decode ranges reuse it and run eager when an exact active-wave batch size is not on it; prefill remains ragged/eager |
 | `--decode-log-interval` | 40 | Scheduler status line every N decode steps |
-
-See [Joint unified expert pool](joint-unified-expert-pool.md) for joint cache
-geometry, admission, and release semantics.
 
 ### Choosing a GPU
 
@@ -83,7 +80,7 @@ ft serve --model ... --gpu GPU-9e8d7c6b  # the same card by UUID (a unique prefi
 | `--cache-type` | radix | `radix` (prefix reuse; SWA/GDN-aware variants picked automatically) or `naive` |
 | `--prefix-cache-host-gib` | 0 | Pinned host memory (GiB per engine worker, allocated at startup) for prefix-cache data evicted from the GPU and restored on reuse; 0 disables. See [cold-prefix-cache-public-contract.md](cold-prefix-cache-public-contract.md) |
 | `--prefix-cache-policy` | baseline | Which prefix positions keep a recurrent state: `baseline` (one near each prompt end) or `continuation` (round ends and fork points, replaced round ends pruned) |
-| `--attention-backend`, `--attn` | auto | `trtllm`/`fi`/`fa`/`triton`/`dsv4_sparse`/`dsa`; `prefill,decode` pair allowed; auto picks per model + GPU. `joint` and `layered-pipeline` currently require Triton for prefill |
+| `--attention-backend`, `--attn` | auto | `trtllm`/`fi`/`fa`/`triton`/`dsv4_sparse`/`dsa`; `prefill,decode` pair allowed; auto picks per model + GPU. `layered-pipeline` currently requires Triton for prefill |
 
 ### MoE offload
 
@@ -98,7 +95,7 @@ See [models.md](models.md#moe-backends) for what each backend does.
 | `--moe-cpu-layers` | all on GPU | With `offload`: which MoE layers decode on CPU (`3,7,11`, a count, or a fraction) |
 | `--moe-hybrid-max-fetch` | auto | With `hybrid`: max experts fetched over PCIe per layer per step; rest computed on CPU |
 | `--moe-prefill-hit-d2d` | off | Ordinary streaming prefill: copy cache-hit experts device-side into its buffer and stream only misses (CUDA >= 13); shared-pool policies reuse canonical slots directly |
-| `--disable-moe-prefill-overlap` | overlap on | Disable prefill-copy overlap; ordinary streaming uses two buffers, while `joint` and `layered-pipeline` require overlap and canonical group admission |
+| `--disable-moe-prefill-overlap` | overlap on | Disable prefill-copy overlap; ordinary streaming uses two buffers, while `layered-pipeline` requires overlap and canonical group admission |
 
 For an A/B comparison of the experimental load-adaptive `layered-pipeline`
 fast path, set `FREETOKEN_LP_ADAPTIVE_GATE=on`. It is off by default; when

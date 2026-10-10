@@ -53,7 +53,6 @@ COUNTER_FIELDS = (
 PIPELINE_MODE_RE = re.compile(
     r"layered(?:-|_)pipeline(?:-|_)g(\d+)(?:-|_)wave(\d+)"
 )
-JOINT_MODE_RE = re.compile(r"joint(?:-|_)g(\d+)(?:-|_)wave(\d+)")
 LAYERED_MODE_RE = re.compile(r"layered(?:-|_)g(\d+)")
 
 
@@ -66,7 +65,6 @@ def parse_args() -> argparse.Namespace:
             "legacy",
             "mixed",
             "layeredG2",
-            "jointG2-wave2",
             "layered-pipeline-g1-wave64",
         ],
     )
@@ -195,19 +193,6 @@ def resolve_modes(raw_modes: Iterable[str], workload: dict[str, Any]) -> list[di
                 {
                     "name": f"layered_pipeline_g{group_size}_wave{wave_chunks}",
                     "batching_policy": "layered-pipeline",
-                    "prefill_layer_group_size": group_size,
-                    "prefill_wave_max_chunks": wave_chunks,
-                    "primary": False,
-                }
-            )
-        elif match := JOINT_MODE_RE.fullmatch(token):
-            group_size, wave_chunks = (int(value) for value in match.groups())
-            if group_size < 1 or wave_chunks < 1:
-                raise ValueError(f"joint G/wave values must be positive: {token!r}")
-            modes.append(
-                {
-                    "name": f"joint_g{group_size}_wave{wave_chunks}",
-                    "batching_policy": "joint",
                     "prefill_layer_group_size": group_size,
                     "prefill_wave_max_chunks": wave_chunks,
                     "primary": False,
@@ -555,7 +540,6 @@ def main() -> int:
                 "server_command": command,
                 "repetitions": [],
                 "requests": [],
-                "joint_waves": [],
                 "layered_pipeline_waves": [],
                 "server_log_tail": None,
                 "error": None,
@@ -631,19 +615,6 @@ def main() -> int:
                             "group_forwards",
                             "iterations",
                             "decode_iterations",
-                            "prefill_layer_prepares",
-                        )
-                    }
-                elif mode["batching_policy"] == "joint":
-                    mode_result["joint_waves"] = server.joint_waves()
-                    waves = mode_result["joint_waves"]
-                    mode_result["joint_structure"] = {
-                        name: sum(wave[name] for wave in waves)
-                        for name in (
-                            "chunks",
-                            "wave_reqs",
-                            "frontier_batches",
-                            "groups",
                             "prefill_layer_prepares",
                         )
                     }
