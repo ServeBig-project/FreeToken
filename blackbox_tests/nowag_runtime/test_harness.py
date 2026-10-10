@@ -64,3 +64,16 @@ def test_stop_group_waits_for_children_that_outlive_the_leader():
     assert H.group_alive(proc.pid)              # the child outlived the leader
     H.stop_group(proc, term_timeout=5, kill_timeout=5)
     assert not H.group_alive(proc.pid)
+
+
+def test_common_prefix_rule():
+    words = " ".join(f"w{i}" for i in range(32))
+    late = " ".join(f"w{i}" for i in range(13)) + " x" * 19
+    H.common_prefix([words], [late])                       # diverges after 13 words: allowed
+    with pytest.raises(AssertionError):
+        H.common_prefix([words], ["w0 w1 w2 x" + words[11:]])
+    H.common_prefix(["w0 w1"], ["w0 w1"])                  # stopped early, identical
+    with pytest.raises(AssertionError):
+        H.common_prefix(["w0 w1"], ["w0 w1 w2"])           # shorter than 8 must match fully
+    with pytest.raises(AssertionError):
+        H.common_prefix([words], [""])

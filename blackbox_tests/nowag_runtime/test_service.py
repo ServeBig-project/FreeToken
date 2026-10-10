@@ -17,7 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 from cases import (QWEN36_BASE, QWEN36_BF16, QWEN36_SIDE, DSV4_BASE, DSV4_SIDE,  # noqa: E402
                    DFLASH_DRAFT, need_gpu, need_path, need_tp2)
-from harness import (BASELINE_SOURCE, LOG_DIR, PROMPTS, Server, StartupFailed, cross_path,  # noqa: E402
+from harness import (common_prefix, BASELINE_SOURCE, LOG_DIR, PROMPTS, Server, StartupFailed, cross_path,  # noqa: E402
                      experts, get, loops, run_prompts, same_execution, task_ok, text)
 from test_cache_status import sizes  # noqa: E402
 
@@ -227,7 +227,7 @@ def test_tp2_native(d, backend):
         out, ranks = run_prompts(s), experts(s.status())["ranks"]
     assert sorted(r["rank"] for r in ranks) == [0, 1]
     assert len({str(r["device"]) for r in ranks}) == 2
-    cross_path(reference, out, "tiny Qwen3MoE TP1 vs TP2", task=False)
+    common_prefix(reference, out, "tiny Qwen3MoE TP1 vs TP2")
 
 
 @pytest.mark.parametrize("backend", ["offload", "cpu", "hybrid", "fused"])

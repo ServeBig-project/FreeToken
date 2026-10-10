@@ -238,6 +238,16 @@ def experts(status):
 #   neither loops; at least half the prompts must be identical.
 # * Task check: the expected answer appears in the greedy continuation; a run passes when at
 #   least 3 of the 4 prompts do. Loop check: no word 4-gram repeats more than 3 times.
+# Amendment 2026-10-10 (coordinator request, after TP2 results): untrained random models have
+#   many near-tied logits, so a different reduction order (TP2 vs TP1, or even TP1 offload vs
+#   cpu, both seen to diverge only after 13-18 identical tokens) splits greedy text late. For
+#   such weights, cross-path comparisons whose numerics are proven at component level (TP2:
+#   rank-sum and bind numeric tests) use common_prefix: every prompt's first PREFIX_WORDS
+#   generated words must agree (whole text if shorter). Basis for 8 of 32: a wrong shard -- a
+#   lost rank contribution, a doubled down bias, boundary lanes regrouped -- changes the hidden
+#   state by percents (missing bias alone is 4-8% Frobenius in the GPT-OSS fixture), which
+#   moves a random model's greedy choice within the first few tokens on most prompts, while
+#   the observed legal divergence starts at 13 or later. No numeric tolerance changes.
 
 PROMPTS = [("The capital of France is", "Paris"),
            ("1, 2, 3, 4, 5, 6,", "7"),
@@ -265,6 +275,20 @@ def cross_path(a, b, label="", task=True):
     if task:
         assert task_ok(a) and task_ok(b), f"{label}: task check failed\n{a}\n{b}"
     assert sum(same) * 2 >= len(same), f"{label}: only {sum(same)}/{len(same)} identical\n{a}\n{b}"
+
+
+PREFIX_WORDS = 8
+
+
+def common_prefix(a, b, label="", words=PREFIX_WORDS):
+    """Random-weight cross-path rule (see amendment above): non-empty outputs whose first
+    `words` generated words agree on every prompt."""
+    for x, y in zip(a, b):
+        assert x.strip() and y.strip(), f"{label}: empty output\n{a}\n{b}"
+        wx, wy = x.split(), y.split()
+        need = min(words, len(wx), len(wy))
+        assert wx[:need] == wy[:need] and (need == words or x == y), \
+            f"{label}: diverged within the first {words} words\n{x!r}\n{y!r}"
 
 
 def run_prompts(server, max_tokens=32):
