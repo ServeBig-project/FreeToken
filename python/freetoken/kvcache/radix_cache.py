@@ -844,6 +844,10 @@ class RadixCache:
         heapq.heapify(heap)
         return heap, lambda n: heapq.heappush(heap, entry(n))
 
+    def unlocked_kv(self) -> List[torch.Tensor]:
+        """GPU locations of the cached prefixes no request holds."""
+        return [n.value for n in self._nodes() if n.ref == 0 and n.value is not None]
+
     def _nodes(self) -> List[TreeNode]:
         out, stack = [], list(self.roots.values())
         while stack:

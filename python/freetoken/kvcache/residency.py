@@ -46,6 +46,11 @@ class HostKV:
         self.banks = [bank]
 
     @property
+    def page_bytes(self) -> int:
+        """K/V payload and scale bytes of one page, on either side."""
+        return sum(length for *_, length in self.payload.banks)
+
+    @property
     def gpu_flags(self):
         return self.addresses[-1]
 
@@ -190,7 +195,6 @@ class HostKV:
                 self._read_host.copy_(self.read_bytes, non_blocking=True)
                 self._read_event.record()
             self._read_pending = True
-        unit = sum(length for *_, length in self.payload.banks)
         return dict(kv_gpu_payload_pages=len(self.gpu) - 1, kv_host_payload_pages=self.host_pages,
-                    kv_host_payload_bytes=self.host_pages * unit,
+                    kv_host_payload_bytes=self.host_pages * self.page_bytes,
                     kv_host_read_bytes=self._last_read_bytes)
