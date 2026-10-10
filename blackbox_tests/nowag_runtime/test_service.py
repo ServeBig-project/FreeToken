@@ -136,8 +136,22 @@ def test_http_semantics():
         assert body["usage"]["completion_tokens"] == 5
         r = s.complete("The capital of France is", 64, stop=["."])
         assert r["body"]["choices"][0]["finish_reason"] == "stop" and "." not in text(r)
-        streamed = s.stream("The capital of France is", 16)        # same (warm) cache state
-        assert streamed["done"] and streamed["text"] == text(s.complete("The capital of France is", 16))
+        # Each arm has a fresh prefix-cache group; the first arm cannot warm the second.
+        streamed = s.stream("The capital of France is", 16, cache_group="http-stream-cold",
+                            stream_options={"include_usage": True})
+        plain = s.complete("The capital of France is", 16, cache_group="http-nonstream-cold")
+        (LOG_DIR / f"{s.label}-stream-control.json").write_text(json.dumps(
+            {"request": {"prompt": "The capital of France is", "max_tokens": 16, "temperature": 0},
+             "groups": ["http-stream-cold", "http-nonstream-cold"],
+             "streamed": streamed, "nonstream": plain}, indent=2))
+        plain_text = text(plain)
+        assert streamed["done"] and streamed["usage"], streamed
+        usages = (streamed["usage"], plain["body"]["usage"])
+        for usage in usages:
+            assert usage.get("prompt_tokens_details", {}).get("cached_tokens", 0) == 0, usage
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            assert usages[0][key] == usages[1][key], usages
+        assert streamed["text"] == plain_text
         sampled = s.complete("Once upon a time", 16, temperature=0.8)
         assert sampled["status"] == 200 and text(sampled)
 
