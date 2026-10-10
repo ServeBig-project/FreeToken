@@ -64,8 +64,8 @@ def test_prefill_transfer_paths(path):
         if tuple(map(int, torch.version.cuda.split(".")[:2])) < (13, 0):
             pytest.skip("public hit-D2D path requires CUDA >= 13")
         options += ["--moe-prefill-hit-d2d"]
-    if path == "layered-concurrent":
-        options += ["--prefill-execution", "concurrent"]
+    if path == "layered-concurrent":   # concurrent layered prefill needs triton attention
+        options += ["--prefill-execution", "concurrent", "--attention-backend", "triton"]
     with Server(f"transfer_{path}", qwen(*options), gpu) as server:
         cross_path(reference, run_prompts(server), path)
         mixed_load(server)
