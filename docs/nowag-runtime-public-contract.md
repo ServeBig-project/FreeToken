@@ -63,7 +63,7 @@ BASE也可为本项目已有FTW。显式SIDE决定路由专家投影来源，不
 | 权重 | D4/B12、D6/B12，两种既有布局；原生与 FTW；相同 checkpoint 重命名 |
 | 专家计算 | 全驻 GPU、offload、cpu、hybrid，以及已支持的逐层 CPU 分配 |
 | 搬运 | 冷／热缓存、按需 miss、整层 streaming、重叠预取、命中 D2D、驻留层组 |
-| batching | 对该模型公开支持的 legacy／mixed／layered／joint／layered-pipeline；对应合法配置与拒绝行为 |
+| batching | 对该模型公开支持的 legacy／mixed／layered／layered-pipeline（joint 已废弃，不在本契约内）；对应合法配置与拒绝行为 |
 | Graph | eager、普通 decode 图、已有层段图；反复回放时换 token、路由、前缀长度和自然尾批 |
 | SD | self-SD 和匹配 DFlash；fixed与已有 adaptive／缓存起草／补缺／预取控制；N=1/2/4/8及真实尾部裁剪 |
 | TP | TP1、真实 TP2；合法分片及 D6 边界组，原生与 FTW，各 rank 使用同一 checkpoint |
@@ -171,8 +171,8 @@ Graph与SD的实际执行继续由既有配置、Graph／speculative统计和独
 
 ## 10. 服务验收与 TP 调用补充（2026-10-10）
 
-- **合法服务组合**：Qwen3.6 的 AR/offload 支持 legacy、mixed、layered、joint、layered-pipeline；joint 和 layered-pipeline 使用 Triton prefill。SD 保持公共组件已有的 legacy／layered-pipeline 限制。DSV4 的 AR/cpu 与 AR/hybrid 属于要求通过的路径。Qwen3.6 和 DSV4 基座加载器仍为 TP1；TP2 服务使用支持 TP 的合法模型。合法配置启动失败是失败，不能改记为跳过。
-- **专家缓存下限**：令 E 为每层专家数。legacy／mixed 无重叠为 E、开重叠为 2E；layered 为 3E；joint、驻留组数1时为 E；layered-pipeline 为 2E。cpu 使用固定 2E，不由手动专家缓存参数改变。检查上下边界时保持其他资源足够。
+- **合法服务组合**：Qwen3.6 的 AR/offload 支持 legacy、mixed、layered、layered-pipeline；layered-pipeline 使用 Triton prefill。SD 保持公共组件已有的 legacy／layered-pipeline 限制。DSV4 的 AR/cpu 与 AR/hybrid 属于要求通过的路径。Qwen3.6 和 DSV4 基座加载器仍为 TP1；TP2 服务使用支持 TP 的合法模型。合法配置启动失败是失败，不能改记为跳过。
+- **专家缓存下限**：令 E 为每层专家数。legacy／mixed 无重叠为 E、开重叠为 2E；layered 为 3E；layered-pipeline 为 2E。cpu 使用固定 2E，不由手动专家缓存参数改变。检查上下边界时保持其他资源足够。
 - **维护**：`GET /v1/cache/status`；`POST /v1/cache/rebuild`，请求使用 `mode="if_idle"` 与 `timeout`（秒，默认300）。分池模式可调 `moe_cache_size`、`num_pages`、`num_mamba_slots`、`num_swa_pages`；共享模式可调 `runtime_cache_gib`、`moe_cache_size`。忙时返回 `status="busy"`，非法容量返回 `status="rejected"` 并保留原服务；其他 mode 返回 HTTP 422。没有 `drain` 模式。
 - **实际执行**：`GET /v1/stats` 的 `cuda_graph.target_decode`、`draft`、`verify`、`verify_range` 是实际回放计数，`cuda_graph.speculative_eager` 下对应字段是 eager 次数。以请求前后差值确认，不能只看 enabled；`replay_shapes` 提供实际形状。`execution.effective.batching_policy` 为实际策略，`execution.fallback_reasons` 说明回退；`requests.active` 为未结束请求数，忙时维护需先观察其大于0，完成后归零。`speculative.draft_tokens`、`accepted_draft_tokens`、`verify_steps` 等沿用现有 [DFlash 公开契约](dflash-public-contract.md)。
 - **TP2 的 bind 调用**：两进程各先 `torch.cuda.set_device(local_rank)`、`set_tp_info(rank=rank, size=2)`，再以 `tp_info=DistributedInfo(rank, 2)` 构造 `EngineConfig`。两进程读取同一 BASE／SIDE；`load_expert_banks(..., device=torch.device("cuda", local_rank), dtype=torch.bfloat16)` 返回本 rank 的 bank 和格式状态。`ExpertLayout("nowag", H, global_I, E)` 保留全局 I；输入 x 保留完整 H，路由与权重两 rank 相同。`run` 返回本 rank 贡献，由调用方执行公开 all-reduce，down bias 仅 rank0 加入。测试使用获准的两个 GPU UUID 固定可见顺序，local_rank 为0或1；由测试建立 NCCL 通信，不把单进程切片当作 TP2。真实服务再检验 engine 的公共通信路径。
