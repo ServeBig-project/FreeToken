@@ -1,56 +1,38 @@
-# Runtime 共享池收尾
+# Runtime pool 合并记录
 
-受测生产头 `d912bbe`，基线 `main@732f1ee`，正式 [PR #9](https://github.com/ServeBig-project/FreeToken/pull/9)。已补 self-SD、自适应 DFlash／cap、hybrid／ReplaySSM 长历史服务验证，关闭本轮复现的运行期 prefill OOM。**同配置另有一次 Graph 捕获阶段启动 OOM，尚未归因；成功重放不代表启动问题已解决。** TP 和多模态验证按用户决定暂缓，不作为本轮补验前置，也不计为通过。
+合并依据：用户于2026-10-10在知晓剩余验收尚未完成后明确要求“合并”。生产代码端点为 `17bbe02`，功能前基线为 `main@732f1ee`。**已通过的验证与尚未完成的验证分开记录；合入不代表完整验收矩阵全部通过。** TP、多模态验证按用户决定暂缓。
 
-## 修复与边界
+## 最终功能与修复
 
-- Graph 捕获使用的临时页现在按普通持有／释放记账，不再留下永久 pinned 计数；真正的哨兵仍常驻。
-- SD 先决定本轮 AR／草稿形状，只有实际选择 SD 才申请资源、必要时回收冷缓存。自适应计时排除资源申请耗时，实际裁剪后的执行形状参与成本记录。保留已确认的冷缓存回收规则，没有改成 SD 只能使用空闲内存。
-- 启动 prefill 容量探针使用留给执行的真实显存，不再对已经包含 Graph／激活开销的总用量重复施加缓存比例限制。
-- 共享模式 layered 波次中同时保留的全部 token 数受启动实测容量约束。旧逻辑把可执行的 1661-token tile 外推为 9966-token 波次，真实负载在后续 GDN 临时结果分配时 OOM；现在按实际容量分块。原分池路径保持原规则。
+KV、GDN、ReplaySSM、DFlash历史／窗口和SD临时状态共用显式runtime总预算，专家池独立。共享模式支持legacy／layered-pipeline；joint在启动前明确拒绝。默认启用策略与分池模式保持现有公开约定。
 
-没有缩小专家容量、runtime 总预算、并发上限、输入或输出长度，也没有关闭 Graph 来通过长历史复验。紧显存下实际 prefill tile 小于配置上限是公开的容量裁剪：本次 8192 的配置上限生效为 1661。它可能增加 prefill 分块次数，因此用完整请求时间报告结果。
+本轮关闭联合申请重复扣页、过量淘汰、AR误淘汰冷前缀、捕获临时页记账、prefill执行容量与保留波次上限、后建token表及采样工作区计价、Graph关闭时的临时页申请、物理容量与组件元数据统计问题。
 
-## 验收结果
+最后一项生产修复 `17bbe02`：联合维护同时缩小runtime并扩大专家缓存时，在Graph清理之后、专家扩容之前释放旧runtime，避免最终预算合法却在中间分配时OOM。生产+4／−2；既有维护／缓存CPU回归26项通过，其GPU联合维护验收仍未完成。
 
-独立测试作者未读生产源码、diff 或实现笔记。完整公开结果见 [独立补验报告](https://github.com/ServeBig-project/FreeToken/blob/test/runtime-pool/docs/runtime-pool-final-blackbox-report.md)；旧服务矩阵与其受测版本见同分支的 `docs/runtime-pool-blackbox-report.md`。每组按实际受测提交列出，未重跑的组不冒称最新头实测。
+## 已完成的验证
 
-| 验证 | 版本 | 结果 |
+| 验证 | 实际受测生产版本 | 结果 |
 | --- | --- | --- |
-| 既有 CPU engine/scheduler/kvcache/server | `1d3009a` | 953 通过，6 跳过 |
-| 既有独立 DFlash CLI／配置 CPU | `187dc9a` | 12 通过 |
-| 执行预算／重建／维护 CPU | `271ce06` | 56 通过 |
-| layered prefill 容量 CPU | `d912bbe` | 14 通过，1 跳过 |
-| 固定资源短→长→短与重复前缀 | main `732f1ee` / `6556e13` | 各 14/14；专家 2048、C4、约 2.75 GiB，各输出 1408 tokens |
-| self-SD，0.5 GiB，host 关闭 | `187dc9a` | 两轮各 8/8；长轮输出 14528 tokens，实际 4 次暂停／重算，压力后继续真实 SD |
-| 自适应 DFlash，cap 128，0.75 GiB | `187dc9a` | 8/8；实际 AR 与 SD，3 次 CPU 恢复，保留冷前缀复用 |
-| 原 58 请求 hybrid＋ReplaySSM＋DFlash | `d912bbe` | 58/58，0 错误；输入 4076–45475 tokens，输出上限 2–196，未缩放 |
+| 最终审计补验 J1–J6 | `f4647b2` | 14/14，无跳过；小池Replay／DFlash、小上下文与长度错误、采样突发、runtime重建、Graph关闭下真实SD、joint／不足一页配置拒绝、公开统计 |
+| 自动并发采样突发 | `f4647b2` | 6→7 GiB重建前后各提交98请求，每条64输出；生效C98保持，实际观测输出交叠4，不宣称同时执行98行 |
+| 新维护顺序的CPU接口回归 | `17bbe02` | 26通过 |
+| 联合准入／淘汰、DFlash、共享前缀Replay压力 | `7155bcf` | C9/9、E6/6、G4/4；实际暂停／恢复／重算，共享前缀压力输出与solo逐字一致 |
+| self-SD／自适应DFlash与cap压力 | `187dc9a` | 各组8/8；self-SD有4次重算，DFlash自适应有3次CPU恢复 |
+| 原始hybrid＋ReplaySSM＋DFlash长历史负载 | `d912bbe` | 58/58、零请求错误，输入和输出未缩短；全程214.585秒，1847输出tokens |
 
-58 请求包含 12 warmup、46 scored，全序列 214.585 s、1847 输出 tokens。scored 平均延迟 23.955 s、TTFT 22.401 s，p95 TTFT 38.507 s，最大流式输出间隔 0.921 s。实际执行 Replay AR 1703 tokens、verify 142 tokens；DFlash draft/accepted/verify 为 113/49/29；运行期间没有新增 Graph 捕获。
+独立测试与报告已集成：`blackbox_tests/runtime_pool/`、[最终补验](runtime-pool-merge-acceptance.md)、[此前服务矩阵](runtime-pool-blackbox-report.md)、[连续负载与压力结果](runtime-pool-final-blackbox-report.md)。旧报告保留当时的版本与结论；后续证据更正和当前状态以本页为准。
 
-同一进程固定 runtime 9,263,120,384 B、专家 5000，无缓存重建。KV 峰值时持有 4600 MiB、GDN state 2220 MiB；结束时分别为 3280/3180 MiB，发生 2315 次解除映射，观测到物理用途转换。最大 held 9,258,926,080 B 未超过预算。该轮没有活跃请求暂停；暂停／恢复证据来自前两项独立压力测试。
+全量CPU套件在f4647b2与基线具有同一组12失败／4错误，未记为全量通过。本轮A/B宿主机不独占，完整请求吞吐分池52.537、共享51.529 token/s；不能据约2%差异归因实现退化或证明持平。
 
-AR 配对完整请求吞吐为分池 52.537、共享 51.529 token/s，约 2% 差异；本轮宿主机并非独占，不据此断言实现退化或持平。此前干净条件对照仅适用于当时的版本和负载。历史原始 OOM 发生在 DFlash compact 合入之前，也不能把本次成功全部归因于共享池。
+## 未完成项及启动失败归类
 
-## 剩余问题与证据
+- 最终生产端点17bbe02上的原58请求重放：两次尝试均遇同卡NoWAG任务重叠，未进入请求重放；第二次由协调者终止自己的重叠试跑。不能借d912bbe的通过记录宣称最终头通过。
+- 联合维护 `R8.626953125GiB／专家5000 → R4.75GiB／专家7200`：独立驱动已提交，公开最终总预算合法且减少256,491,520字节，但GPU服务验收未执行。
+- 旧d912bbe的Graph启动OOM已确认不是独占GPU实验：runtime在20:17:09失败，同卡NoWAG测试在20:17:10.772结束，其CUDA错误记录另一个测试进程占1.23GiB。该样本保留为同卡争用污染，不再作为共享池自身启动不稳定的证据。
 
-`hybrid-trace-v3` 在 `d912bbe`、同一资源配置下于 CUDA Graph 捕获末尾 OOM，尚未 ready；随后 `hybrid-trace-v4` 启动并完成原 58 请求。失败轮和成功轮均保留。前者初始化后可用显存 2.10 GiB，后者 2.50 GiB；range Graph 后分别为 1.17／2.04 GiB。失败轮日志没有分配器分项，不能据此编造根因或宣称零已知失败。
-
-随后对同一 `d912bbe`、同参数做一次仓库外注入诊断，成功启动，生产代码未改动。range Graph 消耗 286 MiB，其中 PyTorch reserved 只增 20 MiB；86 个 SD verify Graph 再消耗 1356 MiB，其中 reserved 只增 68 MiB，其余 1288 MiB 属于分配器外占用。捕获阶段确有显著原生开销，单看 PyTorch reserved 会漏计；但失败轮额外的约 0.87 GiB 差异未复现，因此这不是启动故障的完整归因。未据此缩减 Graph 覆盖、调整用户预算或增加盲目清缓存代码。诊断文件：`startup-memory-injection/sitecustomize.py` 与 `hybrid-startup-diagnostic-server.log/json`；它是诊断，不计入独立验收通过数。
-
-原始证据目录：`/data2/servebig-envs/runtime_pool_closeout_20261009/`。各 `*-server.json` 保存完整参数和受测源码提交；请求／SSE／usage／stats／资源采样与 CPU 日志分别归档。长历史采样在 `hybrid-trace-v4-status/cache-status.jsonl`，请求与汇总在 `hybrid-trace-v4/`。不以自然语言文本差异断言数值错误，也不把协议与 usage 通过等同于逐 token 数学等值证明。
+证据根目录：`/data2/servebig-envs/runtime_pool_closeout_20261009/`。`final-j1-j6-pytest.log`记录14项通过；`hybrid-trace-v3-contention-evidence.json`记录旧失败的交叉证据；`merge-final-gpu-processes.jsonl`和`merge-final-isolated-gpu-processes.jsonl`记录最终两次尝试的重叠进程；`merge-final-trace-isolated-abort.json`说明第二次终止。失败原始日志未删除。
 
 ## 代码量
 
-相对功能前基线 `732f1ee`：生产（含构建入口）37 文件，**+2429／−330，净 +2099**；生成文件、第三方、文档与测试不计。生产分支测试改动为零。独立测试分支相对同一基线：22 个 Python 测试／辅助文件，**+2844／−0，净 +2844**；其中本轮新增 243 行，之前 2601 行（含算子与服务测试）。旧记录的 1531 行仅为服务阶段口径，不是整个测试分支。报告和 `.gitignore` 不计测试代码。
-
-| 本轮提交 | 内容 | 生产增加／删除／净增 |
-| --- | --- | --- |
-| `a414c7b` | 临时捕获页记账 | +5／−1／+4 |
-| `1d3009a` | 选择实际 SD 后申请资源 | +43／−47／−4 |
-| `6556e13` | 状态与设计文档 | 0／0／0 |
-| `187dc9a` | 决策计时排除申请 | +2／−0／+2 |
-| `271ce06` | prefill 执行预算 | +6／−3／+3 |
-| `d912bbe` | 波次保留量不超实测容量 | +8／−5／+3 |
-
-本轮相对接手头 `a189310` 合计生产 +64／−56，净 +8；黑盒由独立作者提交 `ee6343f`（+242／−0）和 `15682e9`（+2／−1），报告提交 `7d44381`。
+相对732f1ee，生产（含构建入口）39文件 **+2453／−322，净+2131**；独立黑盒29个Python文件 **+3326／−0，净+3326**。文档、生成文件、第三方不计。实现与黑盒作者分离；测试集成没有改变生产代码。
