@@ -18,6 +18,7 @@
 
 - `--runtime-cache-gib R`／Python `runtime_cache_gib`为正数，选择共享模式和每个GPU worker的runtime容量；0不是关闭方式。省略／None保留原模式，完整压力报告后再讨论默认推广。
 - 共享模式与显式目标 KV 页／token 容量、GDN 独立预算／快照份额、旧分池的KV最低预留配置冲突，ready前给出可理解的错误；不悄悄转换成多个固定份额。原模式的旧参数语义保持。
+- 共享模式不支持 `--batching-policy joint`，ready 前明确拒绝；可用 `layered-pipeline`（默认 auto 的选择）或 `legacy`。prefill 上限（`--max-extend-tokens` 或上下文）不足一页时同样在 ready 前拒绝。
 - 专家显式容量不变；总 GPU 资源放不下应在 ready 前报错，不挤占专家池。
 - 共享模式省略`--max-running-requests`／Python `max_running_req`时按资源／执行能力自动推导；显式值只作额外限制，两者取较小值并报告，即使显式值等于旧默认也应生效。原模式省略时保留原默认。它不是未来请求数或最快batch的承诺；提高该值不能按倍数物理预占完整GDN／Replay／draft历史。元数据和必要执行工作区可有明确的增长并报告。
 - 未指定最大上下文时自动推导并公布单请求独占runtime的可执行上限；显式指定超过该能力时在启动阶段报错，不静默降低。不承诺靠暂停执行连单请求都放不下的超长历史。
