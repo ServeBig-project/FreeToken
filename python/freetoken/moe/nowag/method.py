@@ -16,7 +16,10 @@ from freetoken.moe.expert_format import (
 
 from freetoken.kernel import moe_sum_reduce_triton
 from freetoken.kernel.nowag import cuda_ops
-from freetoken.kernel.nowag.execution_profile import select_cuda_moe_backend
+from freetoken.kernel.nowag.execution_profile import (
+    profiled_moe_expert_rows,
+    select_cuda_moe_backend,
+)
 from freetoken.kernel.nowag.moe_ops import (
     MAX_STRUCTURAL_DOWN_BLOCK_M,
     moe_middle_workspace_layout,
@@ -86,13 +89,15 @@ def _kernel_math(math: ExpertMath) -> dict:
     )
 
 
-def _exact_selected(eligible: bool, select, rows: int, top_k: int, bank_rows: int) -> bool:
-    """Whether Exact-K48 may run for a batch of 1..rows: the format must be eligible and, on
-    a CUDA device, the measured profiles must pick it for one of those batches."""
-    if not eligible or select is None:
-        return eligible
-    return any(select(physical_expert_rows=bank_rows, top_k=top_k, num_tokens=t)
-               == "cuda_exact_k48" for t in range(1, rows + 1))
+def _exact_rows(eligible: bool, select, profiled: tuple[int, ...], rows: int, top_k: int,
+                bank_rows: int) -> tuple[int, ...]:
+    """Bank-row counts up to ``bank_rows`` at which Exact-K48 may run a batch of 1..rows.
+    Without a CUDA device to read profiles from, eligibility alone decides."""
+    if select is None:
+        return (bank_rows,) if eligible else ()
+    return tuple(r for r in profiled if r <= bank_rows and any(
+        select(physical_expert_rows=r, top_k=top_k, num_tokens=t) == "cuda_exact_k48"
+        for t in range(1, rows + 1)))
 
 
 def _align_routes(
@@ -136,7 +141,7 @@ def bind_nowag_method(
     # D6 SiLU experts.
     exact = (kernel_backend == "auto" and state.d == 6 and math.activation in ("silu", "swish")
              and not math.router_weight_on_down_input)
-    select = None
+    select, profiled = None, ()
     if exact and device.type == "cuda":
         select = partial(
             select_cuda_moe_backend, device=device, dtype=torch.bfloat16, group_size=state.d,
@@ -148,11 +153,14 @@ def bind_nowag_method(
             assignment_layout=RUNTIME_ASSIGNMENT_LAYOUT, **_kernel_math(math),
         )
         # Load the profiles here, not inside a budget query.
+        profiled = profiled_moe_expert_rows(
+            device=device, dtype=torch.bfloat16, group_size=state.d,
+            assignment_bits=state.assignment_bits, codebook_size=1 << state.assignment_bits)
         select(physical_expert_rows=layout.num_experts, top_k=1, num_tokens=1)
-    may_run_exact = lru_cache(maxsize=None)(partial(_exact_selected, exact, select))
+    exact_rows = lru_cache(maxsize=None)(partial(_exact_rows, exact, select, profiled))
     return ExpertMethod(
         run=run,
-        workspace_spec=partial(_workspace_spec, layout, state, may_run_exact),
+        workspace_spec=partial(_workspace_spec, layout, state, exact_rows),
         kernel_backends=("triton", "cuda_exact_k48") if exact else ("triton",),
         format_parameters={"d": state.d, "assignment_bits": state.assignment_bits},
         speculative_graphs=True,
@@ -162,33 +170,34 @@ def bind_nowag_method(
 
 
 def _workspace_spec(
-    layout: ExpertLayout, state: NowagState, may_run_exact, rows: int, top_k: int, *,
+    layout: ExpertLayout, state: NowagState, exact_rows, rows: int, top_k: int, *,
     bank_rows: int,
 ) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
     """Scratch for ``rows`` physical token rows over ``bank_rows`` addressable bank rows:
-    the bound over the plans the kernel can pick for these batches. Exact-K48 may take two
-    compute slabs, the largest Down tile and either adaptive task queue; Triton alone uses
-    one slab and a Down tile that grows with the batch, so ``rows`` bounds it."""
+    the bound over the plans the kernel can pick. Triton uses one compute slab and a Down
+    tile that grows with the batch, so ``rows`` bounds it; Exact-K48 may take two slabs,
+    the largest Down tile and either adaptive task queue. The budget solver bisects on
+    this cost, so it must not fall as rows or bank rows grow: an Exact-K48 plan at fewer
+    bank rows also bounds every larger cache."""
     if rows == 0:
         return {}
     routes = rows * top_k
-    if may_run_exact(rows, top_k, bank_rows):
-        plans = [dict(alignment_block_m=MAX_STRUCTURAL_DOWN_BLOCK_M, compute_slabs=2,
-                      adaptive_m_tiles=True, adaptive_residual_policy=policy)
-                 for policy in ("bm16", "tail64")]
-    else:
-        plans = [dict(alignment_block_m=structural_down_block_m(rows, top_k, layout.num_experts),
-                      compute_slabs=1, adaptive_m_tiles=False)]
+    plans = [(bank_rows, dict(
+        alignment_block_m=structural_down_block_m(rows, top_k, layout.num_experts),
+        compute_slabs=1, adaptive_m_tiles=False))]
+    plans += [(r, dict(alignment_block_m=MAX_STRUCTURAL_DOWN_BLOCK_M, compute_slabs=2,
+                       adaptive_m_tiles=True, adaptive_residual_policy=policy))
+              for r in exact_rows(rows, top_k, bank_rows) for policy in ("bm16", "tail64")]
     middle_rows = max(
         moe_middle_workspace_layout(
             num_routes=routes,
-            num_experts=bank_rows,
+            num_experts=experts,
             physical_intermediate_size=state.intermediate_size,
             structural_down=True,
             caller_owned_alignment_storage=False,
             **plan,
         ).total_rows
-        for plan in plans
+        for experts, plan in plans
     )
     return {
         "middle": ((middle_rows, state.intermediate_size), torch.bfloat16),

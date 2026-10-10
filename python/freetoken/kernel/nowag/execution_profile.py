@@ -464,6 +464,25 @@ def select_cuda_moe_backend(
     )
 
 
+def profiled_moe_expert_rows(
+    *,
+    device: object,
+    dtype: object,
+    group_size: int,
+    assignment_bits: int,
+    codebook_size: int,
+) -> tuple[int, ...]:
+    """Physical expert-row counts the bundled MoE profiles were measured at."""
+    hardware = _hardware_mapping_key(cuda_hardware_key(device))
+    fmt = _format_tuple(dtype, group_size, assignment_bits, codebook_size)
+    return tuple(sorted({
+        dict(shape)["physical_expert_rows"]
+        for profile in _bundled_profiles()
+        if profile["hardware"] == hardware and profile["format"] == fmt
+        for shape, _ in profile["moe"]
+    }))
+
+
 def _hardware_mapping_key(
     key: tuple[str, str, tuple[int, int]],
 ) -> tuple[tuple[str, Any], ...]:
