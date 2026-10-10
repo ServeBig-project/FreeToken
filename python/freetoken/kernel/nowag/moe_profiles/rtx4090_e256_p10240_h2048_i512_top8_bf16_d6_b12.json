@@ -1,0 +1,84 @@
+{
+  "schema_version": 4,
+  "name": "rtx4090-e256-p10240-h2048-i512-top8-bf16-d6-b12",
+  "hardware": {
+    "backend": "cuda",
+    "device_name": "NVIDIA GeForce RTX 4090",
+    "compute_capability": [8, 9]
+  },
+  "shape": {
+    "num_experts": 256,
+    "physical_expert_rows": 10240,
+    "hidden_size": 2048,
+    "intermediate_size": 512,
+    "physical_intermediate_size": 512,
+    "pad_down_to_k48": false,
+    "down_input_group_start_lane": 0,
+    "assignment_layout": "word_major",
+    "structural_down": true,
+    "top_k": 8,
+    "codebook_size": 4096,
+    "dtype": "bfloat16",
+    "group_size": 6,
+    "assignment_bits": 12,
+    "activation_kind": "silu_mul",
+    "gate_up_input_rounding": "none",
+    "swiglu_limit": null,
+    "down_input_rounding": "none",
+    "down_norm_placement": "gate_up_epilogue"
+  },
+  "token_buckets": [
+    {
+      "min_tokens": 1,
+      "max_tokens": 1,
+      "gate_up": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2, "shared_codebook_entries": 4096, "assignment_l2_only": true},
+      "down": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2}
+    },
+    {
+      "min_tokens": 2,
+      "max_tokens": 2,
+      "gate_up": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2, "shared_codebook_entries": 4096, "assignment_l2_only": true},
+      "down": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2}
+    },
+    {
+      "min_tokens": 4,
+      "max_tokens": 4,
+      "gate_up": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2, "shared_codebook_entries": 0, "assignment_l2_only": true},
+      "down": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2}
+    },
+    {
+      "min_tokens": 8,
+      "max_tokens": 8,
+      "gate_up": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2, "shared_codebook_entries": 0, "assignment_l2_only": true},
+      "down": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2}
+    },
+    {
+      "min_tokens": 16,
+      "max_tokens": 16,
+      "gate_up": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2, "shared_codebook_entries": 0, "assignment_l2_only": true},
+      "down": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2}
+    }
+  ],
+  "provenance": {
+    "source": [
+      "/data1/lmcache_kv/nowag_kernel_tuning/blackbox_direct_route_tests/bm16_qwen_full_matrix_rerun.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/blackbox_direct_route_tests/codebook_cache_formal_full_matrix.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/blackbox_direct_route_tests/final_decision_cache_full_matrix.json"
+    ],
+    "measured_tokens": [1, 2, 4, 8, 16],
+    "enabled_tokens": [1, 2, 4, 8, 16],
+    "bm16_uniform_plan": "Gate/Up and Down use BM16/BN128, 8 warps, and 2 stages; this plan beat the previous automatic plan in 10/10 measured cases.",
+    "assignment_l2_only_control": {
+      "winning_cases": 10,
+      "geomean_speedup": 1.0429
+    },
+    "full_shared_codebook": {
+      "enabled_tokens": [1, 2],
+      "winning_routing": ["balanced", "hotspot"],
+      "approximate_speedup_range": [1.308, 1.316],
+      "not_enabled_tokens": [4, 8, 16]
+    },
+    "final_auto": "Final automatic selection and output consistency passed 10/10 measured cases.",
+    "rule": "Use the full shared codebook only at measured M=1 and M=2; use the no-shared L2-only assignment control at M=4, M=8, and M=16. No neighboring range is inferred."
+  }
+}

@@ -43,7 +43,7 @@ import socket
 import statistics
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -57,6 +57,7 @@ from freetoken.gpu_select import (
 )
 from freetoken.kernel.pinned import alloc_pinned_tensor
 from freetoken.moe.cpu_executor import physical_core_cpus, resolve_threads_and_affinity
+from freetoken.moe.expert_format import E4M3_GROUP128_UE8M0
 from freetoken.utils import init_logger
 
 logger = init_logger(__name__)
@@ -110,13 +111,15 @@ class Workload:
     activation: str = "silu"
     swiglu_alpha: float = 1.702
     swiglu_limit: float | None = None
-    nowag_model_type: str | None = None
+    gate_up_input_rounding: str | None = None
+    down_input_rounding: str | None = None
+    router_weight_on_down_input: bool = False
 
 
 @dataclass(frozen=True)
 class _CpuMoeBanks:
     sources: dict[str, torch.Tensor]
-    codebook: torch.Tensor | None = None
+    shared: dict[str, torch.Tensor] = field(default_factory=dict)
 
 
 # Preset workloads. Dims from the model configs / benchmarks/bench_offload_cache_copy.py.
@@ -125,7 +128,6 @@ WORKLOADS: dict[str, Workload] = {
     "qwen3.6-moe": Workload(
         "qwen3.6-moe", 2048, 512, 256, 8,
         ("bf16", "nvfp4", "fp8_block", "nowag"),
-        nowag_model_type="qwen3_5_moe",
     ),
     "qwen3-30b": Workload("qwen3-30b", 2048, 768, 128, 8, ("bf16",)),
     "gemma4-26b": Workload("gemma4-26b", 2816, 704, 128, 8, ("bf16",), activation="gelu_tanh"),
@@ -135,7 +137,8 @@ WORKLOADS: dict[str, Workload] = {
                             activation="gpt_oss_swiglu", swiglu_limit=7.0),
     "dsv4": Workload(
         "dsv4", 4096, 2048, 256, 6, ("ds_fp4", "nowag"),
-        swiglu_limit=7.0, nowag_model_type="deepseek_v4",
+        swiglu_limit=7.0, gate_up_input_rounding=E4M3_GROUP128_UE8M0,
+        down_input_rounding=E4M3_GROUP128_UE8M0, router_weight_on_down_input=True,
     ),
     "glm4.7-nvfp4": Workload("glm4.7-nvfp4", 5120, 1536, 160, 8, ("nvfp4",)),
     "minimax-m2.5": Workload("minimax-m2.5", 3072, 1536, 256, 8, ("nvfp4",)),
@@ -157,7 +160,6 @@ DTYPE_WORKLOADS: dict[str, Workload] = {
     "ds_fp4": Workload("dtype:ds_fp4", 4096, 2048, 128, 6, ("ds_fp4",), swiglu_limit=7.0),
     "nowag": Workload(
         "dtype:nowag", 2048, 512, 128, 8, ("nowag",),
-        nowag_model_type="qwen3_5_moe",
     ),
 }
 
@@ -440,7 +442,7 @@ def _cpu_moe_bank_sources(fmt: str, H: int, I: int, E: int) -> _CpuMoeBanks:
                 tensor.fill_(1.0)
         codebook = alloc_pinned_tensor(4096, 6, dtype=torch.bfloat16)
         codebook.fill_(0.02)
-        return _CpuMoeBanks(b, codebook)
+        return _CpuMoeBanks(b, {"codebook": codebook})
     raise NotImplementedError(fmt)
 
 
@@ -526,14 +528,29 @@ def _build_cpu_moe_executor(
         bank_sources={name: [tensor] for name, tensor in banks.sources.items()},
         num_layers=1, num_experts=E,
         decode_target="cpu", cpu_executor=None,
-        host_codebook=banks.codebook,
+        host_shared=banks.shared,
     )
+    method = None
+    if fmt == "nowag":
+        from freetoken.moe.expert_format import ExpertLayout, ExpertMath, bind_expert_method
+        from freetoken.moe.nowag.weights import NowagState
+
+        method = bind_expert_method(
+            ExpertMath(activation=wl.activation, activation_alpha=wl.swiglu_alpha,
+                       activation_limit=wl.swiglu_limit,
+                       gate_up_input_rounding=wl.gate_up_input_rounding,
+                       down_input_rounding=wl.down_input_rounding,
+                       router_weight_on_down_input=wl.router_weight_on_down_input),
+            ExpertLayout(fmt, wl.hidden, wl.inter, E), NowagState(6, 12, wl.inter),
+            device=torch.device("cpu"), backend="cpu",
+        )
     return CpuMoeExecutor(
         cache, top_k=wl.top_k, activation=wl.activation,
         apply_router_weight_on_input=False, num_threads=num_threads, max_tokens=1,
         device=torch.device("cuda"), swiglu_alpha=wl.swiglu_alpha,
         swiglu_limit=wl.swiglu_limit,
-        nowag_model_type=wl.nowag_model_type,
+        gate_up_input_rounding=wl.gate_up_input_rounding,
+        expert_method=method,
     )
 
 

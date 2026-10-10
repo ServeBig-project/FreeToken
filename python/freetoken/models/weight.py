@@ -228,10 +228,8 @@ def load_weight(
     dense_precision: str = "source",
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     # FTW checkpoint: dense weights are stored post-iter_weights, so we replay them
-    # model-agnostically instead of re-running the per-model reader. Which tensors exist is
-    # decided at conversion (offload -> experts live in banks, not here); a backend mismatch
-    # fails loudly in load_state_dict (strict missing/unexpected expert keys), so the reader
-    # just yields the stored weight tensors regardless of the include_moe_experts flag.
+    # model-agnostically instead of re-running the per-model reader. Routed experts may be
+    # replaced independently; every other key still reaches strict model-state validation.
     from freetoken.checkpoint.ftw import FTWReader, is_ftw_checkpoint, iter_ftw_weights
     from freetoken.models.config import VISION_KEY_PREFIXES, vision_load_enabled
     from freetoken.quant.dense import FTW_META_KEY
@@ -242,7 +240,8 @@ def load_weight(
         # model never builds the tower, so replaying those tensors would trip load_state_dict's
         # strict unexpected-key check. Skip them here to match the model the engine built.
         skip_vision = not vision_load_enabled()
-        weights = iter_ftw_weights(model_path)
+        include = None if include_moe_experts else lambda name: not _resident_expert_weight(name)
+        weights = iter_ftw_weights(model_path, include_name=include)
         if dense_precision == "bf16" and FTWReader(model_path).meta(FTW_META_KEY) == "fp8":
             weights = _decode_fp8_rows(weights)
         for name, tensor in weights:
@@ -288,6 +287,16 @@ def _decode_fp8_rows(weights: Iterator[Tuple[str, torch.Tensor]]) -> Iterator[Tu
         yield name, tensor
     if pending is not None:
         yield pending[0] + ".weight", pending[1]
+
+
+def _resident_expert_weight(name: str) -> bool:
+    """Tensor fields emitted by the existing resident MoE components."""
+    parent, _, field = name.rpartition(".")
+    return parent.endswith(".experts") and field in {
+        "gate_up_proj", "down_proj", "gate_up_scale_inv", "down_scale_inv",
+        "gate_up_proj_blocks", "gate_up_proj_scales", "gate_up_proj_bias",
+        "down_proj_blocks", "down_proj_scales", "down_proj_bias",
+    }
 
 
 def load_moe_expert_sources(

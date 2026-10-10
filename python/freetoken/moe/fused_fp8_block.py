@@ -1,4 +1,4 @@
-"""Block-FP8 routed-expert MoE dispatch (offload `_expert_gemm` "fp8_block" branch).
+"""Block-FP8 routed-expert MoE dispatch (the "fp8_block" expert method).
 
 The experts live in the offload cache as block-fp8 (fp8-e4m3 weight + bf16 per-128x128
 ``weight_scale_inv``) -- half the resident/host bytes of bf16, so the cache holds ~2x more

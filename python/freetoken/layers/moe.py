@@ -6,7 +6,7 @@ import torch
 from freetoken.core import get_global_ctx
 from freetoken.distributed import DistributedCommunicator, get_tp_info
 from freetoken.moe import is_offload_moe_backend
-from freetoken.moe.fused import fused_experts_decode_impl, fused_experts_impl, fused_topk
+from freetoken.moe.fused import fused_topk
 from freetoken.moe.offload_cache import OffloadMoeCache
 from freetoken.utils import div_even
 
@@ -55,6 +55,13 @@ class MoELayer(BaseOP):
         self.activation = activation
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.weight_format = weight_format
+        # Bound by make_moe_layer (resident) or the engine (offload family and
+        # resident formats loaded through load_expert_banks, which also sets the banks).
+        self.expert_method = None
+        self.expert_banks: dict[str, torch.Tensor] | None = None
+        self.expert_shared: dict[str, torch.Tensor] = {}
+        # The decode stream's reserved expert scratch (engine); prefill allocates its own.
+        self.expert_workspace: dict[str, torch.Tensor] | None = None
         intermediate_size_per_partition = div_even(intermediate_size, tp_size)
         if allocate_experts:
             self._alloc_resident_experts(intermediate_size_per_partition)
@@ -62,8 +69,8 @@ class MoELayer(BaseOP):
     def _alloc_resident_experts(self, intermediate_size_per_partition: int) -> None:
         """Allocate the resident (in-GPU) expert weights for ``self.weight_format``.
 
-        The resident sibling of the offload bank schemas: each format owns its
-        tensor layout here and its kernel branch in ``_resident_gemm``.
+        The resident sibling of the offload bank schemas; ``_resident_banks`` names
+        these tensors by the format's bank names for the bound expert method.
         """
         if self.weight_format == "fp8_block":
             # Stacked block-fp8 experts + bf16 per-128x128-block inverse scales.
@@ -98,22 +105,15 @@ class MoELayer(BaseOP):
             return self._comm.all_reduce(hidden_states)
         return hidden_states
 
-    def _run_experts(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        """Dense (in-GPU) expert compute for a precomputed routing decision."""
-        return fused_experts_impl(
-            hidden_states,
-            self.gate_up_proj,
-            self.down_proj,
-            topk_weights,
-            topk_ids,
-            self.activation,
-            apply_router_weight_on_input=self.apply_router_weight_on_input,
-        )
+    def _resident_banks(self) -> dict[str, torch.Tensor]:
+        if self.expert_banks is not None:
+            return self.expert_banks
+        if self.weight_format == "fp8_block":
+            return {
+                "gate_up": self.gate_up_proj, "gate_up_scale": self.gate_up_scale_inv,
+                "down": self.down_proj, "down_scale": self.down_scale_inv,
+            }
+        return {"gate_up": self.gate_up_proj, "down": self.down_proj}
 
     def _resident_gemm(
         self,
@@ -121,30 +121,13 @@ class MoELayer(BaseOP):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor:
-        """Kernel dispatch on ``self.weight_format`` -- the resident mirror of
-        ``OffloadMoELayer._expert_gemm``'s ``cache.quant_format`` dispatch."""
-        if self.weight_format == "fp8_block":
-            # Prefill dequantizes the layer's experts to bf16 and runs the bf16
-            # grouped GEMM; decode dequantizes only the routed rows.
-            from freetoken.moe.fused_fp8_block import (
-                fused_experts_decode_fp8_block,
-                fused_experts_fp8_block,
-            )
-
-            if get_global_ctx().batch.uses_extend_path:
-                return fused_experts_fp8_block(
-                    hidden_states, self.gate_up_proj, self.gate_up_scale_inv,
-                    self.down_proj, self.down_scale_inv,
-                    topk_weights, topk_ids, self.num_experts,
-                )
-            return fused_experts_decode_fp8_block(
-                hidden_states, self.gate_up_proj, self.gate_up_scale_inv,
-                self.down_proj, self.down_scale_inv, topk_weights, topk_ids,
-            )
-        assert self.weight_format == "bf16", (
-            f"no resident expert kernel for weight_format {self.weight_format!r}"
+        prefill = get_global_ctx().batch.uses_extend_path
+        return self.expert_method.run(
+            hidden_states, topk_ids, topk_weights, self._resident_banks(), self.expert_shared,
+            workspace=None if prefill else self.expert_workspace,
+            prefill=prefill,
+            sort_rows=self.num_experts,
         )
-        return self._run_experts(hidden_states, topk_weights, topk_ids)
 
     def routed_forward(
         self,
@@ -233,9 +216,6 @@ class OffloadMoELayer(MoELayer):
         )
         self.layer_id = layer_id
         self.offload_cache: OffloadMoeCache | None = None
-        # Set by make_moe_layer (or a model-specific subclass) so NoWAG can
-        # preserve each model's activation math without changing cache layout.
-        self.nowag_model_type: str | None = None
 
     def forward(
         self,
@@ -438,9 +418,7 @@ class OffloadMoELayer(MoELayer):
         )
         if resident or cache.prefill_group_size or short_chunk:
             expert_map = (
-                cache.slot_for_id[self.layer_id]
-                if cache.quant_format in ("bf16", "nvfp4", "fp8_block", "mxfp4_triton", "ds_fp4")
-                else None
+                cache.slot_for_id[self.layer_id] if self.expert_method.logical_sort else None
             )
             logical_ids = topk_ids.clone() if expert_map is not None else topk_ids
             if resident:
@@ -502,12 +480,6 @@ class OffloadMoELayer(MoELayer):
             cache.prefetch_prefill_layer(self.layer_id + 1)
         return cache.wait_prefill_layer(self.layer_id)
 
-    # ------------------------------------------------------------------
-    # Kernel dispatch -- pure routing on the cache's quant format. ``views``
-    # are the bank tensors the movement step produced (in bank registration
-    # order) and ``topk_ids`` already index their rows.
-    # ------------------------------------------------------------------
-
     def _expert_gemm(
         self,
         cache: OffloadMoeCache,
@@ -521,185 +493,16 @@ class OffloadMoELayer(MoELayer):
         is_prefill: bool,
         expert_map: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        fmt = cache.quant_format
-        if fmt in ("nvfp4_marlin", "nvfp4_b12x"):
-            # Borrowed W4A16 fused MoE -- Marlin (vLLM, sm_80-99) or b12x
-            # (flashinfer, sm_120) over their pre-tiled banks; one kernel serves
-            # prefill and decode, with the movement-matched per-row global scales.
-            from freetoken.moe.nvfp4_backends import b12x_fused_experts, marlin_fused_experts
-
-            assert alphas is not None
-            gate_up_packed, gate_up_scale, down_packed, down_scale = views
-            fused = marlin_fused_experts if fmt == "nvfp4_marlin" else b12x_fused_experts
-            return fused(
-                hidden_states,
-                gate_up_packed,
-                gate_up_scale,
-                alphas[0],
-                down_packed,
-                down_scale,
-                alphas[1],
-                topk_weights,
-                topk_ids,
-                self.activation,
-                self.apply_router_weight_on_input,
-            )
-        if fmt == "nvfp4":
-            # FreeToken's Triton inline-dequant kernels over the native ModelOpt
-            # rows: the FP4 banks are read directly in the GEMM, no BF16 copy of
-            # the experts is ever materialized. The swigluoai scalars (MiniMax-M3)
-            # live on the layer via make_moe_layer's extra_attrs (gpt-oss precedent)
-            # and are ignored by the plain *_and_mul activations.
-            act_alpha = getattr(self, "hidden_act_alpha", 1.702)
-            act_limit = getattr(self, "swiglu_limit", None)
-            # None == "no clamp" everywhere else in the repo (mxfp4 maps it to +inf).
-            act_limit = float("inf") if act_limit is None else act_limit
-            if is_prefill:
-                from freetoken.moe.fused_nvfp4 import fused_experts_nvfp4
-
-                return fused_experts_nvfp4(
-                    hidden_states,
-                    *views,
-                    topk_weights,
-                    topk_ids,
-                    n,
-                    self.activation,
-                    self.apply_router_weight_on_input,
-                    act_alpha,
-                    act_limit,
-                    expert_map,
-                )
-            # Marlin-style int32 wide-load GEMV (arithmetic dequant, no HW cvt).
-            # Bit-identical to the byte-at-a-time path; lifts gate/up BW ~43%->51%
-            # (I=512), ~41%->53% (I=768), 65%->72% (I=1536). CUDA-graph safe (fixed
-            # shapes, no host sync).
-            from freetoken.moe.fused_nvfp4 import fused_experts_decode_nvfp4_marlin
-
-            return fused_experts_decode_nvfp4_marlin(
-                hidden_states,
-                *views,
-                topk_weights,
-                topk_ids,
-                self.activation,
-                self.apply_router_weight_on_input,
-                act_alpha,
-                act_limit,
-            )
-        if fmt == "fp8_block":
-            # Block-fp8 experts: fused inline-dequant grouped GEMM reads the routed fp8 rows
-            # directly (fp8 banks halve host/cache bytes; no bf16 materialization).
-            from freetoken.moe.fused_fp8_block import (
-                fused_experts_decode_fp8_block,
-                fused_experts_fp8_block,
-            )
-
-            gate_up, gate_up_scale, down, down_scale = views
-            if is_prefill:
-                return fused_experts_fp8_block(
-                    hidden_states, gate_up, gate_up_scale, down, down_scale,
-                    topk_weights, topk_ids, n, self.activation,
-                    self.apply_router_weight_on_input,
-                    expert_map,
-                )
-            return fused_experts_decode_fp8_block(
-                hidden_states, gate_up, gate_up_scale, down, down_scale,
-                topk_weights, topk_ids, self.activation, self.apply_router_weight_on_input,
-            )
-        if fmt == "q4_0":
-            # Native GGUF Q4_0 experts: dequant-in-kernel grouped GEMV (MMVQ) over the
-            # streamed packed banks; topk_ids already index the cache slots / layer.
-            from freetoken.moe.fused_q4_0 import fused_experts_gguf_q4_0
-
-            gate_up, down = views
-            return fused_experts_gguf_q4_0(
-                hidden_states, gate_up, down, topk_weights, topk_ids, self.activation
-            )
-        if fmt == "mxfp4_triton":
-            # gpt-oss MXFP4 experts (biased, clamped swiglu): transposed split-K GEMV
-            # decode + grouped `_t` prefill. The swiglu scalars live on the layer
-            # (set at construction), not in the base signature.
-            from freetoken.moe.fused_mxfp4 import (
-                run_mxfp4_prefill_experts_t,
-                run_mxfp4_splitk_decode_experts,
-            )
-
-            gu_blocks, gu_scales, gu_bias, dn_blocks, dn_scales, dn_bias = views
-            run = run_mxfp4_prefill_experts_t if is_prefill else run_mxfp4_splitk_decode_experts
-            return run(
-                hidden_states, topk_weights, topk_ids,
-                gu_blocks, gu_scales, gu_bias, dn_blocks, dn_scales, dn_bias,
-                top_k=self.top_k,
-                hidden_act_alpha=self.hidden_act_alpha,
-                swiglu_limit=self.swiglu_limit,
-                **({"expert_map": expert_map} if is_prefill else {}),
-            )
-        if fmt == "ds_fp4":
-            # DeepSeek-V4 FP4 experts: grouped inline-dequant GEMM for streaming
-            # prefill chunks (n = bank rows to sort over); per-route dequant GEMV
-            # for decode and the sparse small-chunk slot path (n is None there,
-            # and sorting over the full slot cache would drown in padding).
-            gate_up_packed, gate_up_scale, down_packed, down_scale = views
-            if is_prefill and n is not None:
-                from freetoken.moe.fused_ds_fp4 import routed_experts_fp4_prefill
-
-                return routed_experts_fp4_prefill(
-                    hidden_states, topk_ids, topk_weights,
-                    gate_up_packed, gate_up_scale, down_packed, down_scale,
-                    self.swiglu_limit, n, expert_map,
-                )
-            from freetoken.moe.fused_ds_fp4 import routed_experts_fp4
-
-            return routed_experts_fp4(
-                hidden_states, topk_ids, topk_weights,
-                gate_up_packed, gate_up_scale, down_packed, down_scale,
-                self.swiglu_limit,
-            )
-        if fmt == "nowag":
-            from freetoken.moe.fused_nowag import routed_experts_nowag
-
-            if cache.codebook is None:
-                raise RuntimeError("NoWAG cache has no shared codebook")
-            (
-                gate_assignments,
-                gate_input_norm,
-                gate_output_norm,
-                up_assignments,
-                up_input_norm,
-                up_output_norm,
-                down_assignments,
-                down_input_norm,
-                down_output_norm,
-            ) = views
-            return routed_experts_nowag(
-                hidden_states,
-                topk_ids,
-                topk_weights,
-                cache.codebook,
-                gate_assignments,
-                gate_input_norm,
-                gate_output_norm,
-                up_assignments,
-                up_input_norm,
-                up_output_norm,
-                down_assignments,
-                down_input_norm,
-                down_output_norm,
-                model_type=self.nowag_model_type,
-                model_num_experts=self.num_experts,
-                swiglu_limit=getattr(self, "swiglu_limit", None),
-            )
-        assert fmt == "bf16", f"unknown quant_format {fmt!r}"
-        gate_up, down = views
-        impl = fused_experts_impl if is_prefill else fused_experts_decode_impl
-        return impl(
-            hidden_states,
-            gate_up,
-            down,
-            topk_weights,
-            topk_ids,
-            self.activation,
-            self.apply_router_weight_on_input,
-            **({"expert_map": expert_map} if is_prefill else {}),
+        """Run the bound expert method over the bank ``views`` the movement step
+        produced (registration order); ``topk_ids`` index their rows, or are logical
+        ids when ``expert_map`` is given."""
+        banks = dict(zip(cache.bank_schema, views))
+        if alphas is not None:
+            banks["gate_up_alpha"], banks["down_alpha"] = alphas
+        return self.expert_method.run(
+            hidden_states, topk_ids, topk_weights, banks, cache.shared,
+            workspace=None if is_prefill else self.expert_workspace,
+            prefill=is_prefill, sort_rows=n, expert_map=expert_map,
         )
 
 
@@ -744,9 +547,14 @@ def make_moe_layer(
         activation=activation,
         apply_router_weight_on_input=apply_router_weight_on_input,
     )
+    from freetoken.moe.expert_banks import has_expert_weight_override
+
+    separate_weights = has_expert_weight_override(config.expert_quant)
     if offload:
         assert layer_id is not None, "offload MoE backends need the layer_id"
         kwargs["layer_id"] = layer_id
+    elif separate_weights:
+        kwargs.update(weight_format=config.expert_quant, allocate_experts=False)
     else:
         kwargs["weight_format"] = weight_format
     layer = layer_cls(**kwargs)
@@ -755,10 +563,20 @@ def make_moe_layer(
         from freetoken.moe.routing import ROUTERS
 
         layer.router = ROUTERS[config.moe_router](layer.top_k, layer.renormalize)
-    if offload and getattr(config, "expert_quant", "none") == "nowag":
-        from freetoken.moe.nowag import get_nowag_model_rule
-
-        layer.nowag_model_type = get_nowag_model_rule(config).model_type
     for name, value in (extra_attrs or {}).items():
         setattr(layer, name, value)
+    if not offload and not separate_weights:
+        bind_resident_method(layer)
     return layer
+
+
+def bind_resident_method(layer: MoELayer) -> None:
+    """Bind a resident layer's expert method once its format scalars are set."""
+    from freetoken.moe.expert_format import ExpertLayout, bind_expert_method, expert_math
+
+    layout = ExpertLayout(
+        layer.weight_format, layer.hidden_size, layer.intermediate_size, layer.num_experts
+    )
+    layer.expert_method = bind_expert_method(
+        expert_math(layer), layout, None, device=torch.get_default_device(), backend="fused"
+    )

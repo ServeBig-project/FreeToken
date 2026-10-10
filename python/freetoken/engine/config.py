@@ -186,16 +186,9 @@ class EngineConfig:
                 raise ValueError("SD cost, missing-expert loading and prefetch require 1..8 draft steps")
             if self.speculative_draft_load_missing and self.speculative_draft_residency != "router":
                 raise ValueError("--speculative-draft-load-missing requires --speculative-draft-residency router")
-            model = self.model_config
-            # Measured costs need no particular expert format; the expert-loading controls
-            # read BF16 expert rows.
-            formats = ("none",) if (self.speculative_draft_load_missing
-                                   or self.speculative_verify_prefetch) else ("none", "nvfp4")
-            if (self.moe_backend not in ("auto", "offload") or self.dtype != torch.bfloat16
-                    or model.expert_quant not in formats or self.nowag_expert_path
-                    or model.moe_weight_format not in (None, "bf16")):
-                raise ValueError("SD controls require --moe-backend offload with BF16 activations; "
-                                 "missing-expert loads and prefetch also require BF16 experts")
+            if self.moe_backend not in ("auto", "offload") or self.dtype != torch.bfloat16:
+                raise ValueError(
+                    "SD controls require --moe-backend offload with BF16 activations")
         if not self.speculative_num_steps:
             return
         if self.tp_info.size != 1:
@@ -237,7 +230,18 @@ class EngineConfig:
     def model_config(self) -> ModelConfig:
         spec = get_model_spec(self.hf_config.architectures[0])
         parse_config = _load_attr(spec.module, spec.parse_config)
-        return parse_config(self.hf_config)
+        config = parse_config(self.hf_config)
+        from freetoken.checkpoint.ftw import ftw_quant_format
+
+        if self.nowag_expert_path is not None:
+            # The routed experts come from the NoWAG output; the base checkpoint
+            # supplies everything else.
+            object.__setattr__(config, "expert_quant", "nowag")
+            object.__setattr__(config, "nowag_expert_path", self.nowag_expert_path)
+        elif ftw_quant_format(self.model_path) == "nowag":
+            # Without an explicit replacement, the checkpoint supplies its own experts.
+            object.__setattr__(config, "expert_quant", "nowag")
+        return config
 
     @property
     def legacy_sd_controls(self) -> bool:
@@ -255,8 +259,6 @@ class EngineConfig:
         return bool(
             0 < self.speculative_num_steps <= 8
             and self.dtype == torch.bfloat16
-            and self.model_config.expert_quant in ("none", "nvfp4") and not self.nowag_expert_path
-            and self.model_config.moe_weight_format in (None, "bf16")
             and graph_attention and self.moe_backend in ("offload", "hybrid")
             and self.page_size == 1 and self.tp_info.size == 1
             and getattr(self, "batching_policy", "legacy") in ("legacy", "layered-pipeline")

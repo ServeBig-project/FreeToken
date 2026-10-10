@@ -22,7 +22,7 @@ The whole table targets the shipped serving configuration: TP=1 (TP>1 shards
 kv heads, shrinking the store row) and a 2-byte compute dtype (``--dtype
 float32`` doubles the KV/embedding/bf16-bank rows). Both fall back to JIT.
 - fast_index_copy: per-expert row bytes of every offload bank the checkpoint's
-  expert format registers (moe/offload_cache.py ``_BANK_SCHEMAS``); this is the
+  expert format registers (moe/expert_format.py ``_BANK_SCHEMAS``); this is the
   per-bank fallback of ``copy_missing`` plus any caller that copies single
   banks. Geometry is TP=1 (the offload path's supported configuration).
 """
@@ -66,7 +66,7 @@ class AotModel:
 def expert_bank_row_bytes(fmt: str, hidden_size: int, moe_intermediate_size: int) -> dict[str, int]:
     """Per-expert row bytes for each offload bank a format registers.
 
-    Bank names and layouts follow moe/offload_cache.py ``_BANK_SCHEMAS`` and the
+    Bank names and layouts follow moe/expert_format.py ``_BANK_SCHEMAS`` and the
     per-format loaders cited inline; every value must stay a multiple of 16 for
     the fused multi-bank copy to engage.
     """

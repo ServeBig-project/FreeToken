@@ -42,7 +42,6 @@ class Qwen3_5DecoderLayer(BaseOP):
                 conv_kernel_size=g.conv_kernel_dim,
                 rms_norm_eps=config.rms_norm_eps,
                 layer_id=layer_id,
-                expert_quant=config.expert_quant,
                 attn_quant=config.attn_quant,
                 output_gate=g.output_gate,
             )

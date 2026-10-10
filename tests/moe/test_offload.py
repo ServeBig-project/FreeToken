@@ -11,6 +11,19 @@ def _init_tp():
         set_tp_info(rank=0, size=1)
 
 
+def _bind_bf16_method(layer):
+    # The engine binds the offload layers' expert method; these tests build layers directly.
+    from freetoken.moe.expert_format import ExpertLayout, bind_expert_method, expert_math
+
+    layer.expert_method = bind_expert_method(
+        expert_math(layer),
+        ExpertLayout("bf16", layer.hidden_size, layer.intermediate_size, layer.num_experts),
+        None,
+        device=torch.device("cpu"),
+        backend="offload",
+    )
+
+
 def _make_layer_and_cache():
     from freetoken.layers.moe import OffloadMoELayer
     from freetoken.moe.offload_cache import OffloadMoeCache
@@ -31,6 +44,7 @@ def _make_layer_and_cache():
     )
     cache.set_bank_sources({"gate_up": [torch.randn(4, 32, 8)], "down": [torch.randn(4, 8, 16)]})
     layer.offload_cache = cache
+    _bind_bf16_method(layer)
     return layer, cache
 
 
@@ -234,7 +248,7 @@ def test_offload_moe_layer_decode_forward_uses_remapped_slot_ids(monkeypatch):
         calls["topk_ids"] = got_topk_ids.clone()
         return hidden_states
 
-    monkeypatch.setattr("freetoken.layers.moe.fused_experts_decode_impl", fake_fused_decode)
+    monkeypatch.setattr("freetoken.moe.fused.fused_experts_decode_impl", fake_fused_decode)
 
     with _batch_context(monkeypatch, decode_size=1):
         out = layer.decode_forward(hidden_states, router_logits)

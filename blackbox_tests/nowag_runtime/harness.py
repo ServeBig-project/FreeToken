@@ -1,0 +1,326 @@
+"""Public CLI/HTTP helpers: ft serve / ft checkpoint, completions, cache status.
+
+The candidate is selected only through NOWAG_SOURCE (its python/ dir, put on PYTHONPATH).
+"""
+
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+PYTHON = os.environ.get("NOWAG_PYTHON", "/home/nengneng/miniconda3/envs/freetoken-dev/bin/python")
+SOURCE = os.environ.get("NOWAG_SOURCE")
+BASELINE_SOURCE = os.environ.get("NOWAG_BASELINE_SOURCE")
+LOG_DIR = Path(os.environ.get("NOWAG_LOG_DIR", "/tmp/nowag_blackbox_logs"))
+PORT = int(os.environ.get("NOWAG_PORT", "31791"))
+FT = "import sys; from freetoken.cli import main; sys.argv = ['ft', *sys.argv[1:]]; sys.exit(main())"
+
+
+def env(source=None):
+    src = source or SOURCE
+    if not src:
+        raise RuntimeError("NOWAG_SOURCE (candidate python/ dir) is required for CLI/HTTP tests")
+    return {**os.environ, "PYTHONPATH": src}
+
+
+def ft(args, timeout=7200, source=None, label="ft"):
+    """Run `ft <args>` in its own session; returns CompletedProcess with the combined log also
+    saved to LOG_DIR. Returns only after every process of that session has exited."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen([PYTHON, "-c", FT, *map(str, args)], env=env(source), text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    finally:
+        stop_group(proc)
+    (LOG_DIR / f"{label}.log").write_text(out)
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out)
+
+
+def group_alive(pgid):
+    """Any non-zombie process left in the process group (same PID namespace as ours)."""
+    for stat in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            fields = stat.read_text().rsplit(")", 1)[1].split()
+        except OSError:
+            continue
+        if int(fields[2]) == pgid and fields[0] != "Z":
+            return True
+    return False
+
+
+def stop_group(proc, term_timeout=90, kill_timeout=30):
+    """SIGTERM the whole session started for `proc`, wait until every member has exited
+    (SIGKILL after term_timeout), and reap the leader. A server's scheduler child can outlive
+    the leader and keep its GPU memory; the next server would then OOM."""
+    pgid = proc.pid
+    for sig, limit in ((signal.SIGTERM, term_timeout), (signal.SIGKILL, kill_timeout)):
+        if not group_alive(pgid):
+            break
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            break
+        deadline = time.monotonic() + limit
+        while group_alive(pgid) and time.monotonic() < deadline:
+            proc.poll()
+            time.sleep(0.2)
+    proc.wait()
+    if group_alive(pgid):
+        raise RuntimeError(f"process group {pgid} survived SIGKILL")
+
+
+class StartupFailed(RuntimeError):
+    def __init__(self, label, code, log):
+        super().__init__(f"{label} exited {code} before serving:\n{log[-3000:]}")
+        self.code, self.log = code, log
+
+
+def settle_gpus(gpu, timeout=60):
+    """Wait until memory.used of the approved GPUs reads the same twice, 1 s apart. The driver
+    returns an exited server's memory asynchronously; a TP>1 start right after a one-GPU run
+    otherwise sees unequal free memory per rank. Best effort: never fails the run."""
+    query = ["nvidia-smi", f"--id={gpu}", "--query-gpu=memory.used", "--format=csv,noheader,nounits"]
+    deadline, last = time.monotonic() + timeout, None
+    while time.monotonic() < deadline:
+        try:
+            now = subprocess.run(query, capture_output=True, text=True, check=True).stdout
+        except (OSError, subprocess.CalledProcessError):
+            return
+        if now == last:
+            return
+        last = now
+        time.sleep(1)
+
+
+class Server:
+    def __init__(self, label, args, gpu, timeout=1800, source=None, port=PORT):
+        with socket.socket() as probe:
+            if probe.connect_ex(("127.0.0.1", port)) == 0:
+                raise RuntimeError(f"port {port} busy; one server at a time")
+        settle_gpus(gpu)
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        self.label, self.url = label, f"http://127.0.0.1:{port}"
+        self.log_path = LOG_DIR / f"{label}.log"
+        self.cmd = [PYTHON, "-c", FT, "serve", "--gpu", gpu, "--port", str(port),
+                    "--enable-cache-report", *map(str, args)]
+        self._log = self.log_path.open("w")
+        self._log.write(" ".join(self.cmd) + "\n")
+        self._log.flush()
+        self.proc = subprocess.Popen(self.cmd, env=env(source), stdout=self._log,
+                                     stderr=subprocess.STDOUT, start_new_session=True)
+        self._wait(timeout)
+
+    def _wait(self, timeout):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.proc.poll() is not None:
+                stop_group(self.proc)
+                self._log.close()
+                raise StartupFailed(self.label, self.proc.returncode, self.log_path.read_text())
+            try:
+                if get(self.url, "/v1/cache/status", 5)["body"].get("state") == "serving":
+                    return
+            except Exception:
+                pass
+            time.sleep(3)
+        self.close()
+        raise RuntimeError(f"{self.label} not serving after {timeout}s; log {self.log_path}")
+
+    def close(self):
+        stop_group(self.proc)
+        if not self._log.closed:
+            self._log.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def alive(self):
+        return self.proc.poll() is None
+
+    def status(self):
+        return get(self.url, "/v1/cache/status")["body"]
+
+    def complete(self, prompt, max_tokens=32, **extra):
+        return post(self.url, "/v1/completions", completion_body(prompt, max_tokens, extra))
+
+    def stream(self, prompt, max_tokens=32, cancel_after=None, **extra):
+        body = completion_body(prompt, max_tokens, dict(extra, stream=True))
+        return stream(self.url, "/v1/completions", body, cancel_after)
+
+    def greedy(self, prompts, max_tokens=32):
+        return [text(self.complete(p, max_tokens)) for p in prompts]
+
+    def parallel(self, calls):
+        with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+            return [f.result() for f in [pool.submit(c) for c in calls]]
+
+
+def completion_body(prompt, max_tokens, extra):
+    """Greedy unless the caller asks for a temperature: temperature 0 alone still inherits the
+    server's default top_p (0.95), which is not the public greedy path, so greedy requests also
+    send top_p=1. A caller's explicit top_p, and any sampling request, are left as given."""
+    body = {"model": "m", "prompt": prompt, "max_tokens": max_tokens, **extra}
+    if body.setdefault("temperature", 0) == 0:
+        body.setdefault("top_p", 1)
+    return body
+
+
+def expect_rejected(label, args, gpu, timeout=1800):
+    """The configuration must be refused before the server reports ready (contract §6)."""
+    try:
+        server = Server(label, args, gpu, timeout=timeout)
+    except StartupFailed as failure:
+        assert failure.code != 0
+        return failure.log
+    server.close()
+    raise AssertionError(f"{label}: invalid configuration reached serving")
+
+
+def _call(url, method, path, body=None, timeout=900):
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url + path, data=data, method=method,
+                                 headers={"Content-Type": "application/json"})
+    started = time.monotonic()
+    try:
+        response = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as error:
+        response = error
+    with response:
+        raw, status = response.read().decode(), response.status
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = {"raw": raw}
+    return {"status": status, "body": payload, "seconds": time.monotonic() - started}
+
+
+def get(url, path, timeout=30):
+    return _call(url, "GET", path, timeout=timeout)
+
+
+def post(url, path, body, timeout=900):
+    return _call(url, "POST", path, body, timeout)
+
+
+def stream(url, path, body, cancel_after=None, timeout=900):
+    req = urllib.request.Request(url + path, data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    chunks, done, started, first = [], False, time.monotonic(), None
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        for raw in response:
+            line = raw.decode().strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                done = True
+                break
+            chunks.append(json.loads(data))
+            if first is None and any(c.get("text") for c in chunks[-1].get("choices", [])):
+                first = time.monotonic() - started
+            if cancel_after is not None and len(chunks) >= cancel_after:
+                break
+    usage = next((c["usage"] for c in reversed(chunks) if c.get("usage")), None)
+    return {"chunks": chunks, "done": done, "ttft": first, "seconds": time.monotonic() - started,
+            "usage": usage,
+            "text": "".join(c["choices"][0].get("text", "") for c in chunks if c.get("choices"))}
+
+
+def text(resp):
+    assert resp["status"] == 200, resp
+    return resp["body"]["choices"][0]["text"]
+
+
+def experts(status):
+    return status["geometry"]["experts"]
+
+
+# ------------------------------------------------------------------ frozen output protocol
+# Frozen 2026-10-09 before any candidate output was seen.
+# * Same weights, same device(s), same execution configuration (rename, status reads, FTW dir
+#   renamed): greedy text must be identical.
+# * Same compressed weights, different execution path (fused/offload/cpu/hybrid, cache size,
+#   batching policy, TP1/TP2, SD on/off, native/FTW): kernels may break near-ties
+#   differently, so per prompt either identical text, or both outputs pass the task check and
+#   neither loops; at least half the prompts must be identical.
+# * Task check: the expected answer appears in the greedy continuation; a run passes when at
+#   least 3 of the 4 prompts do. Loop check: no word 4-gram repeats more than 3 times.
+# Tiny-model TP2 rule, frozen 2026-10-10 before its GPU run (replaces three earlier service
+#   rules that were revised after seeing results; see the acceptance record).
+#   Inputs: the tiny Qwen3MoE BASE with its own BF16 experts (control), a NoWAG sidecar fitted
+#   to those experts (tiny_model.fitted_side "fit": cos 0.987 D4 / 0.954 D6, norm ratio
+#   0.95-0.98) and a wrong-shard stand-in ("shuffled": rank 1's half of the gate/up rows has
+#   its assignments permuted). 48 prompts, 12 greedy tokens, first AGREE_WORDS words compared.
+#   Rule (tp2_rule): with a_bf16 = agreement(BF16 TP1, BF16 TP2), the NoWAG TP2 vs TP1
+#   agreement must reach a_bf16 - TP2_MARGIN, and the shuffled control (TP1) must fall below
+#   that same threshold, otherwise the row cannot tell a wrong shard and fails.
+#   Basis (test_tp_fixture.py, reference only): emulating TP2's one extra bf16 rounding of the
+#   cross-rank sum on CPU gives agreement 0.979 for BF16 experts, 0.938 (D4) / 0.979 (D6) for
+#   the fitted NoWAG experts, and 0.229 (D4) / 0.333 (D6) for the shuffled control. The
+#   margin 0.25 puts the threshold ~0.73; the binomial SD over 48 prompts is ~0.035 near 0.94
+#   and ~0.07 near 0.3, so legal runs sit >5 SD above and the control >5 SD below.
+AGREE_WORDS, TP2_MARGIN = 8, 0.25
+
+
+def agreement(a, b, words=AGREE_WORDS):
+    """Share of prompts whose first `words` generated words agree (whole text if shorter)."""
+    def agree(x, y):
+        wx, wy = x.split(), y.split()
+        need = min(words, len(wx), len(wy))
+        return wx[:need] == wy[:need] and (need == words or x == y)
+    return sum(agree(x, y) for x, y in zip(a, b)) / len(a)
+
+
+def tp2_rule(bf16_tp1, bf16_tp2, nowag_tp1, nowag_tp2, shuffled_tp1, label=""):
+    """Frozen tiny-model TP2 rule (see above). Returns the three agreements."""
+    for outputs in (bf16_tp1, bf16_tp2, nowag_tp1, nowag_tp2, shuffled_tp1):
+        assert all(o.strip() for o in outputs), f"{label}: empty output {outputs}"
+    got = {"bf16": agreement(bf16_tp1, bf16_tp2), "nowag": agreement(nowag_tp1, nowag_tp2),
+           "shuffled": agreement(nowag_tp1, shuffled_tp1)}
+    threshold = got["bf16"] - TP2_MARGIN
+    assert got["shuffled"] < threshold, f"{label}: wrong-shard control not caught {got}"
+    assert got["nowag"] >= threshold, f"{label}: NoWAG TP2 agreement below threshold {got}"
+    return got
+
+
+PROMPTS = [("The capital of France is", "Paris"),
+           ("1, 2, 3, 4, 5, 6,", "7"),
+           ("The chemical symbol for gold is", "Au"),
+           ("Water freezes at a temperature of 0 degrees", "Celsius")]
+
+
+def loops(s):
+    words = re.findall(r"\S+", s)
+    grams = [tuple(words[i:i + 4]) for i in range(len(words) - 3)]
+    return any(grams.count(g) > 3 for g in set(grams))
+
+
+def task_ok(outputs):
+    hits = sum(ans.lower() in out.lower() for (_, ans), out in zip(PROMPTS, outputs))
+    return hits >= 3 and not any(loops(o) for o in outputs)
+
+
+def same_execution(a, b, label=""):
+    assert a == b, f"{label}: identical configuration gave different text\n{a}\n{b}"
+
+
+def cross_path(a, b, label="", task=True):
+    same = [x == y for x, y in zip(a, b)]
+    if task:
+        assert task_ok(a) and task_ok(b), f"{label}: task check failed\n{a}\n{b}"
+    assert sum(same) * 2 >= len(same), f"{label}: only {sum(same)}/{len(same)} identical\n{a}\n{b}"
+
+
+def run_prompts(server, max_tokens=32):
+    return server.greedy([p for p, _ in PROMPTS], max_tokens)

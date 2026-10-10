@@ -12,10 +12,54 @@ def _key(layer: int, expert: int, projection: str, suffix: str) -> str:
     return f"layers.{layer}.ffn.experts.{expert}.{projection}.{suffix}"
 
 
-def test_nowag_sidecar_maps_three_projections_to_nine_banks(tmp_path, monkeypatch):
-    from freetoken.models.deepseek_v4.nowag import load_nowag_expert_sources
-    from freetoken.moe.host_banks import HostBank
+def _init_tp():
+    from freetoken.distributed import set_tp_info, try_get_tp_info
 
+    if try_get_tp_info() is None:
+        set_tp_info(rank=0, size=1)
+
+
+def _dsv4_math(swiglu_limit):
+    from freetoken.moe.expert_format import E4M3_GROUP128_UE8M0, ExpertMath
+
+    return ExpertMath(
+        activation_limit=swiglu_limit,
+        router_weight_on_down_input=True,
+        gate_up_input_rounding=E4M3_GROUP128_UE8M0,
+        down_input_rounding=E4M3_GROUP128_UE8M0,
+    )
+
+
+def _method_module():
+    pytest.importorskip("triton")
+    from freetoken.moe.nowag import method
+
+    return method
+
+
+def _run_nowag(math, x, slots, weights, codebook, *banks):
+    """Bind the NoWAG method for these bank shapes and run it once."""
+    from freetoken.moe.expert_format import _BANK_SCHEMAS, ExpertLayout, bind_expert_method
+    from freetoken.moe.nowag.weights import NowagState
+
+    layout = ExpertLayout("nowag", x.shape[1], banks[2].shape[1], banks[0].shape[0])
+    method = bind_expert_method(
+        math,
+        layout,
+        NowagState(codebook.shape[1], 12, banks[2].shape[1]),
+        device=x.device,
+        backend="offload",
+    )
+    return method.run(
+        x, slots, weights, dict(zip(_BANK_SCHEMAS["nowag"], banks)), {"codebook": codebook}
+    )
+
+
+def test_nowag_sidecar_maps_three_projections_to_nine_banks(tmp_path, monkeypatch):
+    from freetoken.moe.host_banks import HostBank
+    from freetoken.moe.nowag.weights import NowagState, load_nowag_expert_sources
+
+    _init_tp()
     monkeypatch.setattr(HostBank, "pin", lambda self: setattr(self, "_pinned", True))
     output = tmp_path / "nowag"
     output.mkdir()
@@ -61,13 +105,14 @@ def test_nowag_sidecar_maps_three_projections_to_nine_banks(tmp_path, monkeypatc
     }
     (output / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     config = SimpleNamespace(
+        model_type="deepseek_v4",
         num_moe_layers=1,
         num_experts=experts,
         hidden_size=hidden,
         moe_intermediate_size=intermediate,
     )
 
-    banks, codebook = load_nowag_expert_sources(output, config)
+    banks, shared, state = load_nowag_expert_sources(output, config)
 
     assert set(banks) == {
         "gate_assignments",
@@ -83,7 +128,8 @@ def test_nowag_sidecar_maps_three_projections_to_nine_banks(tmp_path, monkeypatc
     assert banks["gate_assignments"][0][1, 0, 0].item() == 11
     assert banks["up_assignments"][0][1, 0, 0].item() == 21
     assert banks["down_assignments"][0][1, 0, 0].item() == 31
-    assert codebook.shape == (4096, 6)
+    assert shared["codebook"].shape == (4096, 6)
+    assert state == NowagState(d=6, assignment_bits=12, intermediate_size=intermediate)
 
 
 @pytest.mark.parametrize("source_layout", [None, "row_major", "word_major"])
@@ -91,8 +137,9 @@ def test_qwen_nowag_sidecar_uses_common_manifest_and_real_shapes(
     tmp_path, monkeypatch, source_layout
 ):
     from freetoken.moe.host_banks import HostBank
-    from freetoken.moe.nowag import load_nowag_expert_sources
+    from freetoken.moe.nowag.weights import load_nowag_expert_sources
 
+    _init_tp()
     monkeypatch.setattr(HostBank, "pin", lambda self: setattr(self, "_pinned", True))
     output = tmp_path / "qwen-nowag"
     output.mkdir()
@@ -162,7 +209,7 @@ def test_qwen_nowag_sidecar_uses_common_manifest_and_real_shapes(
         moe_intermediate_size=intermediate,
     )
 
-    banks, codebook = load_nowag_expert_sources(output, config)
+    banks, shared, _ = load_nowag_expert_sources(output, config)
 
     assert banks["gate_assignments"][0].shape == (experts, gate_words, intermediate)
     assert banks["down_assignments"][0].shape == (experts, down_words, hidden)
@@ -174,14 +221,11 @@ def test_qwen_nowag_sidecar_uses_common_manifest_and_real_shapes(
             torch.testing.assert_close(
                 banks[f"{bank}_assignments"][0][expert], expected
             )
-    assert codebook.shape == (4096, 6)
+    assert shared["codebook"].shape == (4096, 6)
 
 
-def test_dsv4_wrapper_keeps_fp8_roundtrips_and_clamped_swiglu(monkeypatch):
-    import nowag_vllm.moe_ops as nowag_moe_ops
-    from freetoken.kernel.triton.moe_align import moe_align_block_size
-    from freetoken.kernel.triton.dsv4 import fp8_linear
-    from freetoken.moe.fused_nowag import routed_experts_nowag_dsv4
+def test_dsv4_expert_math_keeps_fp8_roundtrips_and_clamped_swiglu(monkeypatch):
+    method = _method_module()
 
     calls = []
 
@@ -213,6 +257,7 @@ def test_dsv4_wrapper_keeps_fp8_roundtrips_and_clamped_swiglu(monkeypatch):
             == "dynamic_e4m3_per_token_group128_ue8m0"
         )
         assert kwargs["down_norm_placement"] == "down_prologue"
+        assert kwargs["router_weight_on_middle"] is True
         assert kwargs["validate_route_ids"] is False
         assert callable(kwargs["align_routes"])
         assert kwargs["gate_codebook"] is kwargs["up_codebook"]
@@ -226,9 +271,9 @@ def test_dsv4_wrapper_keeps_fp8_roundtrips_and_clamped_swiglu(monkeypatch):
         assert middle.eq(2).all()
         return result
 
-    monkeypatch.setattr(fp8_linear, "act_quant_fp8_roundtrip", round_input)
-    monkeypatch.setattr(fp8_linear, "act_quant_fp8_inplace", round_middle)
-    monkeypatch.setattr(nowag_moe_ops, "nowag_fused_moe", fake_nowag_fused_moe)
+    monkeypatch.setattr(method, "act_quant_fp8_roundtrip", round_input)
+    monkeypatch.setattr(method, "act_quant_fp8_inplace", round_middle)
+    monkeypatch.setattr(method, "nowag_fused_moe", fake_nowag_fused_moe)
 
     x = torch.ones(2, 12, dtype=torch.bfloat16)
     slots = torch.zeros(2, 2, dtype=torch.int32)
@@ -238,7 +283,8 @@ def test_dsv4_wrapper_keeps_fp8_roundtrips_and_clamped_swiglu(monkeypatch):
     hidden_norm = torch.ones(2, 12, dtype=torch.bfloat16)
     intermediate_norm = torch.ones(2, 6, dtype=torch.bfloat16)
 
-    actual = routed_experts_nowag_dsv4(
+    actual = _run_nowag(
+        _dsv4_math(10.0),
         x,
         slots,
         weights,
@@ -252,17 +298,15 @@ def test_dsv4_wrapper_keeps_fp8_roundtrips_and_clamped_swiglu(monkeypatch):
         torch.zeros(2, 12, 1, dtype=torch.int32),
         intermediate_norm,
         hidden_norm,
-        10.0,
     )
 
     assert actual is result
     assert calls == [("input", 128), ("middle", 128)]
 
 
-def test_qwen_wrapper_keeps_bf16_input_and_unclamped_swiglu(monkeypatch):
-    import nowag_vllm.moe_ops as nowag_moe_ops
-    from freetoken.kernel.triton.moe_align import moe_align_block_size
-    from freetoken.moe.fused_nowag import routed_experts_nowag
+def test_qwen_expert_math_keeps_bf16_input_and_unclamped_swiglu(monkeypatch):
+    method = _method_module()
+    from freetoken.moe.expert_format import ExpertMath
 
     result = torch.full((2, 12), 7, dtype=torch.bfloat16)
     x = torch.ones(2, 12, dtype=torch.bfloat16)
@@ -277,6 +321,7 @@ def test_qwen_wrapper_keeps_bf16_input_and_unclamped_swiglu(monkeypatch):
         assert kwargs["gate_up_input_rounding"] == "none"
         assert kwargs["down_input_rounding"] == "none"
         assert kwargs["down_norm_placement"] == "gate_up_epilogue"
+        assert kwargs["router_weight_on_middle"] is False
         assert kwargs["gate_up_input_transform"] is None
         assert kwargs["middle_transform"] is None
         assert kwargs["validate_route_ids"] is False
@@ -285,7 +330,7 @@ def test_qwen_wrapper_keeps_bf16_input_and_unclamped_swiglu(monkeypatch):
         assert kwargs["gate_codebook"] is kwargs["down_codebook"]
         return result
 
-    monkeypatch.setattr(nowag_moe_ops, "nowag_fused_moe", fake_nowag_fused_moe)
+    monkeypatch.setattr(method, "nowag_fused_moe", fake_nowag_fused_moe)
 
     slots = torch.zeros(2, 2, dtype=torch.int32)
     weights = torch.ones(2, 2, dtype=torch.float32)
@@ -294,7 +339,8 @@ def test_qwen_wrapper_keeps_bf16_input_and_unclamped_swiglu(monkeypatch):
     hidden_norm = torch.ones(2, 12, dtype=torch.bfloat16)
     intermediate_norm = torch.ones(2, 6, dtype=torch.bfloat16)
 
-    actual = routed_experts_nowag(
+    actual = _run_nowag(
+        ExpertMath(),
         x,
         slots,
         weights,
@@ -308,18 +354,18 @@ def test_qwen_wrapper_keeps_bf16_input_and_unclamped_swiglu(monkeypatch):
         torch.zeros(2, 12, 1, dtype=torch.int32),
         intermediate_norm,
         hidden_norm,
-        model_type="qwen3_5_moe",
     )
 
     assert actual is result
 
 
 def test_nowag_backend_environment_override(monkeypatch):
-    import freetoken.moe.fused_nowag as fused_nowag
+    from freetoken.moe.expert_format import ExpertMath
 
     monkeypatch.setenv("FREETOKEN_NOWAG_BACKEND", "triton")
     monkeypatch.setattr(
-        "nowag_vllm.moe_ops.nowag_fused_moe",
+        _method_module(),
+        "nowag_fused_moe",
         lambda **kwargs: (kwargs["gate_up_backend"], kwargs["down_backend"]),
     )
     x = torch.ones(1, 12, dtype=torch.bfloat16)
@@ -327,7 +373,8 @@ def test_nowag_backend_environment_override(monkeypatch):
     input_norm = torch.ones(2, 12, dtype=torch.bfloat16)
     output_norm = torch.ones(2, 6, dtype=torch.bfloat16)
 
-    actual = fused_nowag.routed_experts_nowag(
+    actual = _run_nowag(
+        ExpertMath(),
         x,
         torch.zeros(1, 1, dtype=torch.int32),
         torch.ones(1, 1),
@@ -341,19 +388,24 @@ def test_nowag_backend_environment_override(monkeypatch):
         assignments,
         output_norm,
         input_norm,
-        model_type="qwen3_5_moe",
     )
 
     assert actual == ("triton", "triton")
 
 
-def test_qwen_offload_layer_dispatches_with_qwen_rule(monkeypatch):
-    from freetoken.distributed import set_tp_info, try_get_tp_info
+def test_qwen_offload_layer_dispatches_unrounded_unclamped_math(monkeypatch):
+    nowag_method = _method_module()
     from freetoken.layers.moe import make_moe_layer
-    from freetoken.moe import fused_nowag
+    from freetoken.moe.expert_format import (
+        _BANK_SCHEMAS,
+        ExpertLayout,
+        ExpertMath,
+        bind_expert_method,
+        expert_math,
+    )
+    from freetoken.moe.nowag.weights import NowagState
 
-    if try_get_tp_info() is None:
-        set_tp_info(rank=0, size=1)
+    _init_tp()
     config = SimpleNamespace(
         moe_backend="offload",
         expert_quant="nowag",
@@ -369,14 +421,22 @@ def test_qwen_offload_layer_dispatches_with_qwen_rule(monkeypatch):
     x = torch.ones(1, 12, dtype=torch.bfloat16)
     called = {}
 
-    def fake_routed(*args, **kwargs):
-        called.update(kwargs)
+    def fake_run(math, layout, state, kernel_backend, *args, **kwargs):
+        called.update(math=math, layout=layout, state=state, banks=args[3], shared=args[4])
         return x
 
-    monkeypatch.setattr(fused_nowag, "routed_experts_nowag", fake_routed)
+    monkeypatch.setattr(nowag_method, "_run", fake_run)
+    layer.expert_method = bind_expert_method(
+        expert_math(layer),
+        ExpertLayout("nowag", 12, 6, 2),
+        NowagState(6, 12, 6),
+        device=torch.device("cpu"),
+        backend="offload",
+    )
     cache = SimpleNamespace(
         quant_format="nowag",
-        codebook=torch.zeros(4096, 6, dtype=torch.bfloat16),
+        bank_schema=_BANK_SCHEMAS["nowag"],
+        shared={"codebook": torch.zeros(4096, 6, dtype=torch.bfloat16)},
     )
     views = tuple(torch.zeros(1, dtype=torch.bfloat16) for _ in range(9))
 
@@ -392,11 +452,11 @@ def test_qwen_offload_layer_dispatches_with_qwen_rule(monkeypatch):
     )
 
     assert actual is x
-    assert called == {
-        "model_type": "qwen3_5_moe",
-        "model_num_experts": 2,
-        "swiglu_limit": None,
-    }
+    assert called["math"] == ExpertMath()
+    assert called["layout"].num_experts == 2
+    assert called["state"] == NowagState(6, 12, 6)
+    assert list(called["banks"]) == list(_BANK_SCHEMAS["nowag"])
+    assert called["shared"] is cache.shared
 
 
 def test_shared_codebook_is_not_part_of_the_per_expert_slot():
@@ -425,10 +485,10 @@ def test_shared_codebook_is_not_part_of_the_per_expert_slot():
             for name in _BANK_SCHEMAS["nowag"]
         }
     )
-    cache.set_codebook(codebook)
-    resident = cache.codebook
+    cache.set_shared({"codebook": codebook})
+    resident = cache.shared["codebook"]
     cache.rebuild(3)
-    assert cache.codebook is resident
+    assert cache.shared["codebook"] is resident
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -448,15 +508,15 @@ def test_nowag_triton_aligner_handles_auto_cache_above_1024_slots():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_dsv4_nowag_wrapper_compiles_on_cuda():
+def test_dsv4_nowag_method_compiles_on_cuda():
     import torch.nn.functional as F
 
     from freetoken.kernel.triton.dsv4.fp8_linear import (
         act_quant_fp8_inplace,
         act_quant_fp8_roundtrip,
     )
-    from freetoken.moe.fused_nowag import routed_experts_nowag_dsv4
-    from nowag_vllm.ops import pack_assignments
+
+    from .test_nowag_cpu_blackbox import _pack_12bit
 
     device = torch.device("cuda")
     generator = torch.Generator(device="cpu").manual_seed(20260822)
@@ -475,9 +535,7 @@ def test_dsv4_nowag_wrapper_compiles_on_cuda():
             generator=generator,
             dtype=torch.int64,
         )
-        packed = torch.stack(
-            [pack_assignments(ids[expert], 12) for expert in range(num_experts)]
-        ).transpose(1, 2).contiguous().to(device)
+        packed = _pack_12bit(ids).to(device)
         input_norm = torch.ones(
             (num_experts, in_features), dtype=torch.bfloat16, device=device
         )
@@ -503,7 +561,8 @@ def test_dsv4_nowag_wrapper_compiles_on_cuda():
         device=device,
     )
 
-    output = routed_experts_nowag_dsv4(
+    output = _run_nowag(
+        _dsv4_math(0.25),
         hidden_states,
         slots,
         topk_weights,
@@ -511,7 +570,6 @@ def test_dsv4_nowag_wrapper_compiles_on_cuda():
         *gate,
         *up,
         *down,
-        0.25,
     )
     torch.cuda.synchronize()
 
@@ -529,19 +587,20 @@ def test_dsv4_nowag_wrapper_compiles_on_cuda():
             ).to(torch.bfloat16).float()
             gate_value = torch.minimum(gate_value, gate_value.new_tensor(0.25))
             up_value = torch.clamp(up_value, -0.25, 0.25)
+            # DSV4 scales the down input by the router weight before its rounding.
             route_middle.append(
-                (F.silu(gate_value) * up_value).to(torch.bfloat16)
+                (
+                    F.silu(gate_value) * up_value * topk_weights[token, route]
+                ).to(torch.bfloat16)
             )
             route_experts.append(expert)
     route_middle = torch.stack(route_middle)
     act_quant_fp8_inplace(route_middle, 128)
     route_output = []
     for ticket, expert in enumerate(route_experts):
-        weight = topk_weights.reshape(-1)[ticket]
         route_output.append(
-            (
-                torch.mv(dense_down[expert].float(), route_middle[ticket].float())
-                * weight
+            torch.mv(
+                dense_down[expert].float(), route_middle[ticket].float()
             ).to(torch.bfloat16)
         )
     expected = torch.stack(route_output).reshape(3, 2, hidden).float().sum(1)
@@ -555,11 +614,12 @@ def test_dsv4_nowag_wrapper_compiles_on_cuda():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_qwen_nowag_wrapper_matches_plain_swiglu_on_cuda():
+def test_qwen_nowag_method_matches_plain_swiglu_on_cuda():
     import torch.nn.functional as F
 
-    from freetoken.moe.fused_nowag import routed_experts_nowag
-    from nowag_vllm.ops import pack_assignments
+    from freetoken.moe.expert_format import ExpertMath
+
+    from .test_nowag_cpu_blackbox import _pack_12bit
 
     device = torch.device("cuda")
     generator = torch.Generator(device="cpu").manual_seed(20260824)
@@ -578,9 +638,7 @@ def test_qwen_nowag_wrapper_matches_plain_swiglu_on_cuda():
             generator=generator,
             dtype=torch.int64,
         )
-        packed = torch.stack(
-            [pack_assignments(ids[expert], 12) for expert in range(num_experts)]
-        ).transpose(1, 2).contiguous().to(device)
+        packed = _pack_12bit(ids).to(device)
         input_norm = torch.ones(
             (num_experts, in_features), dtype=torch.bfloat16, device=device
         )
@@ -605,7 +663,8 @@ def test_qwen_nowag_wrapper_matches_plain_swiglu_on_cuda():
         device=device,
     )
 
-    output = routed_experts_nowag(
+    output = _run_nowag(
+        ExpertMath(),
         hidden_states,
         slots,
         topk_weights,
@@ -613,7 +672,6 @@ def test_qwen_nowag_wrapper_matches_plain_swiglu_on_cuda():
         *gate,
         *up,
         *down,
-        model_type="qwen3_5_moe",
     )
     torch.cuda.synchronize()
 

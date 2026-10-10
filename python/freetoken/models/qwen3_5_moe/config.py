@@ -169,14 +169,15 @@ def parse_config(hf_config: Any) -> ModelConfig:
         expert_quant = _expert_quant(hf_config)  # nvfp4 / mixed-precision modelopt
     # Dense attention/GDN quant is independent of the routed experts (block-fp8 already
     # quantizes both, so only probe for per-tensor FP8 when experts aren't block-fp8).
-    attn_quant = "none" if expert_quant == "fp8_block" else _attn_quant(hf_config)
+    attn_quant = "fp8_block" if expert_quant == "fp8_block" else _attn_quant(hf_config)
     # NVFP4 checkpoints store the dense MLP projections (shared_expert; dense non-MoE MLP) as
     # packed FP4 exactly like the routed experts -- independent of whether attention is FP8
     # (mixed) or bf16 (pure NVFP4). Keep them native FP4 (W4A16) whenever the experts are
     # NVFP4. The lm_head is detected separately (only the mixed checkpoint quantizes it).
     # MoE-NVFP4 keeps the shared_expert dense MLP native FP4 (expert_quant=="nvfp4"); a dense
     # (non-MoE) modelopt checkpoint instead tags the bare .mlp.{gate,up,down}_proj as NVFP4.
-    dense_quant = "nvfp4" if expert_quant == "nvfp4" else _dense_mlp_quant(hf_config)
+    dense_quant = (expert_quant if expert_quant in ("fp8_block", "nvfp4")
+                   else _dense_mlp_quant(hf_config))
     lm_head_quant = _lm_head_quant(hf_config)
 
     # compressed-tensors NVFP4 (dense Qwen3.6-27B): the attention (q/k/v/o, GDN out_proj) AND

@@ -20,6 +20,7 @@ import freetoken.core as core
 from freetoken.core import Batch, Context, Req
 from freetoken.distributed import set_tp_info, try_get_tp_info
 from freetoken.layers.moe import OffloadMoELayer
+from freetoken.moe.expert_format import ExpertLayout, bind_expert_method, expert_math
 from freetoken.moe.offload_cache import OffloadMoeCache
 
 pytestmark = pytest.mark.skipif(
@@ -77,6 +78,14 @@ def _build(prefill_overlap):
     ]
     for layer in layers:
         layer.offload_cache = cache
+        # The engine binds the offload layers' expert method; these tests build layers directly.
+        layer.expert_method = bind_expert_method(
+            expert_math(layer),
+            ExpertLayout("bf16", layer.hidden_size, layer.intermediate_size, layer.num_experts),
+            None,
+            device=DEVICE,
+            backend="offload",
+        )
     return SimpleNamespace(cache=cache, layers=layers, w_gu=w_gu, w_d=w_d, gen=gen)
 
 

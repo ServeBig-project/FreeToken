@@ -15,6 +15,7 @@ point ``--model`` straight at it; the load path auto-detects the FTW and reads i
 
 from __future__ import annotations
 
+import dataclasses
 import glob
 import importlib
 import hashlib
@@ -126,6 +127,7 @@ class _ConvertSink:
         self._bar = None
         self._lock = threading.Lock()
         self._seen: set[int] = set()
+        self.bank_names: set[str] = set()
         self.n_written = 0
         self.n_bytes = 0
 
@@ -139,6 +141,7 @@ class _ConvertSink:
                 self._bar = byte_bar(0, self._desc)  # total unknown up front (streamed)
             nbytes = 0
             for bank_name, bank in banks.items():
+                self.bank_names.add(bank_name)
                 self._writer.add_tensor(
                     layer_bank_entry_name(bank_name, layer_id), bank.tensor, kind="experts_bank"
                 )
@@ -170,11 +173,12 @@ def convert_checkpoint(
     shard_limit: int = DEFAULT_SHARD_LIMIT,
     device: str | None = None,
     dense_quantization: str = "auto",
+    nowag_expert_path: str | None = None,
 ) -> dict:
     """Write ``model_path`` as an FTW checkpoint at ``out_dir``. Returns the index dict.
 
-    The FTW format is TP-agnostic and conversion runs single-process, so the resulting
-    checkpoint records no TP layout and loads independently of the runtime TP setting."""
+    Conversion runs single-process and stores the TP1 weights, so the checkpoint serves
+    with tensor parallel size 1."""
     from freetoken.distributed import DistributedInfo, set_tp_info, try_get_tp_info
     from freetoken.engine.config import EngineConfig
     from freetoken.models.register import get_model_spec
@@ -199,10 +203,13 @@ def convert_checkpoint(
     torch.zeros(1, device=dev)  # init CUDA context (needed by nvfp4 backend pick / pinning)
 
     cfg = EngineConfig(model_path=model_path, tp_info=DistributedInfo(tp.rank, tp.size),
-                       dtype=dtype, moe_backend=moe_backend)
+                       dtype=dtype, moe_backend=moe_backend, nowag_expert_path=nowag_expert_path)
     mc = cfg.model_config
     dense_precision = resolve_dense_precision(dense_quantization, model_path)
-    offload = moe_backend == "offload" and getattr(mc, "is_moe", False)
+    from freetoken.moe.expert_banks import has_expert_weight_override
+
+    offload = ((moe_backend == "offload" or has_expert_weight_override(mc.expert_quant))
+               and getattr(mc, "is_moe", False))
     include_moe_experts = not offload
 
     from freetoken.utils.progress import byte_bar, count_bar
@@ -252,6 +259,10 @@ def convert_checkpoint(
                 if alpha is not None:
                     writer.add_tensor(an, alpha, kind="experts_bank")
                     n_alpha += 1
+            # Banks the model supplies whole (expert biases) never pass through the sink.
+            for name in sorted(set(banks.sources) - sink.bank_names):
+                writer.add_tensor(name, torch.cat(banks.sources[name], dim=0), kind="experts_bank")
+                n_bank += 1
         else:
             # The on-disk format keeps one contiguous region per bank and the writer only
             # has whole-tensor add_tensor, so the per-layer sources reassemble into one
@@ -279,6 +290,11 @@ def convert_checkpoint(
                 n_bank += name not in ("gate_up_alpha", "down_alpha")
                 n_alpha += name in ("gate_up_alpha", "down_alpha")
             bar.close()
+
+    shared = banks.shared if offload else {}
+    for name, tensor in shared.items():
+        writer.add_tensor(name, tensor, kind="experts_shared")
+    format_state = banks.format_state if offload else None
 
     # 3) host-resident tables a model serves from safetensors next to the FTW (qwen4_exp's
     # PLE n-gram table): the model module's own hook, so the directory stands alone.
@@ -312,7 +328,12 @@ def convert_checkpoint(
         # checkpoint); recording it here too gives load_ftw_banks a cross-check that
         # the banks match the config they ship with. None for non-offload checkpoints.
         "expert_bank_num_layers": num_layers,
-        "counts": {"weight": n_weight, "experts_bank": n_bank + n_alpha},
+        "counts": {"weight": n_weight, "experts_bank": n_bank + n_alpha,
+                   "experts_shared": len(shared)},
+        # Format-private encoding parameters the format's FTW restore decodes (NoWAG D/B).
+        "expert_format_state": dataclasses.asdict(format_state) if format_state else None,
+        # Provenance only; loading never reads it.
+        "source_nowag_path": os.path.abspath(nowag_expert_path) if nowag_expert_path else None,
         "copied_metadata": copied,
         "side_files": side_files,
     })

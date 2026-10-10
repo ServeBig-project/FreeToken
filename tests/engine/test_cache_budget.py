@@ -124,12 +124,15 @@ def _dsv4_adjust_cfg(**over):
     # attention, offload MoE backend).
     from types import SimpleNamespace
 
+    from freetoken.distributed import DistributedInfo
+
     model_config = SimpleNamespace(
         single_stream_only=False, dsv4_args=SimpleNamespace(window_size=128), is_moe=True,
         expert_quant="ds_fp4", has_swa_attention=False, has_linear_attention=False,
     )
 
     class Cfg:
+        tp_info = DistributedInfo(rank=0, size=1)
         moe_cache_auto = True
         moe_cache_size = 0
         moe_cache_rate = None
@@ -157,6 +160,31 @@ def _dsv4_adjust_cfg(**over):
     return cfg
 
 
+def _with_nowag_experts(monkeypatch, cfg, path):
+    """Resolve ``cfg``'s model config through EngineConfig with ``--nowag-expert-path``,
+    the way the server builds it, and make the stub serve the resolved config."""
+    from freetoken.distributed import DistributedInfo
+    from freetoken.engine import config as config_module
+
+    parsed = cfg.model_config
+    monkeypatch.setattr(
+        config_module, "get_model_spec",
+        lambda arch: SimpleNamespace(module="stub", parse_config="parse"),
+    )
+    monkeypatch.setattr(config_module, "_load_attr", lambda module, name: lambda hf: parsed)
+    engine_config = config_module.EngineConfig(
+        model_path="/tmp/freetoken-test-model",
+        tp_info=DistributedInfo(rank=0, size=1),
+        dtype=torch.bfloat16,
+        nowag_expert_path=path,
+    )
+    object.__setattr__(engine_config, "hf_config", SimpleNamespace(architectures=["Stub"]))
+    resolved = engine_config.model_config
+    object.__setattr__(cfg, "nowag_expert_path", path)
+    type(cfg).model_config = property(lambda self: resolved)
+    return cfg
+
+
 def test_adjust_config_allows_auto_for_dsv4():
     # DSV4 now supports --moe-cache-auto via the affine KV cost bridge (dsv4_auto_cost_model);
     # _adjust_config must NOT reject it.
@@ -169,10 +197,10 @@ def test_adjust_config_allows_auto_for_dsv4():
     assert cfg.page_size == 128  # DSV4's KV page is the P-token window page
 
 
-def test_adjust_config_selects_nowag_experts_for_dsv4_offload():
+def test_adjust_config_selects_nowag_experts_for_dsv4_offload(monkeypatch):
     from freetoken.engine.engine import _adjust_config
 
-    cfg = _dsv4_adjust_cfg(nowag_expert_path="/data1/dsv4-nowag")
+    cfg = _with_nowag_experts(monkeypatch, _dsv4_adjust_cfg(), "/data1/dsv4-nowag")
     _adjust_config(cfg)
 
     assert cfg.model_config.expert_quant == "nowag"
@@ -180,16 +208,14 @@ def test_adjust_config_selects_nowag_experts_for_dsv4_offload():
     assert cfg.moe_backend == "offload"
 
 
-def test_adjust_config_selects_nowag_experts_for_qwen_offload():
+def test_adjust_config_selects_nowag_experts_for_qwen_offload(monkeypatch):
     from freetoken.engine.engine import _adjust_config
 
-    cfg = _dsv4_adjust_cfg(
-        nowag_expert_path="/data1/qwen-nowag",
-        attention_backend="triton",
-    )
+    cfg = _dsv4_adjust_cfg(attention_backend="triton")
     cfg.model_config.dsv4_args = None
     cfg.model_config.model_type = "qwen3_5_moe"
     cfg.model_config.hidden_act = "silu"
+    cfg = _with_nowag_experts(monkeypatch, cfg, "/data1/qwen-nowag")
 
     _adjust_config(cfg)
 
@@ -198,31 +224,6 @@ def test_adjust_config_selects_nowag_experts_for_qwen_offload():
     assert cfg.moe_backend == "offload"
 
 
-@pytest.mark.parametrize("backend", ["cpu", "hybrid"])
-@pytest.mark.parametrize("supported", [False, True])
-def test_adjust_config_requires_nowag_cpu_support(monkeypatch, backend, supported):
-    from freetoken.engine.engine import _adjust_config
-
-    cfg = _dsv4_adjust_cfg(
-        nowag_expert_path="/data1/dsv4-nowag", moe_backend=backend,
-    )
-    cfg.model_config.hidden_act = "silu"
-    cfg.model_config.num_experts = 4
-    probes = []
-
-    def supports(hidden_act, weight_format):
-        probes.append((hidden_act, weight_format))
-        return supported
-
-    monkeypatch.setattr("freetoken.moe.cpu_executor.compiled_extension_supports", supports)
-    if supported:
-        _adjust_config(cfg)
-        assert cfg.moe_backend == backend
-        assert cfg.model_config.expert_quant == "nowag"
-    else:
-        with pytest.raises(RuntimeError, match="NoWAG cpu/hybrid.*rebuild"):
-            _adjust_config(cfg)
-    assert probes == [("silu", "nowag")]
 
 
 def test_adjust_config_resolves_num_tokens_for_dsv4():
@@ -365,6 +366,7 @@ def test_engine_resolve_auto_moe_cache_size_maps_kwargs():
             "gate_up": [torch.zeros(4, 32, 8, dtype=torch.float16)] * 2,  # row = 32*8*2 = 512
             "down": [torch.zeros(4, 8, 16, dtype=torch.float16)] * 2,     # row = 8*16*2 = 256
         }
+        shared = {}  # bf16 has no format-wide tensors
 
     from freetoken.kvcache.mha_pool import MHAKVCache
 

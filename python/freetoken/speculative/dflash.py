@@ -169,8 +169,7 @@ class DFlashRuntime:
             counters = self.engine.graph_runner.replay_counts
             counters[key] = counters.get(key, 0) + 1
         else:
-            if self.graphs:
-                self.engine.graph_runner.eager_counts["draft"] += 1
+            self.engine.graph_runner.eager_counts["draft"] += 1
             result = self._forward(count, actual)[:actual]
         return result.index_select(0, staged[heads:used])
 

@@ -1,0 +1,153 @@
+{
+  "schema_version": 4,
+  "name": "rtx4090-e256-measured-points-bf16-d6-b12-20260824",
+  "hardware": {
+    "backend": "cuda",
+    "device_name": "NVIDIA GeForce RTX 4090",
+    "compute_capability": [8, 9]
+  },
+  "format": {
+    "dtype": "bfloat16",
+    "group_size": 6,
+    "assignment_bits": 12,
+    "codebook_size": 4096
+  },
+  "dense": [],
+  "dense_multi": [],
+  "moe": [
+    {
+      "shape": {
+        "num_experts": 256,
+        "physical_expert_rows": 1638,
+        "hidden_size": 4096,
+        "intermediate_size": 2048,
+        "physical_intermediate_size": 2048,
+        "pad_down_to_k48": false,
+        "down_input_group_start_lane": 0,
+        "assignment_layout": "word_major",
+        "structural_down": true,
+        "top_k": 6,
+        "activation_kind": "silu_mul",
+        "gate_up_input_rounding": "dynamic_e4m3_per_token_group128_ue8m0",
+        "swiglu_limit": 10.0,
+        "down_input_rounding": "dynamic_e4m3_per_token_group128_ue8m0",
+        "down_norm_placement": "down_prologue"
+      },
+      "exact_token_ranges": [
+        {"min_tokens": 1, "max_tokens": 1},
+        {"min_tokens": 2, "max_tokens": 2},
+        {"min_tokens": 4, "max_tokens": 4},
+        {"min_tokens": 8, "max_tokens": 8},
+        {"min_tokens": 16, "max_tokens": 16}
+      ]
+    },
+    {
+      "shape": {
+        "num_experts": 256,
+        "physical_expert_rows": 256,
+        "hidden_size": 4096,
+        "intermediate_size": 2048,
+        "physical_intermediate_size": 2048,
+        "pad_down_to_k48": false,
+        "down_input_group_start_lane": 0,
+        "assignment_layout": "word_major",
+        "structural_down": true,
+        "top_k": 6,
+        "activation_kind": "silu_mul",
+        "gate_up_input_rounding": "dynamic_e4m3_per_token_group128_ue8m0",
+        "swiglu_limit": 10.0,
+        "down_input_rounding": "dynamic_e4m3_per_token_group128_ue8m0",
+        "down_norm_placement": "down_prologue"
+      },
+      "exact_token_ranges": [
+        {"min_tokens": 32, "max_tokens": 32},
+        {"min_tokens": 44, "max_tokens": 512},
+        {"min_tokens": 1024, "max_tokens": 1024}
+      ]
+    },
+    {
+      "shape": {
+        "num_experts": 256,
+        "physical_expert_rows": 256,
+        "hidden_size": 2048,
+        "intermediate_size": 512,
+        "physical_intermediate_size": 512,
+        "pad_down_to_k48": false,
+        "down_input_group_start_lane": 0,
+        "assignment_layout": "word_major",
+        "structural_down": true,
+        "top_k": 8,
+        "activation_kind": "silu_mul",
+        "gate_up_input_rounding": "none",
+        "swiglu_limit": null,
+        "down_input_rounding": "none",
+        "down_norm_placement": "gate_up_epilogue"
+      },
+      "exact_token_ranges": [
+        {"min_tokens": 4, "max_tokens": 4},
+        {"min_tokens": 8, "max_tokens": 8},
+        {"min_tokens": 32, "max_tokens": 32},
+        {"min_tokens": 64, "max_tokens": 64},
+        {"min_tokens": 128, "max_tokens": 128},
+        {"min_tokens": 256, "max_tokens": 256},
+        {"min_tokens": 512, "max_tokens": 512},
+        {"min_tokens": 1024, "max_tokens": 1024}
+      ]
+    },
+    {
+      "shape": {
+        "num_experts": 256,
+        "physical_expert_rows": 10240,
+        "hidden_size": 2048,
+        "intermediate_size": 512,
+        "physical_intermediate_size": 512,
+        "pad_down_to_k48": false,
+        "down_input_group_start_lane": 0,
+        "assignment_layout": "word_major",
+        "structural_down": true,
+        "top_k": 8,
+        "activation_kind": "silu_mul",
+        "gate_up_input_rounding": "none",
+        "swiglu_limit": null,
+        "down_input_rounding": "none",
+        "down_norm_placement": "gate_up_epilogue"
+      },
+      "exact_token_ranges": [
+        {"min_tokens": 1, "max_tokens": 1},
+        {"min_tokens": 2, "max_tokens": 2},
+        {"min_tokens": 4, "max_tokens": 4},
+        {"min_tokens": 8, "max_tokens": 8},
+        {"min_tokens": 16, "max_tokens": 16}
+      ]
+    }
+  ],
+  "provenance": {
+    "policy": "Enable Exact only at token counts where every measured seed and both routing distributions beat Triton. No ranges are inferred between points.",
+    "evidence": [
+      "/data1/lmcache_kv/nowag_kernel_tuning/freetoken_integration_20260824/dsv4_modelE256_bankrows1638_fullscan3.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/freetoken_integration_20260824/dsv4_modelE256_bankrows256_prefill_fullscan3_capacityfix.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/freetoken_integration_20260824/qwen_p256_m1_m4_m8_finalsource_fullscan3_dispatch_v1.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/freetoken_integration_20260824/qwen_p256_m1_m4_m8_finalprofile_dispatch_v4.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/freetoken_integration_20260824/qwen_modelE256_bankrows256_prefill_fullscan3_capacityfix.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/freetoken_integration_20260824/qwen_auto_selectorcheck_v2.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/blackbox_direct_route_tests/bm16_qwen_full_matrix_rerun.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/blackbox_direct_route_tests/codebook_cache_formal_full_matrix.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/blackbox_direct_route_tests/final_decision_cache_full_matrix.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/phase6_tasks_per_cta_blackbox/formal_dsv4_synthetic_result.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/phase7_dsv4_real_capture_blackbox/capture_manifest.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/phase7_dsv4_real_capture_blackbox/real_replay_result.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/phase7_dsv4_real_capture_blackbox/real_head_to_head_result.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/phase10_dsv4_full_call_timeline_blackbox/full_call_timeline_result.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/phase15_dsv4_tail64_narrow_blackbox/tail64_synthetic_result.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/phase15_dsv4_tail64_narrow_blackbox/real_capture_manifest.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/phase15_dsv4_tail64_narrow_blackbox/tail64_real_narrow_result.json"
+    ],
+    "results": [
+      "The unified BM16/BN128, 8-warp, 2-stage Gate/Up and Down plan beat the previous automatic plan in 10/10 measured cases.",
+      "The measured cache policy uses the complete shared codebook at M=1 and M=2, then L2-only assignment loads at M=4, M=8, and M=16.",
+      "Final automatic selection and output consistency passed 10/10 measured cases.",
+      "For E256/P256/H4096/I2048/top6 with dynamic E4M3 rounding and clamp 10, M=44..512 is enabled by phase6 synthetic M=58/64/93/128/512, phase7 real M=58/93/128, and phase10 complete-call evidence; M=32 and M=1024 retain the prior fixed plan, and the adaptive plan is not extrapolated above M=512.",
+      "Within that adaptive interval, phase15 real M=49/58/63 supports tail64 only for M=49..63 at 1.1522x geometric-mean speedup over bm16; balanced routing had no fallback or regression, and tail64 is not extrapolated outside the measured interval."
+    ]
+  }
+}

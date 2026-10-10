@@ -67,6 +67,7 @@ def plan_cache_budget(
     max_slots: int,
     prefill_overlap_min_layers: int = 2,
     page_extra_bytes: Callable[[int], int] = lambda pages: 0,
+    slot_extra_bytes: Callable[[int], int] = lambda slots: 0,
 ) -> tuple[int, int, bool]:
     """Split ``budget_bytes`` MoE-first into (moe_cache_size, num_pages, prefill_overlap).
 
@@ -91,17 +92,18 @@ def plan_cache_budget(
     kv_bytes = lambda pages: pages * cache_per_page + page_extra_bytes(pages)
     kv_reserve_bytes = kv_bytes(kv_reserve_pages)
     # MoE-priority: reserve KV first, then experts greedily take the remaining budget.
-    raw = (budget_bytes - kv_reserve_bytes) // per_expert_bytes
+    expert_bytes = lambda slots: slots * per_expert_bytes + slot_extra_bytes(slots)
+    raw = max_pages(expert_bytes, budget_bytes - kv_reserve_bytes)
     moe_cache_size = max(lo, min(raw, hi))
     # A tiny budget may have forced the cache below the policy's overlap floor.
     overlap = overlap and moe_cache_size >= overlap_slots
 
-    remaining = budget_bytes - moe_cache_size * per_expert_bytes
+    remaining = budget_bytes - expert_bytes(moe_cache_size)
     num_pages = max(max_pages(kv_bytes, remaining), kv_reserve_pages)
     # A tiny budget can floor num_pages at kv_reserve_pages even when ``remaining`` is below
     # the reserve (or negative), yielding a plan that exceeds budget_bytes. Reject here so
     # --moe-cache-auto fails in arithmetic instead of OOMing in a later CUDA allocation.
-    total = moe_cache_size * per_expert_bytes + kv_bytes(num_pages)
+    total = expert_bytes(moe_cache_size) + kv_bytes(num_pages)
     assert total <= budget_bytes, (
         f"cache budget too small: minimum plan (moe={moe_cache_size} slots, "
         f"kv={num_pages} pages) needs {total} B > budget {budget_bytes} B "
@@ -127,6 +129,7 @@ def resolve_moe_cache_auto(
     quant_format: str,
     prefill_overlap_min_layers: int = 2,
     page_extra_bytes: Callable[[int], int] = lambda pages: 0,
+    slot_extra_bytes: Callable[[int], int] = lambda slots: 0,
 ) -> tuple[int, int, bool]:
     """Resolve --moe-cache-auto into (moe_cache_size, num_pages, prefill_overlap).
 
@@ -148,4 +151,5 @@ def resolve_moe_cache_auto(
         max_slots=max_slots,
         prefill_overlap_min_layers=prefill_overlap_min_layers,
         page_extra_bytes=page_extra_bytes,
+        slot_extra_bytes=slot_extra_bytes,
     )
