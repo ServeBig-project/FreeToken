@@ -138,10 +138,10 @@ def test_http_semantics():
         assert r["body"]["choices"][0]["finish_reason"] == "stop" and "." not in text(r)
         # Each arm has a fresh prefix-cache group; the first arm cannot warm the second.
         streamed = s.stream("The capital of France is", 16, cache_group="http-stream-cold",
-                            stream_options={"include_usage": True})
-        plain = s.complete("The capital of France is", 16, cache_group="http-nonstream-cold")
+                            top_p=1, stream_options={"include_usage": True})
+        plain = s.complete("The capital of France is", 16, cache_group="http-nonstream-cold", top_p=1)
         (LOG_DIR / f"{s.label}-stream-control.json").write_text(json.dumps(
-            {"request": {"prompt": "The capital of France is", "max_tokens": 16, "temperature": 0},
+            {"request": {"prompt": "The capital of France is", "max_tokens": 16, "temperature": 0, "top_p": 1},
              "groups": ["http-stream-cold", "http-nonstream-cold"],
              "streamed": streamed, "nonstream": plain}, indent=2))
         plain_text = text(plain)
