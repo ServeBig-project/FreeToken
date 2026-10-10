@@ -204,7 +204,7 @@ def compute_gdn_state_geometry(engine: "Engine") -> Dict[str, Any]:
     pool = engine.linear_state_pool
     if pool is None:
         return geo
-    size = lambda t: t.numel() * t.element_size()
+    size = plain = lambda t: t.numel() * t.element_size()
     runtime = getattr(engine, "runtime", None)
     if runtime is not None:  # views span address space; count the memory held under them
         size = lambda t: runtime.held_bytes([t])
@@ -216,7 +216,7 @@ def compute_gdn_state_geometry(engine: "Engine") -> Dict[str, Any]:
         geo.update(active=True, buffer_len=replay.ring, request_capacity=replay.rows,
                    record_bytes=size(replay.u) + size(replay.k) + size(replay.g),
                    conv_workspace_bytes=size(replay.window) if replay.window is not None else 0,
-                   metadata_bytes=sum(size(t) for t in graph))
+                   metadata_bytes=sum(plain(t) for t in graph))  # never in the runtime
     geo["reserved_bytes"] = (geo["checkpoint_bytes"] + geo["record_bytes"]
                              + geo["conv_workspace_bytes"] + geo["metadata_bytes"])
     budget = getattr(engine, "_gdn_state_budget_bytes", None)

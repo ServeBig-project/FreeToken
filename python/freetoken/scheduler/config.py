@@ -48,6 +48,10 @@ class SchedulerConfig(EngineConfig):
             raise ValueError(
                 "prefill_execution must be either 'serial' or 'concurrent'"
             )
+        if self.runtime_cache_gib is not None and self.batching_policy == "joint":
+            # A joint wave keeps requests across scheduling passes that pausing cannot see.
+            raise ValueError("--runtime-cache-gib does not support --batching-policy joint; "
+                             "use layered-pipeline or legacy")
 
     @property
     def zmq_backend_addr(self) -> str:

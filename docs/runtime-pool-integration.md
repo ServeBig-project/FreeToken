@@ -1,6 +1,6 @@
 # 共享 runtime：当前基座与实现交接
 
-当前实现基线为 `main@732f1ee`，已经包含 batching＋SD 和 DFlash。生产实现位于 `.worktrees/runtime-pool`（`feat/runtime-pool`，PR #9），正在收尾及独立验收。
+当前实现基线为 `main@732f1ee`，已经包含 batching＋SD 和 DFlash。生产实现位于 `.worktrees/runtime-pool`（`feat/runtime-pool`，PR #9）；修复、实际受测版本与剩余问题见[收尾报告](runtime-pool-closeout.md)。
 
 本文保留基座行为与实现要求，配合[主设计](runtime-pool-design.md)与[内核协议](runtime-pool-kernel-design.md)使用；其中的历史失败不等于当前验收结论。独立测试作者只接收[公开契约](runtime-pool-public-contract.md)。
 
