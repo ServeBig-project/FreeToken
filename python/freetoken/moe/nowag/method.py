@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from functools import partial
+from functools import lru_cache, partial
 
 import torch
 
@@ -16,6 +16,7 @@ from freetoken.moe.expert_format import (
 
 from freetoken.kernel import moe_sum_reduce_triton
 from freetoken.kernel.nowag import cuda_ops
+from freetoken.kernel.nowag.execution_profile import select_cuda_moe_backend
 from freetoken.kernel.nowag.moe_ops import (
     MAX_STRUCTURAL_DOWN_BLOCK_M,
     moe_middle_workspace_layout,
@@ -72,6 +73,28 @@ def check_nowag_math(math: ExpertMath) -> None:
             )
 
 
+def _kernel_math(math: ExpertMath) -> dict:
+    """The kernel's math arguments, which also key its execution profiles."""
+    return dict(
+        activation_kind=_ACTIVATION_KINDS[math.activation],
+        swiglu_limit=math.activation_limit,
+        gate_up_input_rounding=math.gate_up_input_rounding or "none",
+        down_input_rounding=math.down_input_rounding or "none",
+        down_norm_placement=(
+            _DOWN_PROLOGUE_NORM if math.down_input_rounding else _GATE_UP_EPILOGUE_NORM
+        ),
+    )
+
+
+def _exact_selected(eligible: bool, select, rows: int, top_k: int, bank_rows: int) -> bool:
+    """Whether Exact-K48 may run for a batch of 1..rows: the format must be eligible and, on
+    a CUDA device, the measured profiles must pick it for one of those batches."""
+    if not eligible or select is None:
+        return eligible
+    return any(select(physical_expert_rows=bank_rows, top_k=top_k, num_tokens=t)
+               == "cuda_exact_k48" for t in range(1, rows + 1))
+
+
 def _align_routes(
     topk_ids: torch.Tensor,
     block_size: int,
@@ -113,9 +136,23 @@ def bind_nowag_method(
     # D6 SiLU experts.
     exact = (kernel_backend == "auto" and state.d == 6 and math.activation in ("silu", "swish")
              and not math.router_weight_on_down_input)
+    select = None
+    if exact and device.type == "cuda":
+        select = partial(
+            select_cuda_moe_backend, device=device, dtype=torch.bfloat16, group_size=state.d,
+            assignment_bits=state.assignment_bits, codebook_size=1 << state.assignment_bits,
+            num_experts=layout.num_experts, hidden_size=layout.hidden_size,
+            intermediate_size=state.intermediate_size,
+            physical_intermediate_size=state.intermediate_size, pad_down_to_k48=False,
+            down_input_group_start_lane=state.down_start_lane,
+            assignment_layout=RUNTIME_ASSIGNMENT_LAYOUT, **_kernel_math(math),
+        )
+        # Load the profiles here, not inside a budget query.
+        select(physical_expert_rows=layout.num_experts, top_k=1, num_tokens=1)
+    may_run_exact = lru_cache(maxsize=None)(partial(_exact_selected, exact, select))
     return ExpertMethod(
         run=run,
-        workspace_spec=partial(_workspace_spec, layout, state, exact),
+        workspace_spec=partial(_workspace_spec, layout, state, may_run_exact),
         kernel_backends=("triton", "cuda_exact_k48") if exact else ("triton",),
         format_parameters={"d": state.d, "assignment_bits": state.assignment_bits},
         speculative_graphs=True,
@@ -125,17 +162,17 @@ def bind_nowag_method(
 
 
 def _workspace_spec(
-    layout: ExpertLayout, state: NowagState, exact: bool, rows: int, top_k: int, *,
+    layout: ExpertLayout, state: NowagState, may_run_exact, rows: int, top_k: int, *,
     bank_rows: int,
 ) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
     """Scratch for ``rows`` physical token rows over ``bank_rows`` addressable bank rows:
-    the bound over the plans this binding can run. Exact-K48 may take two compute slabs,
-    the largest Down tile and either adaptive task queue; Triton alone uses one slab and
-    a Down tile that grows with the batch, so ``rows`` bounds it."""
+    the bound over the plans the kernel can pick for these batches. Exact-K48 may take two
+    compute slabs, the largest Down tile and either adaptive task queue; Triton alone uses
+    one slab and a Down tile that grows with the batch, so ``rows`` bounds it."""
     if rows == 0:
         return {}
     routes = rows * top_k
-    if exact:
+    if may_run_exact(rows, top_k, bank_rows):
         plans = [dict(alignment_block_m=MAX_STRUCTURAL_DOWN_BLOCK_M, compute_slabs=2,
                       adaptive_m_tiles=True, adaptive_residual_policy=policy)
                  for policy in ("bm16", "tail64")]
@@ -224,18 +261,12 @@ def _run(
         route_output_workspace=(
             workspace["route_output"][: slots.numel()] if workspace else None
         ),
-        swiglu_limit=math.activation_limit,
         router_weight_on_middle=math.router_weight_on_down_input,
-        activation_kind=_ACTIVATION_KINDS[math.activation],
         activation_alpha=math.activation_alpha,
         gate_bias=banks.get("gate_bias"),
         up_bias=banks.get("up_bias"),
         down_bias=banks.get("down_bias"),
-        gate_up_input_rounding=math.gate_up_input_rounding or "none",
-        down_input_rounding=math.down_input_rounding or "none",
-        down_norm_placement=(
-            _DOWN_PROLOGUE_NORM if math.down_input_rounding else _GATE_UP_EPILOGUE_NORM
-        ),
+        **_kernel_math(math),
         gate_up_input_transform=gate_up_input_transform,
         middle_transform=_round_down_input if math.down_input_rounding is not None else None,
         align_routes=_align_routes,
