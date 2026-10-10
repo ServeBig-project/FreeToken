@@ -83,3 +83,4 @@ class CacheRebuildReply(BaseFrontendMsg):
     dflash: dict | None = None
     prefix_cache: dict | None = None
     execution: dict | None = None
+    experts: dict | None = None

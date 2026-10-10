@@ -1491,6 +1491,7 @@ class Scheduler(SchedulerIOMixin):
                     dflash=compute_dflash_geometry(self.engine),
                     prefix_cache=self.cache_manager.status(),
                     execution=self.engine.execution_status(),
+                    experts=self.engine.expert_geometry,
                 )
             ]
         )

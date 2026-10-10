@@ -16,8 +16,15 @@ from freetoken.gpu_select import gpu_identity
 from freetoken.layers import set_rope_device
 from freetoken.models import create_model, load_weight
 from freetoken.moe import create_moe_backend, is_offload_moe_backend
-from freetoken.moe.expert_banks import load_expert_banks
-from freetoken.moe.offload_cache import OffloadMoeCache, attach_offload_moe_cache
+from freetoken.checkpoint.ftw import is_ftw_checkpoint
+from freetoken.moe.expert_format import ExpertLayout, ExpertMethod, bind_expert_method, expert_math
+from freetoken.moe.expert_banks import has_expert_weight_override, load_expert_banks
+from freetoken.moe.offload_cache import (
+    OffloadMoeCache,
+    attach_offload_moe_cache,
+    iter_moe_layers,
+    iter_offload_moe_layers,
+)
 from freetoken.utils import align_ceil, div_ceil, init_logger, is_sm90_family, is_sm100_family, mem_GB, torch_dtype
 
 from .config import _LEGACY_SD_CONTROLS, EngineConfig
@@ -334,6 +341,10 @@ class Engine:
             kv_dtype=config.kv_dtype,
             kv_placement=config.kv_placement,
         )
+        if config.tp_info.size > 1 and is_ftw_checkpoint(config.model_path):
+            # FTW stores dense weights whole, as TP1 loads them; only the model readers shard.
+            raise ValueError("FTW checkpoints serve with tensor parallel size 1; "
+                             "use the original checkpoint for tensor parallelism")
         self.execution_fallbacks = _adjust_config(config)
         torch.manual_seed(42)
         self.stream = torch.cuda.Stream()
@@ -401,14 +412,25 @@ class Engine:
         self._post_weights_free = post_weights_free
         self.moe_offload_cache = None
         self.cpu_moe_executor = None
+        self._resident_expert_host_bytes = 0
+        self.expert_workspace_bytes = 0
+        self.expert_shared_bytes = 0
         # Host-resident tables (qwen4_exp's pinned PLE table): after the weights so a load
         # failure is not masked, before the expert banks so their host-memory planning sees it.
         if hasattr(self.model, "load_host_tables"):
             self.model.load_host_tables(config)
         if is_offload_moe_backend(config.moe_backend):
             self._init_offload_moe_cache(config)
+        elif has_expert_weight_override(config.model_config.expert_quant):
+            self._init_resident_expert_banks(config)
+            # Resident experts are weights: both baselines move past them.
+            self._post_weights_free = self._sync_get_memory()[0]
+            self._weights_bytes = self._baseline_free - self._post_weights_free
         if hasattr(self.model, "prepare_for_runtime"):
             self.model.prepare_for_runtime()
+
+        if config.runtime_cache_gib is None:  # before the KV budget measures what is left
+            self._alloc_expert_workspace(config)
 
         # ======================= KV cache initialization ========================
         new_free = self._sync_get_memory()[1]
@@ -421,6 +443,7 @@ class Engine:
             self._init_runtime(config, _startup_kv_budget(
                 config.memory_ratio, local_init_free, self._local_free)
                 - transfer_device_bytes(config))
+            self._alloc_expert_workspace(config)  # part of the runtime's execution room
         else:
             available_memory -= state_pool_bytes(config)
             if self.dflash_layout is not None:
@@ -542,6 +565,7 @@ class Engine:
             self._warmup_prefill()
         if self.runtime is not None and hasattr(config, "max_extend_tokens"):
             self._fit_prefill_tile(config)
+        self.expert_geometry = self._gather_expert_geometry()
 
     def _load_dflash(self, config: EngineConfig) -> None:
         self.dflash_model = self.dflash = None
@@ -568,7 +592,8 @@ class Engine:
         )
         self.dflash_layout = DFlashLayout(config, draft)
 
-    def _resolve_runtime(self, config: EngineConfig, expert_bytes: int | None) -> None:
+    def _resolve_runtime(self, config: EngineConfig, expert_bytes: int | None,
+                         cache_size: int | None = None) -> None:
         """--runtime-cache-gib: settle the context and concurrency limits before anything sized
         by them exists. ``expert_bytes`` is the expert cache beside the runtime (with
         --moe-cache-auto, the smallest one the plan may keep)."""
@@ -577,8 +602,9 @@ class Engine:
         budget = int(config.runtime_cache_gib * (1 << 30))
         execution = net_cache_budget_bytes(
             config.memory_ratio, self._baseline_free, self._weights_bytes,
-            budget + transfer_device_bytes(config)) - expert_bytes
-        limits = self.runtime_limits = self._runtime_limits(config, budget, execution, {})
+            budget + transfer_device_bytes(config) + self.expert_shared_bytes) - expert_bytes
+        limits = self.runtime_limits = self._runtime_limits(
+            config, budget, execution, {}, cache_size=cache_size)
         object.__setattr__(config, "max_seq_len_override", limits["context_tokens"])
         object.__setattr__(config, "max_running_req", limits["max_running_requests"])
         if config.cuda_graph_bs is None:  # no larger batch than the scheduler can form
@@ -629,7 +655,7 @@ class Engine:
         return self._runtime_layout(config).unit_bytes("pages")
 
     def _runtime_limits(self, config: EngineConfig, budget: int, execution: int,
-                        prior: dict) -> dict:
+                        prior: dict, *, cache_size: int | None = None) -> dict:
         """The longest request a runtime of ``budget`` bytes holds alone, and how many it holds
         at their minimum (a page, a GDN state and record row, a drafter window each): the
         context and concurrency limits. Each request's tables, drafter index lists and sampling
@@ -679,13 +705,20 @@ class Engine:
                      + 2 * 4 * (steps + 1) * vocab)
         # Each graph-captured batch row: fp32 logits and the attention backend's page-table row.
         executing = lambda c: ((c + 1) * row_bytes
-                               + _graph_rows(config, c) * (4 * vocab + 4 * width))
+                               + _graph_rows(config, c) * (4 * vocab + 4 * width)
+                               + self._expert_workspace_bytes(config, c, cache_size=cache_size))
         resource = largest(lambda c: layout.blocks(
             pages=c + 1, windows=1 + c * window, states=c + 1, rows=c,
             scratch=c + 1, writable=c + 1) <= total
             and executing(c) <= execution, _MAX_AUTO_RUNNING)
         requested = prior.get("requested_running_requests", config.max_running_req)
         effective = resource if requested is None else min(requested, resource)
+        if effective < 1 and not prior and executing(1) > execution:
+            # A larger runtime would leave even less of this memory.
+            raise ValueError(
+                f"{mem_GB(max(execution, 0))} of GPU memory beside the weights, the expert cache "
+                f"and the {mem_GB(budget)} runtime cannot hold one request's execution buffers "
+                f"({mem_GB(executing(1))}); free GPU memory, e.g. with a smaller --moe-cache-size")
         if effective < 1 or (prior and effective < prior["max_running_requests"]):
             raise ValueError(
                 f"{mem_GB(budget)} of runtime holds {resource} requests at their minimum; "
@@ -731,7 +764,8 @@ class Engine:
         else:
             self.page_units.release(scratch)
 
-    def _fit_runtime_rebuild(self, config: EngineConfig, gib: float, expert_bytes: int):
+    def _fit_runtime_rebuild(self, config: EngineConfig, gib: float, expert_bytes: int,
+                             cache_size: int):
         """A new runtime total must fit beside the weights and target experts, and still hold
         the configured context and running requests; checked before anything is freed."""
         from freetoken.engine.cache_budget import net_cache_budget_bytes
@@ -739,7 +773,7 @@ class Engine:
         budget = int(gib * (1 << 30))
         available = net_cache_budget_bytes(
             config.memory_ratio, self._baseline_free, self._weights_bytes,
-            transfer_device_bytes(config)) - expert_bytes
+            transfer_device_bytes(config) + self.expert_shared_bytes) - expert_bytes
         if budget <= 0:
             raise CacheRebuildRejected(f"runtime_cache_gib must be > 0, got {gib}")
         if budget > available:
@@ -748,7 +782,7 @@ class Engine:
                 "beside the weights and experts; old cache kept, still serving")
         try:
             return budget, self._runtime_limits(config, budget, available - budget,
-                                                self.runtime_limits)
+                                                self.runtime_limits, cache_size=cache_size)
         except ValueError as error:
             raise CacheRebuildRejected(f"{error}; old cache kept, still serving") from error
 
@@ -775,7 +809,9 @@ class Engine:
         from freetoken.engine.cache_budget import expert_bytes_per_slot, net_cache_budget_bytes
 
         per_page, fixed, _, _ = self._pool_cls.kv_cost(config)
-        fixed += state_pool_bytes(config) + transfer_device_bytes(config)
+        fixed += (state_pool_bytes(config) + transfer_device_bytes(config)
+                  + self.expert_shared_bytes
+                  + self._expert_workspace_bytes(config, config.max_running_req))
         budget = net_cache_budget_bytes(
             config.memory_ratio, self._baseline_free, self._weights_bytes, fixed)
         pages = config.num_page_override or 2
@@ -847,7 +883,8 @@ class Engine:
             load_weight(
                 config.model_path,
                 self.device,
-                include_moe_experts=not is_offload_moe_backend(config.moe_backend),
+                include_moe_experts=not is_offload_moe_backend(config.moe_backend)
+                and not has_expert_weight_override(config.model_config.expert_quant),
                 dense_precision=config.model_config.dense_precision,
             ),
             device=self.device,
@@ -867,11 +904,16 @@ class Engine:
         reserve = 8192 if config.kv_reserve_tokens is None else config.kv_reserve_tokens
         page_extra = (self.dflash_layout.total_bytes if self.dflash_layout is not None
                       else lambda pages: 0)
+        # The format's shared tensors sit beside the slots once.
+        fixed_cache_size += sum(t.numel() * t.element_size() for t in banks.shared.values())
         if getattr(config, "runtime_cache_gib", None) is None:
             fixed_cache_size += state_pool_bytes(config)
         else:  # experts get what the runtime and its execution tables leave; pages are unused
             fixed_cache_size += (int(config.runtime_cache_gib * (1 << 30))
-                                 + self.runtime_limits["execution_bytes"])
+                                 + self.runtime_limits["execution_bytes"]
+                                 - self._expert_workspace_bytes(
+                                     config, config.max_running_req,
+                                     cache_size=self._runtime_initial_cache_size))
             reserve, page_extra = 2 * page_tokens, lambda pages: 0
         num_experts = config.model_config.num_experts
         total_experts = config.model_config.num_moe_layers * num_experts
@@ -892,7 +934,156 @@ class Engine:
                 1 if getattr(config, "batching_policy", "legacy") == "joint" else 2
             ),
             page_extra_bytes=page_extra,
+            slot_extra_bytes=lambda slots: self._expert_workspace_bytes(
+                config, config.max_running_req, cache_size=slots),
         )
+
+    def _gather_expert_geometry(self) -> dict | None:
+        """``geometry.experts`` for /v1/cache/status: the bound format and each TP rank's
+        actual expert storage. Collective over the TP CPU group -- every rank calls it."""
+        from freetoken.layers import MoELayer
+
+        cache = self.moe_offload_cache
+        layers = (list(iter_offload_moe_layers(self.model)) if cache is not None
+                  else list(iter_moe_layers(self.model, MoELayer)))
+        if not layers or layers[0].expert_method is None:
+            return None
+        method = layers[0].expert_method
+
+        def nbytes(tensors) -> int:
+            storages = {t.untyped_storage().data_ptr(): t.untyped_storage().nbytes()
+                        for t in tensors}
+            return sum(storages.values())
+
+        if cache is not None:
+            fmt = cache.quant_format
+            host = nbytes(t for per_layer in cache.bank_sources.values() for t in per_layer)
+            device = nbytes([*cache.bank_caches.values(), *cache.prefill_bank_buffers])
+            shared_host, shared_device = nbytes(cache.host_shared.values()), nbytes(cache.shared.values())
+        else:
+            fmt = layers[0].weight_format
+            host = self._resident_expert_host_bytes
+            device = nbytes(
+                t for layer in layers
+                for t in [*(layer.expert_banks or {}).values(),
+                          *(v for v in vars(layer).values() if isinstance(v, torch.Tensor))]
+            )
+            shared = layers[0].expert_shared
+            shared_host, shared_device = 0, nbytes(shared.values())
+        rank = {
+            "rank": self.config.tp_info.rank,
+            "device": str(self.device),
+            "compute_backend": self.config.moe_backend,
+            "kernel_backend": [*method.kernel_backends, *(["cpu"] if self.cpu_moe_executor else [])],
+            "storage_mode": "slot_cache" if cache is not None else "resident",
+            "expert_host_bytes": host,
+            "expert_device_bytes": device,
+            "shared_host_bytes": shared_host,
+            "shared_device_bytes": shared_device,
+            # The decode stream's reserved scratch; prefill tiles allocate theirs per call.
+            "workspace_device_bytes": self.expert_workspace_bytes,
+        }
+        ranks = [None] * self.config.tp_info.size
+        torch.distributed.all_gather_object(ranks, rank, group=self.tp_cpu_group)
+        return {"format": fmt, "format_parameters": dict(method.format_parameters), "ranks": ranks}
+
+    def _bind_experts(self, config: EngineConfig, layers: list, quant_format: str,
+                      format_state) -> ExpertMethod:
+        """Bind every MoE layer's expert method from the loaded format."""
+        sample = layers[0]
+        self.expert_method = bind_expert_method(
+            expert_math(sample),
+            ExpertLayout(quant_format, sample.hidden_size, sample.intermediate_size,
+                         sample.num_experts),
+            format_state,
+            device=self.device,
+            backend=config.moe_backend,
+        )
+        if config.speculative_graphs and not self.expert_method.speculative_graphs:
+            raise ValueError(f"{quant_format} expert method does not support SD CUDA Graph")
+        if (config.speculative_draft_load_missing or config.speculative_verify_prefetch
+                ) and not self.expert_method.speculative_loads:
+            raise ValueError(f"{quant_format} expert method does not support SD missing loads/prefetch")
+        if config.speculative_adaptive_cost and not self.expert_method.speculative_graphs:
+            raise ValueError(f"{quant_format} expert method does not support measured SD controls")
+        self._expert_top_k = sample.top_k
+        for layer in layers:
+            layer.expert_method = self.expert_method
+        return self.expert_method
+
+    def _expert_workspace_spec(self, config: EngineConfig, running: int,
+                               *, cache_size: int | None = None) -> dict:
+        """Expert scratch for the decode stream: decode, SD drafting and verification run one
+        graph (or eager step) at a time, so one scratch sized for the largest padded batch
+        serves them all. Prefill tiles allocate their own, inside the measured prefill peak."""
+        method = getattr(self, "expert_method", None)
+        if method is None:
+            return {}
+        # Without a shared runtime an explicit graph cap is captured as given, even above the
+        # concurrency; with one, the cap is clamped to the concurrency it resolves.
+        graph_running = running if config.runtime_cache_gib is not None else max(
+            running, config.cuda_graph_max_bs or 0)
+        rows = (max(running, _graph_rows(config, graph_running), 1)
+                * ((config.speculative_num_steps or 0) + 1))
+        bank_rows = config.model_config.num_experts
+        if is_offload_moe_backend(config.moe_backend):
+            slots = config.moe_cache_size if cache_size is None else cache_size
+            buffers = 2 if config.batching_policy == "layered" else 0
+            bank_rows = max(bank_rows, slots - buffers * bank_rows)
+        return method.workspace_spec(rows, self._expert_top_k, bank_rows=bank_rows)
+
+    def _expert_workspace_bytes(self, config: EngineConfig, running: int,
+                                *, cache_size: int | None = None) -> int:
+        spec = self._expert_workspace_spec(config, running, cache_size=cache_size)
+        return sum(math.prod(shape) * dtype.itemsize for shape, dtype in spec.values())
+
+    def _alloc_expert_workspace(self, config: EngineConfig) -> None:
+        """Reserve the decode stream's expert scratch once the concurrency is settled."""
+        from freetoken.layers import MoELayer
+
+        spec = self._expert_workspace_spec(config, config.max_running_req)
+        if not spec:
+            return
+        workspace = {name: torch.empty(shape, dtype=dtype, device=self.device)
+                     for name, (shape, dtype) in spec.items()}
+        self.expert_workspace_bytes = self._expert_workspace_bytes(config, config.max_running_req)
+        layers = (iter_offload_moe_layers(self.model) if self.moe_offload_cache is not None
+                  else iter_moe_layers(self.model, MoELayer))
+        for layer in layers:
+            layer.expert_workspace = workspace
+
+    def _init_resident_expert_banks(self, config: EngineConfig) -> None:
+        """Hold format-loaded experts (NoWAG) whole on the GPU: each layer reads its own
+        banks; logical expert ids are the bank rows. Host copies are released per layer."""
+        from freetoken.layers import MoELayer
+
+        layers = list(iter_moe_layers(self.model, MoELayer))
+        uploaded: list[dict[str, torch.Tensor]] = [{} for _ in layers]
+
+        def upload(layer_id: int, banks: dict) -> None:
+            for name, bank in banks.items():
+                uploaded[layer_id][name] = bank.tensor.to(self.device)
+                bank.release()
+
+        banks = load_expert_banks(config.model_path, config.model_config, device=self.device,
+                                  dtype=self.dtype, layer_sink=upload)
+        method = self._bind_experts(config, layers, banks.quant_format, banks.format_state)
+        shared = {name: t.to(self.device) for name, t in banks.shared.items()}
+        # Only the model-supplied banks (expert biases) keep a pinned host copy.
+        self._resident_expert_host_bytes = sum(
+            t.numel() * t.element_size()
+            for name, per_layer in banks.sources.items()
+            if name not in uploaded[0]
+            for t in per_layer
+        )
+        for layer_id, layer in enumerate(layers):
+            # Banks the model supplies itself (expert biases) arrive whole, not streamed.
+            for name, per_layer in banks.sources.items():
+                if name not in uploaded[layer_id]:
+                    uploaded[layer_id][name] = per_layer[layer_id].to(self.device)
+            layer.expert_banks = uploaded[layer_id]
+            layer.expert_shared = shared
+            layer.expert_method = method
 
     def _init_offload_moe_cache(self, config: EngineConfig) -> OffloadMoeCache:
         # A model may fully own cache construction via make_offload_moe_cache.
@@ -935,6 +1126,10 @@ class Engine:
                 parallel=expert_parallel,
                 decode_target=("cpu" if decode_target in ("cpu", "hybrid") else "gpu"),
             )
+            self._bind_experts(config, list(iter_offload_moe_layers(self.model)),
+                               banks.quant_format, banks.format_state)
+            self.expert_shared_bytes = sum(t.numel() * t.element_size()
+                                           for t in banks.shared.values())
             shared = getattr(config, "runtime_cache_gib", None) is not None
             if shared and config.moe_cache_auto:
                 from freetoken.engine.cache_budget import expert_bytes_per_slot
@@ -943,11 +1138,17 @@ class Engine:
                 # then takes what the runtime and that concurrency's execution tables leave.
                 layers = 1 if getattr(config, "batching_policy", "legacy") == "joint" else 2
                 floor = (layers if config.moe_prefill_overlap else 1) * config.model_config.num_experts
-                self._resolve_runtime(config, floor * expert_bytes_per_slot(banks.sources))
+                self._runtime_initial_cache_size = floor
+                self._resolve_runtime(config, floor * expert_bytes_per_slot(banks.sources), floor)
             if config.moe_cache_auto:
                 size, pages, overlap = self._resolve_auto_moe_cache_size(config, banks)
                 object.__setattr__(config, "moe_cache_size", size)
                 object.__setattr__(config, "moe_prefill_overlap", overlap)
+                if shared:
+                    self.runtime_limits["execution_bytes"] += (
+                        self._expert_workspace_bytes(config, config.max_running_req)
+                        - self._expert_workspace_bytes(config, config.max_running_req,
+                                                       cache_size=self._runtime_initial_cache_size))
                 if config.num_page_override is None and config.runtime_cache_gib is None:
                     # Honor the plan's KV half too: MoE slots and KV pages were solved
                     # against ONE budget (ratio x baseline - weights), so both must come
@@ -1022,7 +1223,7 @@ class Engine:
             )
             cache.set_bank_sources(banks.sources, layer_residency=banks.layer_residency)
             cache.set_alphas(banks.gate_up_alpha, banks.down_alpha)
-            cache.set_codebook(banks.codebook)
+            cache.set_shared(banks.shared)
             if getattr(config, "batching_policy", "legacy") == "joint":
                 logger.info_rank0(
                     "Joint group-resident batching: "
@@ -1041,6 +1242,8 @@ class Engine:
                 )
         else:
             cache = cache_factory(config, self.device)
+            self._bind_experts(config, list(iter_offload_moe_layers(self.model)),
+                               cache.quant_format, None)
             cache.decode_target = decode_target
             cache.hybrid_max_fetch = config.moe_hybrid_max_fetch
         if decode_target == "hybrid":
@@ -1126,7 +1329,8 @@ class Engine:
             device=self.device,
             swiglu_alpha=getattr(sample, "hidden_act_alpha", 1.702),
             swiglu_limit=getattr(sample, "swiglu_limit", None),
-            nowag_model_type=getattr(sample, "nowag_model_type", None),
+            gate_up_input_rounding=getattr(sample, "gate_up_input_rounding", None),
+            expert_method=self.expert_method,
         )
         cache.set_cpu_executor(executor)
         self.cpu_moe_executor = executor
@@ -1282,7 +1486,7 @@ class Engine:
         if shared:  # an expert-only change keeps the runtime and its contents
             budget, limits = self._fit_runtime_rebuild(
                 config, config.runtime_cache_gib if runtime_cache_gib is None
-                else runtime_cache_gib, target_moe * per_expert_bytes)
+                else runtime_cache_gib, target_moe * per_expert_bytes, target_moe)
         # Price the sibling GDN state pool at ITS target (physical slots = usable + padding
         # sink) and hand the bytes in -- the KV pool only budgets its own tiers.
         target_mamba = (
@@ -1307,6 +1511,9 @@ class Engine:
                 extra_fixed_bytes=(
                     (state_pool_bytes(config, target_mamba) if target_mamba is not None else 0)
                     + draft_bytes + transfer_device_bytes(config)
+                    + self.expert_shared_bytes
+                    + self._expert_workspace_bytes(config, config.max_running_req,
+                                                   cache_size=target_moe or None)
                 ),
                 extra_note=(
                     f", mamba={target_mamba - 1} slots" if target_mamba is not None else ""
@@ -1332,8 +1539,11 @@ class Engine:
         prior_replays = self.graph_runner.replay_counts
         prior_eager = self.graph_runner.eager_counts
         self.graph_runner.destroy_cuda_graphs()
+        if moe_cache_size is not None:
+            for layer in iter_offload_moe_layers(self.model):
+                layer.expert_workspace = None
         if runtime_cache_gib is not None:
-            # A smaller runtime may fund larger expert banks below.
+            # A smaller runtime may fund larger expert banks and scratch below.
             self.page_units = None
             self.runtime.close()
         # 2. Resize caches in place (each frees its old GPU tensors before allocating).
@@ -1346,6 +1556,10 @@ class Engine:
         if moe_cache_size is not None:
             assert self.moe_offload_cache is not None, "no MoE offload cache to resize"
             self.moe_offload_cache.rebuild(moe_cache_size)
+            object.__setattr__(config, "moe_cache_size", moe_cache_size)
+            self._alloc_expert_workspace(config)
+            if shared and runtime_cache_gib is None:
+                self.runtime.limits = self.runtime_limits = limits
         if runtime_cache_gib is not None:
             self._replace_runtime(config, budget, limits)
         elif num_pages is not None:
@@ -1403,6 +1617,7 @@ class Engine:
         self._map_capture_scratch(config, False)
         if shared and hasattr(config, "max_extend_tokens"):
             self._fit_prefill_tile(config)  # the new pools leave less (or more) execution room
+        self.expert_geometry = self._gather_expert_geometry()
 
     def compute_logits(self, batch: Batch) -> torch.Tensor:
         assert torch.cuda.current_stream() == self.stream
@@ -1413,8 +1628,7 @@ class Engine:
             if self.graph_runner.can_use_cuda_graph(batch):
                 logits = self.graph_runner.replay(batch)
             else:
-                if self.graph_runner.speculative is not None and (
-                        batch.draft_experts is not None or batch.is_speculative_verify):
+                if batch.draft_experts is not None or batch.is_speculative_verify:
                     self.graph_runner.eager_counts[
                         "verify" if batch.is_speculative_verify else "draft"] += 1
                 logits = forward_model(self.model)
@@ -1644,7 +1858,7 @@ class Engine:
     def finish_layer_group_logits(self, batch: Batch, state) -> torch.Tensor:
         """Logits for every row of a state that ran all layers (SD verification)."""
         runner = self.graph_runner
-        if runner.speculative is not None and not runner.speculative.has_ranges(batch):
+        if runner.speculative is None or not runner.speculative.has_ranges(batch):
             runner.eager_counts["verify_range"] += 1
         self._observe_replay(batch)
         with self.ctx.forward_batch(batch):
@@ -2049,7 +2263,7 @@ _DENSE_MOE_SETTINGS = {
 
 
 _SD_GRAPH_UNSUPPORTED = (
-    "SD CUDA Graph requires BF16 activations and BF16 or NVFP4 experts "
+    "SD CUDA Graph requires BF16 activations and a graph-capable expert method "
     "with --moe-backend offload or hybrid, "
     "FlashInfer attention, page size 1 and at most 8 draft steps; "
     "pass --cuda-graph-max-bs 0 to run speculation eagerly"
@@ -2107,13 +2321,8 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
     has_swa_attention = getattr(model_config, "has_swa_attention", False)
     has_linear_attention = getattr(model_config, "has_linear_attention", False)
     is_moe = getattr(model_config, "is_moe", False)
-    nowag_expert_path = getattr(config, "nowag_expert_path", None)
-    if nowag_expert_path is not None:
-        from freetoken.moe.nowag import get_nowag_model_rule
-
-        get_nowag_model_rule(model_config)
-        object.__setattr__(model_config, "expert_quant", "nowag")
-        object.__setattr__(model_config, "nowag_expert_path", nowag_expert_path)
+    if getattr(config, "nowag_expert_path", None) is not None and not is_moe:
+        raise ValueError("--nowag-expert-path requires a model with routed experts")
     expert_quant = getattr(model_config, "expert_quant", "none")
 
     fallbacks: list[dict] = []
@@ -2258,19 +2467,12 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
             "and let every layer decode on the GPU offload path instead."
         )
 
-    if expert_quant == "nowag" and (
-        config.moe_backend in ("cpu", "hybrid") or config.moe_cpu_layers
-    ):
-        from freetoken.moe.cpu_executor import compiled_extension_supports
+    if is_moe and (config.moe_backend in ("cpu", "hybrid") or config.moe_cpu_layers):
+        from freetoken.moe.cpu_executor import require_compiled_support
+        from freetoken.moe.expert_banks import cpu_expert_format
 
-        if not compiled_extension_supports(
-            getattr(model_config, "hidden_act", "silu"), "nowag"
-        ):
-            raise RuntimeError(
-                "NoWAG cpu/hybrid requires a _cpu_moe extension with the NoWAG "
-                "weight format; rebuild it with `python setup.py build_ext "
-                "--inplace` (or reinstall the wheel)."
-            )
+        cpu_format = cpu_expert_format(config.model_path, model_config)
+        require_compiled_support(model_config.hidden_act, cpu_format)
 
     if is_moe and config.moe_backend == "auto":
         # A MoE model always defaults to the offload family: experts stream from pinned host
@@ -2299,6 +2501,7 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
             gpu_uuid=gpu_uuid,
         ) == "hybrid":
             from freetoken.moe.cpu_executor import compiled_extension_supports
+            from freetoken.moe.expert_banks import cpu_expert_format
 
             _act = getattr(model_config, "hidden_act", "silu")
             if not _cpu_moe_act_ok:
@@ -2307,8 +2510,8 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
                     f"support this model's expert activation "
                     f"{getattr(model_config, 'hidden_act', None)!r}; staying on offload"
                 )
-            elif moe_wfmt != "mxfp4" and not compiled_extension_supports(
-                _act, bench_fmt
+            elif not compiled_extension_supports(
+                _act, cpu_expert_format(config.model_path, model_config)
             ):
                 # Stale prebuilt _cpu_moe.so: an explicit cpu/hybrid pick still
                 # hard-fails in the executor, but a default must not turn into a
@@ -2386,6 +2589,7 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
     if (
         is_moe
         and expert_quant not in ("none", "fp8_block")
+        and not has_expert_weight_override(expert_quant)
         and not is_offload_moe_backend(config.moe_backend)
     ):
         raise ValueError(

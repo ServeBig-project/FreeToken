@@ -217,8 +217,11 @@ class MTPDrafter:
         for step in range(steps):
             attend = first_step if step == 0 else (
                 lambda q, k, v, index: backend.attend(q, selected[0], md, layer))
-            hidden, streams = runtime.mtp.forward(
-                streams, engine.model.model.embed_tokens.forward(tokens), positions + step, attend)
+            # The resident experts read the batch kind: a draft step is part of this decode.
+            with get_global_ctx().forward_batch(batch):
+                hidden, streams = runtime.mtp.forward(
+                    streams, engine.model.model.embed_tokens.forward(tokens), positions + step,
+                    attend)
             live = [n for n, i in enumerate(drafting) if lengths[i] > step]
             out = [drafting[n] for n in live]
             logits = engine.model.lm_head.forward_selected(hidden[live])

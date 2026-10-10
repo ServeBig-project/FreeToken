@@ -1,4 +1,4 @@
-"""Load expert-only NoWAG weights and describe their model-specific math."""
+"""Read NoWAG v1 expert-only weights (native sidecar) into pinned host banks."""
 
 from __future__ import annotations
 
@@ -16,73 +16,95 @@ FORMAT = "nowag_expert_sidecar_v1"
 LEGACY_DSV4_FORMAT = "deepseek_v4_nowag_expert_sidecar_v1"
 CODEBOOK_KEY = "global_all.codebook"
 RUNTIME_ASSIGNMENT_LAYOUT = "word_major"
-NO_ACTIVATION_ROUNDING = "none"
-DYNAMIC_E4M3_GROUP128_UE8M0 = "dynamic_e4m3_per_token_group128_ue8m0"
-GATE_UP_EPILOGUE_NORM = "gate_up_epilogue"
-DOWN_PROLOGUE_NORM = "down_prologue"
 
 # The files keep the projection names used by the first DSV4 quantizer.  Their
 # meaning is model-independent: w1 is gate, w3 is up, and w2 is down.
 _PROJECTION_BANK = {"w1": "gate", "w3": "up", "w2": "down"}
+BANK_NAMES = tuple(f"{projection}_{kind}" for projection in ("gate", "up", "down")
+                   for kind in ("assignments", "input_norm", "output_norm"))
+BIAS_NAMES = ("gate_bias", "up_bias", "down_bias")
 
 
 @dataclass(frozen=True)
-class NowagModelRule:
-    model_type: str
-    gate_up_input_rounding: str
-    down_input_rounding: str
-    down_norm_placement: str
-    router_weight_on_input: bool
-    requires_swiglu_limit: bool
+class NowagState:
+    """Encoding parameters the NoWAG method interprets; opaque to common code."""
+
+    d: int
+    assignment_bits: int
+    # This TP rank's Down input width and the lanes of its first (global) codeword
+    # that belong to the previous rank.
+    intermediate_size: int
+    down_start_lane: int = 0
 
 
-_MODEL_RULES = {
-    "deepseek_v4": NowagModelRule(
-        "deepseek_v4",
-        gate_up_input_rounding=DYNAMIC_E4M3_GROUP128_UE8M0,
-        down_input_rounding=DYNAMIC_E4M3_GROUP128_UE8M0,
-        down_norm_placement=DOWN_PROLOGUE_NORM,
-        router_weight_on_input=False,
-        requires_swiglu_limit=True,
-    ),
-    "qwen3_5_moe": NowagModelRule(
-        "qwen3_5_moe",
-        gate_up_input_rounding=NO_ACTIVATION_ROUNDING,
-        down_input_rounding=NO_ACTIVATION_ROUNDING,
-        down_norm_placement=GATE_UP_EPILOGUE_NORM,
-        router_weight_on_input=False,
-        requires_swiglu_limit=False,
-    ),
-}
+def expert_intermediate_range(model_config, rank: int, size: int) -> tuple[int, int]:
+    """This rank's slice of the expert intermediate axis: the model's own partition if it
+    declares one, else the contiguous chunks the dense loader uses."""
+    from freetoken.moe.expert_banks import _model_hook
+
+    width = int(model_config.moe_intermediate_size)
+    model_range = _model_hook(model_config, "expert_intermediate_range")
+    if model_range is not None:
+        return model_range(width, rank=rank, world_size=size)
+    per_rank = -(-width // size)
+    start = min(rank * per_rank, width)
+    return start, min(start + per_rank, width)
 
 
-def get_nowag_model_rule(model_config_or_type) -> NowagModelRule:
-    """Return the supported NoWAG rule for a parsed model config or model type."""
-    if isinstance(model_config_or_type, str):
-        model_type = model_config_or_type
-        model_config = None
-    else:
-        model_config = model_config_or_type
-        model_type = getattr(model_config, "model_type", None)
-        if getattr(model_config, "dsv4_args", None) is not None:
-            model_type = "deepseek_v4"
+@dataclass(frozen=True)
+class _Shard:
+    """This TP rank's view of the global expert encoding."""
 
-    rule = _MODEL_RULES.get(model_type)
-    if rule is None:
-        supported = ", ".join(sorted(_MODEL_RULES))
-        raise ValueError(
-            f"NoWAG expert serving does not support model_type {model_type!r}; "
-            f"supported model types: {supported}"
-        )
-    if model_config is not None:
-        if not getattr(model_config, "is_moe", True):
-            raise ValueError("--nowag-expert-path requires a model with routed experts")
-        hidden_act = getattr(model_config, "hidden_act", "silu")
-        if hidden_act != "silu":
-            raise ValueError(
-                f"NoWAG expert serving requires SwiGLU/silu experts, got {hidden_act!r}"
-            )
-    return rule
+    start: int
+    end: int
+    first_group: int
+    last_group: int
+    rank: int
+
+    @classmethod
+    def of(cls, model_config, d: int) -> "_Shard":
+        from freetoken.distributed import get_tp_info
+
+        tp = get_tp_info()
+        start, end = expert_intermediate_range(model_config, tp.rank, tp.size)
+        return cls(start, end, start // d, -(-end // d), tp.rank)
+
+    def state(self, d: int, bits: int) -> NowagState:
+        return NowagState(d, bits, self.end - self.start, self.start - self.first_group * d)
+
+    def apply(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
+        """Gate/Up keep their output rows, Down its input lanes (global codeword groups)."""
+        if name == "down_assignments":
+            return _regroup(tensor, self.first_group, self.last_group)
+        if name in _INTERMEDIATE_LAST:
+            return tensor[..., self.start:self.end]
+        return tensor
+
+
+# Banks whose last axis is the expert intermediate axis.
+_INTERMEDIATE_LAST = (
+    "gate_assignments", "up_assignments", "gate_output_norm", "up_output_norm",
+    "down_input_norm", "gate_bias", "up_bias",
+)
+
+
+def _regroup(words: torch.Tensor, first: int, last: int) -> torch.Tensor:
+    """Re-pack the 12-bit ids of global codeword groups ``[first, last)`` of word-major
+    ``[..., W, N]`` assignments from bit 0, keeping the global grouping."""
+    w = words.to(torch.int64) & 0xFFFFFFFF
+    w = torch.cat((w, torch.zeros_like(w[..., :1, :])), dim=-2)
+    out = torch.zeros(
+        (*w.shape[:-2], -(-(last - first) * 12 // 32) + 1, w.shape[-1]), dtype=torch.int64
+    )
+    for k, group in enumerate(range(first, last)):
+        word, shift = divmod(group * 12, 32)
+        ids = ((w[..., word, :] >> shift) | (w[..., word + 1, :] << (32 - shift))) & 0xFFF
+        word, shift = divmod(k * 12, 32)
+        out[..., word, :] |= (ids << shift) & 0xFFFFFFFF
+        if shift + 12 > 32:
+            out[..., word + 1, :] |= ids >> (32 - shift)
+    out = out[..., :-1, :]
+    return torch.where(out >= 1 << 31, out - (1 << 32), out).to(torch.int32)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -105,7 +127,7 @@ def _tensor_key(layer: int, expert: int, projection: str, suffix: str) -> str:
 def _validate_manifest_model(
     manifest: dict[str, Any],
     manifest_path: Path,
-    rule: NowagModelRule,
+    model_type: str,
     *,
     layers: int,
     experts: int,
@@ -114,18 +136,18 @@ def _validate_manifest_model(
 ) -> None:
     output_format = manifest.get("format")
     if output_format == LEGACY_DSV4_FORMAT:
-        if rule.model_type != "deepseek_v4":
+        if model_type != "deepseek_v4":
             raise ValueError(
                 f"{manifest_path}: legacy DeepSeek-V4 NoWAG weights cannot serve "
-                f"{rule.model_type}"
+                f"{model_type}"
             )
         return
     if output_format != FORMAT:
         raise ValueError(f"{manifest_path}: unsupported NoWAG output format")
-    if manifest.get("model_type") != rule.model_type:
+    if manifest.get("model_type") != model_type:
         raise ValueError(
             f"{manifest_path}: NoWAG weights are for model_type "
-            f"{manifest.get('model_type')!r}, expected {rule.model_type!r}"
+            f"{manifest.get('model_type')!r}, expected {model_type!r}"
         )
     expected_dims = {
         "num_moe_layers": layers,
@@ -145,9 +167,12 @@ def load_nowag_expert_sources(
     model_config,
     *,
     dtype: torch.dtype = torch.bfloat16,
-    model_type: str | None = None,
-) -> tuple[dict[str, list[torch.Tensor]], torch.Tensor]:
+    layer_sink=None,
+) -> tuple[dict[str, list[torch.Tensor]], dict[str, torch.Tensor], NowagState]:
     """Load and pin the nine per-expert banks plus one model-wide codebook.
+
+    With ``layer_sink``, each completed layer's unpinned host banks go to
+    ``layer_sink(layer, {name: HostBank})`` instead, which owns (and may release) them.
 
     Assignment banks are always returned as contiguous ``[E, W, N]`` tensors.
     Existing sidecars store each expert as ``[N, W]`` and are transposed while
@@ -158,7 +183,6 @@ def load_nowag_expert_sources(
     if dtype != torch.bfloat16:
         raise ValueError("NoWAG expert serving currently requires bfloat16")
 
-    rule = get_nowag_model_rule(model_type or model_config)
     root = Path(output_path).resolve()
     manifest_path = root / "manifest.json" if root.is_dir() else root
     root = manifest_path.parent
@@ -171,7 +195,7 @@ def load_nowag_expert_sources(
     _validate_manifest_model(
         manifest,
         manifest_path,
-        rule,
+        model_config.model_type,
         layers=layers,
         experts=experts,
         hidden=hidden,
@@ -205,22 +229,39 @@ def load_nowag_expert_sources(
         if not isinstance(file, str):
             raise TypeError("NoWAG layer file must be a string")
         files_by_layer[layer] = root / file
-    if set(files_by_layer) != set(range(layers)):
-        raise ValueError("NoWAG layer indices are incomplete")
+    # Layer numbers are decoder layers; models with leading dense layers start
+    # their MoE layers at first_k_dense_replace.
+    first = int(getattr(model_config, "first_k_dense_replace", 0))
+    if set(files_by_layer) != set(range(first, first + layers)):
+        raise ValueError(
+            f"NoWAG layers must be the MoE decoder layers [{first}, {first + layers})"
+        )
 
+    shard = _Shard.of(model_config, group_size)
+    local = shard.end - shard.start
     gate_words = _words(hidden, group_size, assignment_bits)
     down_words = _words(intermediate, group_size, assignment_bits)
+    local_down_words = -(-(shard.last_group - shard.first_group) * assignment_bits // 32)
     specs = {
-        "gate_assignments": ((experts, gate_words, intermediate), torch.int32),
+        "gate_assignments": ((experts, gate_words, local), torch.int32),
         "gate_input_norm": ((experts, hidden), dtype),
-        "gate_output_norm": ((experts, intermediate), dtype),
-        "up_assignments": ((experts, gate_words, intermediate), torch.int32),
+        "gate_output_norm": ((experts, local), dtype),
+        "up_assignments": ((experts, gate_words, local), torch.int32),
         "up_input_norm": ((experts, hidden), dtype),
-        "up_output_norm": ((experts, intermediate), dtype),
-        "down_assignments": ((experts, down_words, hidden), torch.int32),
-        "down_input_norm": ((experts, intermediate), dtype),
+        "up_output_norm": ((experts, local), dtype),
+        "down_assignments": ((experts, local_down_words, hidden), torch.int32),
+        "down_input_norm": ((experts, local), dtype),
         "down_output_norm": ((experts, hidden), dtype),
     }
+    full_shapes = {
+        "gate_assignments": (gate_words, intermediate),
+        "up_assignments": (gate_words, intermediate),
+        "down_assignments": (down_words, hidden),
+        "gate_output_norm": (intermediate,),
+        "up_output_norm": (intermediate,),
+        "down_input_norm": (intermediate,),
+    }
+    sliced = local != intermediate
 
     from freetoken.moe.host_banks import PinPipeline, alloc_layer_banks
 
@@ -231,7 +272,7 @@ def load_nowag_expert_sources(
     }
     with PinPipeline() as pins:
         for layer in range(layers):
-            path = files_by_layer[layer]
+            path = files_by_layer[first + layer]
             if not path.is_file():
                 raise FileNotFoundError(path)
             with safe_open(path, framework="pt", device="cpu") as handle:
@@ -240,24 +281,25 @@ def load_nowag_expert_sources(
                     for projection, bank in _PROJECTION_BANK.items():
                         keys = {
                             "assignments": _tensor_key(
-                                layer, expert, projection, "assignments"
+                                first + layer, expert, projection, "assignments"
                             ),
                             "input_norm": _tensor_key(
-                                layer, expert, projection, "normalizer.norms.0"
+                                first + layer, expert, projection, "normalizer.norms.0"
                             ),
                             "output_norm": _tensor_key(
-                                layer, expert, projection, "normalizer.norms.1"
+                                first + layer, expert, projection, "normalizer.norms.1"
                             ),
                         }
                         missing = [name for name in keys.values() if name not in available]
                         if missing:
                             raise KeyError(f"{path}: missing {missing[0]}")
                         for kind, key in keys.items():
-                            target = sources[f"{bank}_{kind}"][layer][expert]
+                            name = f"{bank}_{kind}"
+                            target = sources[name][layer][expert]
                             loaded = handle.get_tensor(key)
-                            expected_shape = tuple(target.shape)
+                            expected_shape = full_shapes.get(name, tuple(target.shape))
                             if kind == "assignments" and source_assignment_layout == "row_major":
-                                expected_shape = (target.shape[1], target.shape[0])
+                                expected_shape = expected_shape[::-1]
                             if tuple(loaded.shape) != expected_shape:
                                 raise ValueError(
                                     f"{key}: expected {expected_shape}, "
@@ -270,10 +312,13 @@ def load_nowag_expert_sources(
                                     f"{key}: normalizer must use {dtype}, got {loaded.dtype}"
                                 )
                             if kind == "assignments" and source_assignment_layout == "row_major":
-                                target.copy_(loaded.transpose(0, 1))
-                            else:
-                                target.copy_(loaded)
-            pins(layer, {name: per[layer] for name, per in host_banks.items()})
+                                loaded = loaded.transpose(0, 1)
+                            target.copy_(shard.apply(name, loaded) if sliced else loaded)
+            layer_banks = {name: per[layer] for name, per in host_banks.items()}
+            if layer_sink is not None:
+                layer_sink(layer, layer_banks)
+            else:
+                pins(layer, layer_banks)
 
     codebook_entry = manifest.get("codebook")
     if not isinstance(codebook_entry, dict):
@@ -297,19 +342,37 @@ def load_nowag_expert_sources(
             f"NoWAG codebook must be {list(expected_codebook_shape)}, "
             f"got {tuple(codebook.shape)}"
         )
-    return sources, codebook
+    return sources, {"codebook": codebook}, shard.state(group_size, assignment_bits)
 
 
-__all__ = [
-    "CODEBOOK_KEY",
-    "DOWN_PROLOGUE_NORM",
-    "DYNAMIC_E4M3_GROUP128_UE8M0",
-    "FORMAT",
-    "GATE_UP_EPILOGUE_NORM",
-    "LEGACY_DSV4_FORMAT",
-    "NO_ACTIVATION_ROUNDING",
-    "RUNTIME_ASSIGNMENT_LAYOUT",
-    "NowagModelRule",
-    "get_nowag_model_rule",
-    "load_nowag_expert_sources",
-]
+def prepare_ftw_banks(stored_state, model_config, *, bank_names):
+    """Check the FTW carries the model's expert biases and return its encoding state."""
+    from freetoken.moe.expert_banks import _model_hook
+
+    biases = _model_hook(model_config, "load_expert_biases")
+    if biases is not None:
+        missing = set(biases.bank_names) - bank_names
+        if missing:
+            raise ValueError(f"FTW is missing required expert bias banks: {sorted(missing)}")
+    return NowagState(**stored_state)
+
+
+def load_banks(model_path, model_config, device, dtype, dummy, *, layer_sink=None):
+    if dummy:
+        raise ValueError("NoWAG experts require a completed quantization output")
+    from freetoken.moe.expert_banks import ExpertBanks, _model_hook
+
+    path = getattr(model_config, "nowag_expert_path", None)
+    if not path:
+        raise ValueError("NoWAG expert path was not configured")
+    sources, shared, state = load_nowag_expert_sources(
+        path, model_config, dtype=dtype, layer_sink=layer_sink
+    )
+    # The sidecar carries only the projections; a model with expert biases supplies
+    # them from the original checkpoint.
+    load_biases = _model_hook(model_config, "load_expert_biases")
+    if load_biases is not None:
+        sources.update(load_biases(model_path, model_config, dtype=dtype))
+    return ExpertBanks(
+        "nowag", sources, shared=shared, format_state=state, streamed=layer_sink is not None
+    )

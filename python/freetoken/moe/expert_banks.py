@@ -7,10 +7,8 @@ extracting the GPU-resident alphas if the format folds its global scales. The
 engine stays quant-agnostic: it calls :func:`load_expert_banks` and wires the
 returned bundle into the cache.
 
-A format is fully described by three per-format tables: ``_BANK_SCHEMAS``
-(offload_cache, bank layout), ``_PROVIDERS`` (here, loading/repack), and
-``OffloadMoELayer._expert_gemm`` (kernel dispatch). Adding a format touches those
-three places and nothing else.
+A format is described in two places: :mod:`freetoken.moe.expert_format` (bank layout
+and bound compute method) and ``_PROVIDERS`` here (loading/repack).
 """
 
 from __future__ import annotations
@@ -18,13 +16,15 @@ from __future__ import annotations
 import glob
 import os
 import threading
+from functools import partial
 from dataclasses import dataclass, field
 
 import torch
 
 from freetoken.utils import init_logger
 
-from .offload_cache import _BANK_SCHEMAS
+from .expert_format import _BANK_SCHEMAS
+from .nowag.weights import load_banks as _load_nowag_banks, prepare_ftw_banks as _prepare_nowag
 
 logger = init_logger(__name__)
 
@@ -40,9 +40,11 @@ class ExpertBanks:
     # marlin/b12x per-expert global scales ([L*E]); None for formats without them
     gate_up_alpha: torch.Tensor | None = field(default=None)
     down_alpha: torch.Tensor | None = field(default=None)
-    # One model-wide NoWAG codebook. It is copied to the GPU once and does not
-    # contribute to the per-expert slot size.
-    codebook: torch.Tensor | None = field(default=None)
+    # Format-wide read-only tensors (the NoWAG codebook): installed once per device,
+    # never part of the per-expert slot size.
+    shared: dict[str, torch.Tensor] = field(default_factory=dict)
+    # Format-private encoding parameters, passed through to bind_expert_method.
+    format_state: object = None
     # Per-layer HostResidency values; None -> all pinned (the only class
     # served; policies that assign other classes are not implemented).
     layer_residency: list[str] | None = field(default=None)
@@ -279,25 +281,7 @@ def _dsfp4_banks(model_path, model_config, device, dtype, dummy, parallel=False,
     )
 
 
-def _nowag_banks(model_path, model_config, device, dtype, dummy, parallel=False, workers=8, chunk=_PARALLEL_CHUNK, decode_target="gpu", layer_sink=None) -> ExpertBanks:
-    if dummy:
-        raise ValueError("NoWAG experts require a completed quantization output")
-    if layer_sink is not None:
-        raise NotImplementedError("FTW conversion does not yet write NoWAG expert banks")
-    from freetoken.moe.nowag import load_nowag_expert_sources
-
-    path = getattr(model_config, "nowag_expert_path", None)
-    if not path:
-        raise ValueError("NoWAG expert path was not configured")
-    sources, codebook = load_nowag_expert_sources(path, model_config, dtype=dtype)
-    return ExpertBanks(
-        "nowag",
-        {name: sources[name] for name in _BANK_SCHEMAS["nowag"]},
-        codebook=codebook,
-    )
-
-
-def _model_setup_override(model_config):
+def _model_hook(model_config, name: str):
     architectures = getattr(model_config, "architectures", None)
     if not architectures:
         return None
@@ -309,19 +293,48 @@ def _model_setup_override(model_config):
     except ValueError:
         return None
     try:
-        return _load_attr(spec.module, "setup_offload_expert_banks")
+        return _load_attr(spec.module, name)
     except AttributeError:
         return None
 
+
+# Formats whose FTW banks need preparation before pinning (encoding state, TP slicing).
+_FTW_PREPARE = {"nowag": _prepare_nowag}
 
 # ModelConfig.expert_quant -> provider
 _PROVIDERS = {
     "none": _bf16_banks,
     "nvfp4": _nvfp4_banks,
     "ds_fp4": _dsfp4_banks,
-    "nowag": _nowag_banks,
     "q4_0": _q4_0_banks,
 }
+
+
+# These components supply routed weights independently of the base model's loader.
+_WEIGHT_OVERRIDES = {"nowag": _load_nowag_banks}
+
+
+def has_expert_weight_override(quant_format: str) -> bool:
+    return quant_format in _WEIGHT_OVERRIDES
+
+
+def cpu_expert_format(model_path: str, model_config) -> str:
+    """The CPU-readable bank format selected by the source component."""
+    from freetoken.checkpoint.ftw import ftw_quant_format
+
+    if model_config.nowag_expert_path is not None:
+        return model_config.expert_quant
+    stored = ftw_quant_format(model_path)
+    if stored is not None:
+        return stored
+    quant = model_config.expert_quant
+    if has_expert_weight_override(quant):
+        return quant
+    model_format = _model_hook(model_config, "expert_bank_format")
+    if model_format is not None:
+        return model_format(model_config)
+    fmt = quant if quant != "none" else (model_config.moe_weight_format or "bf16")
+    return "mxfp4_triton" if fmt == "mxfp4" else fmt
 
 
 def _build_expert_banks(model_path, model_config, device, dtype, dummy, parallel, workers, chunk, decode_target="gpu", layer_sink=None) -> ExpertBanks:
@@ -331,7 +344,12 @@ def _build_expert_banks(model_path, model_config, device, dtype, dummy, parallel
     (native, non-GPU-tiled) bank layouts. ``layer_sink`` (converter only) is forwarded to
     setups/providers that declare the parameter; the rest ignore it and stay on the
     materialize-and-write path (``ExpertBanks.streamed`` reports which happened)."""
-    setup = _model_setup_override(model_config)
+    # A model's own setup reads its checkpoint's native experts; a separately supplied
+    # format (NoWAG) is read by that format's provider.
+    override = _WEIGHT_OVERRIDES.get(model_config.expert_quant)
+    if override is not None:
+        return override(model_path, model_config, device, dtype, dummy, layer_sink=layer_sink)
+    setup = _model_hook(model_config, "setup_offload_expert_banks")
     if setup is not None:
         import inspect
 
@@ -423,11 +441,17 @@ def load_expert_banks(
     provider only engages it (and reports ``ExpertBanks.streamed=True``) for its own
     streamable formats, so callers must check ``streamed`` rather than assume it fired.
     """
-    from freetoken.checkpoint.ftw import is_ftw_checkpoint, load_ftw_banks
+    from freetoken.checkpoint.ftw import is_ftw_checkpoint, load_ftw_banks, ftw_quant_format
 
+    if model_config.nowag_expert_path is not None:
+        return _build_expert_banks(model_path, model_config, device, dtype, dummy,
+                                   False, workers, chunk, decode_target, layer_sink)
     if model_path and is_ftw_checkpoint(model_path) and not dummy:
+        prepare = _FTW_PREPARE.get(ftw_quant_format(model_path))
         banks = load_ftw_banks(
-            model_path, num_layers=model_config.num_moe_layers, workers=workers, chunk=chunk
+            model_path, num_layers=model_config.num_moe_layers, workers=workers, chunk=chunk,
+            prepare=partial(prepare, model_config=model_config) if prepare is not None else None,
+            layer_sink=layer_sink,
         )
         if banks is not None:
             logger.info_rank0(f"expert banks: FTW fast path (FTW checkpoint {model_path})")

@@ -27,13 +27,12 @@ class _SharedExpert(BaseOP):
             from freetoken.models.quant_linear import make_col_merged_quant, make_replicated_quant
 
             self.gate_up_proj = make_col_merged_quant(
-                "none", "none", hidden_size, [intermediate_size, intermediate_size],
-                dense_precision=plan,
+                "none", hidden_size, [intermediate_size, intermediate_size], dense_precision=plan,
             )
             self.down_proj = make_replicated_quant(
-                "none", "none", intermediate_size, hidden_size, dense_precision=plan
+                "none", intermediate_size, hidden_size, dense_precision=plan
             )
-        elif getattr(config, "expert_quant", "none") == "fp8_block":
+        elif config.dense_quant == "fp8_block":
             self.gate_up_proj = Fp8BlockColMerged(
                 hidden_size, [intermediate_size, intermediate_size], has_bias=False
             )

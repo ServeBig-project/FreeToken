@@ -10,6 +10,7 @@ from torch import nn
 from freetoken.kernel.triton.dsv4.bf16_linear import bf16_linear_fp32
 from freetoken.kernel.triton.dsv4.swiglu import fused_swiglu
 from freetoken.layers import OffloadMoELayer
+from freetoken.moe.expert_format import E4M3_GROUP128_UE8M0
 
 from .args import DeepseekV4Args
 from .layers import Linear
@@ -87,7 +88,11 @@ class DSV4OffloadMoELayer(OffloadMoELayer):
             activation="silu",
         )
         self.swiglu_limit = args.swiglu_limit
-        self.nowag_model_type = "deepseek_v4"
+        # DSV4 experts compute on E4M3-rounded inputs (both GEMMs), and the router
+        # weight scales the down input before its rounding.
+        self.gate_up_input_rounding = E4M3_GROUP128_UE8M0
+        self.down_input_rounding = E4M3_GROUP128_UE8M0
+        self.router_weight_on_down_input = True
 
 
 class MoE(nn.Module):

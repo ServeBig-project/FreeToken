@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Callable
 
 import torch
 from freetoken.layers import BaseOP, GemmaPlusOneRMSNorm
-from freetoken.layers.moe import MoELayer
+from freetoken.layers.moe import MoELayer, bind_resident_method
 from freetoken.models.quant_linear import make_replicated
 from freetoken.models.qwen3_5_moe.moe import Qwen3_5MoE
 from freetoken.moe.fused import fused_topk
@@ -41,10 +41,12 @@ class MTPMoE(Qwen3_5MoE):
     routed here over all of them: the target's MoE backend may offload its own."""
 
     def __init__(self, config: ModelConfig) -> None:
-        super().__init__(config, experts=MoELayer(
+        experts = MoELayer(
             num_experts=config.num_experts, top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size, intermediate_size=config.moe_intermediate_size,
-            renormalize=True))
+            renormalize=True)
+        bind_resident_method(experts)
+        super().__init__(config, experts=experts)
 
     def routed(self, hidden_states: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:
         weights, ids = fused_topk(hidden_states, router_logits, self.experts.top_k, renormalize=True)
