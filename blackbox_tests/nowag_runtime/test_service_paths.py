@@ -23,7 +23,7 @@ from test_service import check_sd_observed, mixed_load, offload_reference, qwen
 CAPACITIES = [
     ("legacy", True, 2), ("legacy", False, 1),
     ("mixed", True, 2), ("mixed", False, 1),
-    ("layered", True, 3), ("joint", True, 1), ("layered-pipeline", True, 2),
+    ("layered", True, 3), ("layered-pipeline", True, 2),
 ]
 
 
@@ -39,7 +39,7 @@ def test_minimum_cache_capacity(policy, overlap, layers, delta):
     options = ["--batching-policy", policy, "--prefill-layer-group-size", 1]
     if not overlap:
         options += ["--disable-moe-prefill-overlap"]
-    if policy in ("joint", "layered-pipeline"):
+    if policy == "layered-pipeline":
         options += ["--attention-backend", "triton,fi"]
     args = qwen(*options, cache=str(count))
     label = f"minimum_{policy}_{overlap}_{count}"

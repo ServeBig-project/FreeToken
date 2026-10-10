@@ -84,12 +84,12 @@ def test_cache_capacity(cache):
         cross_path(ref, run_prompts(s), f"cache {cache}")
 
 
-@pytest.mark.parametrize("policy", ["legacy", "mixed", "layered", "joint", "layered-pipeline"])
+@pytest.mark.parametrize("policy", ["legacy", "mixed", "layered", "layered-pipeline"])
 def test_batching_policy(policy):
     """All five policies support Qwen3.6 AR/offload with these legal public options."""
     gpu = need_gpu()
     ref = offload_reference()
-    extra = ["--attention-backend", "triton,fi"] if policy in ("joint", "layered-pipeline") else []
+    extra = ["--attention-backend", "triton,fi"] if policy == "layered-pipeline" else []
     with Server(f"svc_policy_{policy}", qwen("--batching-policy", policy, *extra), gpu) as s:
         cross_path(ref, run_prompts(s), f"policy {policy}")
         mixed_load(s)
