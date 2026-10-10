@@ -88,7 +88,7 @@ class DFlashRuntime:
     def _capture_graphs(self, runner):
         self.logits = runner.speculative.buffer.logits
         dummy = self.engine.config.max_running_req
-        self.locations.fill_(self.engine.num_pages)
+        self.locations.fill_(self.engine.dummy_location)
         self.inputs.fill_(self.model.mask_token_id)
         for batch in reversed(self.context.batch_sizes):
             if batch not in runner.speculative.batch_sizes or batch > self.logits.shape[0]:
@@ -154,7 +154,7 @@ class DFlashRuntime:
         self.uploaded.record()
         self.positions[:physical].zero_()
         self.positions[:actual].copy_(staged[:actual])
-        self.locations[:physical].fill_(self.engine.num_pages)
+        self.locations[:physical].fill_(self.engine.dummy_location)
         torch.index_select(self.engine.page_table.view(-1), 0, staged[actual:2 * actual],
                            out=self.locations[:actual])
         self.inputs[:physical].fill_(self.model.mask_token_id)
@@ -185,8 +185,10 @@ class DFlashDrafter:
                         if engine.config.speculative_adaptive_cost else None)
         self.positions = [0, 0]  # real and physical draft positions
 
-    def plan(self, batch, lengths):
-        return self.control.plan(batch, lengths) if self.control is not None else lengths
+    def plan(self, batch, lengths, *, reserve=None):
+        if self.control is not None:
+            return self.control.plan(batch, lengths, reserve=reserve)
+        return reserve(lengths) if reserve is not None else lengths
 
     def propose(self, batch, views, starts, lengths):
         engine, sampler = self.engine, self.engine.sampler

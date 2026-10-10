@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, List
 import torch
 
 if TYPE_CHECKING:
-    from freetoken.core import SamplingParams
+    from freetoken.core import Req, SamplingParams
 
     from .prefill import ChunkedReq
 
@@ -25,6 +25,14 @@ class PendingReq:
     cache_group: str = ""
     # (since, ready length, restorable length) while waiting for a host restore
     restore_wait: tuple[float, int, int] | None = None
+    # Order the scheduler received the request in; a paused request keeps it.
+    arrival: int = 0
+    # A paused request being recomputed: its tokens are the prompt and committed outputs.
+    paused: Req | None = None
+    # Its prompt was admitted before (it gave way mid-prefill): not reported again.
+    readmitted: bool = False
+    # When it was paused (monotonic): its pause lasts until its recompute starts.
+    paused_since: float | None = None
 
     @property
     def input_len(self) -> int:
@@ -32,7 +40,13 @@ class PendingReq:
 
     @property
     def output_len(self) -> int:
+        if self.paused is not None:
+            return self.paused.max_device_len - self.input_len
         return self.sampling_params.max_tokens
+
+    @property
+    def prompt_len(self) -> int:
+        return self.paused.prompt_len if self.paused is not None else self.input_len
 
 
 @dataclass

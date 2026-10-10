@@ -48,6 +48,7 @@ class SpeculativeDecoder:
         self.cache = cache
         self.table = table
         self.prepare = prepare
+        self.draft_views: list = []  # shared runtime: views whose draft pages are reserved
         self.cost = engine.speculative_cost
         self.phase = engine.config.speculative_phase
         # FlashInfer uses its updated default-generator offset for the current draw.
@@ -208,10 +209,24 @@ class SpeculativeDecoder:
             reason = "state_capacity"
         else:
             reason = None
-            lengths = self.drafter.plan(batch, limited)
+            if self.cache.page_units is not None:
+                def reserve(selected):
+                    nonlocal limited
+                    if short(selected):
+                        return selected
+                    reserved = self._reserve_round(batch, selected, full_width)
+                    if reserved != selected:
+                        limited = reserved
+                    return reserved
+
+                # Decide AR before reclaiming prefixes; price only the shape that fits.
+                lengths = self.drafter.plan(batch, limited, reserve=reserve)
+            else:
+                lengths = self.drafter.plan(batch, limited)
             if short(lengths):
-                reason = "draft_plan"
+                reason = "kv_capacity" if short(limited) else "draft_plan"
         if reason is not None:
+            self._drop_round()
             self._fallback(reason, batch)
             self._record_lengths([0] * batch.size)
             return None
@@ -223,11 +238,38 @@ class SpeculativeDecoder:
                 self.clipped_requests["tail"] += 1
         return lengths
 
+    def _reserve_round(self, batch: Batch, lengths: list[int], full_width: bool) -> list[int]:
+        """Shared runtime: take the round's resources for ``lengths``, shortening every draft
+        (a full width round: all or none) until they fit; ``start`` then runs these views."""
+        self._drop_round()
+        pool = self.cache.linear_state_pool
+        while any(lengths):
+            views = [copy(req) for req in batch.reqs]
+            for view, length in zip(views, lengths, strict=True):
+                view.cached_len, view.device_len = view.device_len, view.device_len + length
+            states = pool.speculative_size(lengths) if pool is not None else 0
+            if self.cache.reserve_round(views, states):
+                self.draft_views = views
+                return lengths
+            if full_width:
+                break
+            limit = max(lengths) // 2
+            lengths = [min(length, limit) for length in lengths]
+        return [0] * len(lengths)
+
+    def _drop_round(self) -> None:
+        """Give back what a round that does not run had reserved."""
+        for view in self.draft_views:
+            self.cache._cancel_decode_reservation(view)
+        self.draft_views = []
+        self.cache.drop_speculative_slots()
+
     def start(self, batch: Batch, lengths: list[int]) -> SpeculativeRound:
         """Draft the admitted lengths and prepare the verification batch."""
         starts = [req.device_len for req in batch.reqs]
         ends = [start + length for start, length in zip(starts, lengths, strict=True)]
-        views = [copy(req) for req in batch.reqs]
+        # The views a shared runtime reserved the draft pages for at admission.
+        views, self.draft_views = self.draft_views or [copy(req) for req in batch.reqs], []
         if self.cost is not None:
             self.cost.begin_state(0)
         state = self.cache.begin_speculation(

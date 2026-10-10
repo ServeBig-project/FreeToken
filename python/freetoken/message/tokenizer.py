@@ -93,6 +93,7 @@ class CacheRebuildMsg(BaseTokenizerMsg):
     num_pages: int | None = None
     num_mamba_slots: int | None = None
     num_swa_pages: int | None = None
+    runtime_cache_gib: float | None = None
     mode: str = "if_idle"
 
 

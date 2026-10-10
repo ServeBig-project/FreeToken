@@ -180,6 +180,13 @@ def compute_cache_pools(engine: "Engine") -> Dict[str, int]:
         lsp = engine.linear_state_pool
         if lsp is not None:
             pools["num_mamba_slots"] = max(0, int(lsp.num_slots or 0) - 1)
+        runtime = getattr(engine, "runtime", None)
+        if runtime is not None:
+            # Page and slot counts only bound the address space; memory is the shared budget.
+            pools["runtime_cache_bytes"] = runtime.total_bytes
+            pools["address_pages"] = pools.pop("num_pages")
+            pools["address_mamba_slots"] = pools.pop("num_mamba_slots")
+            pools["num_pages"] = pools["num_mamba_slots"] = 0
     except Exception:  # noqa: BLE001 -- best-effort; readiness must not depend on this
         pass
     return pools
@@ -197,7 +204,10 @@ def compute_gdn_state_geometry(engine: "Engine") -> Dict[str, Any]:
     pool = engine.linear_state_pool
     if pool is None:
         return geo
-    size = lambda t: t.numel() * t.element_size()
+    size = plain = lambda t: t.numel() * t.element_size()
+    runtime = getattr(engine, "runtime", None)
+    if runtime is not None:  # views span address space; count the memory held under them
+        size = lambda t: runtime.held_bytes([t])
     geo["checkpoint_bytes"] = size(pool.conv_states) + size(pool.recurrent_states)
     replay = pool.replay
     if replay is not None:
@@ -206,11 +216,13 @@ def compute_gdn_state_geometry(engine: "Engine") -> Dict[str, Any]:
         geo.update(active=True, buffer_len=replay.ring, request_capacity=replay.rows,
                    record_bytes=size(replay.u) + size(replay.k) + size(replay.g),
                    conv_workspace_bytes=size(replay.window) if replay.window is not None else 0,
-                   metadata_bytes=sum(size(t) for t in graph))
+                   metadata_bytes=sum(plain(t) for t in graph))  # never in the runtime
     geo["reserved_bytes"] = (geo["checkpoint_bytes"] + geo["record_bytes"]
                              + geo["conv_workspace_bytes"] + geo["metadata_bytes"])
     budget = getattr(engine, "_gdn_state_budget_bytes", None)
-    if budget is None:
+    if runtime is not None:
+        budget = runtime.total_bytes  # states draw from the shared runtime
+    elif budget is None:
         startup = pool.num_slots == _linear_pool_num_slots(engine.config)
         budget = gdn_state_budget(engine.config) if startup else geo["reserved_bytes"]
     geo["state_budget_bytes"] = budget

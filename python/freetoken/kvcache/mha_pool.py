@@ -32,6 +32,7 @@ class MHAKVCache(BaseKVCachePool):
         dtype: torch.dtype,
         device: torch.device,
         layer_ids: Sequence[int] | None = None,
+        runtime=None,
     ) -> None:
         tp_info = get_tp_info()
         local_kv_heads = div_even(num_kv_heads, tp_info.size, allow_replicate=True)
@@ -47,13 +48,9 @@ class MHAKVCache(BaseKVCachePool):
                     raise ValueError(f"KV layer id {global_id} outside [0, {num_layers})")
                 layer_map[global_id] = dense
             self._layer_map = layer_map
-        self._kv_buffer = torch.empty(
+        self._allocate(
             (2, num_storage_layers, num_pages, page_size, local_kv_heads, head_dim),
-            device=device,
-            dtype=dtype,
-        )
-        self._k_buffer = self._kv_buffer[0]
-        self._v_buffer = self._kv_buffer[1]
+            dtype, device, runtime)
         self._device = device
         self._storage_shape = (num_pages * page_size, local_kv_heads, head_dim)
 
@@ -63,8 +60,20 @@ class MHAKVCache(BaseKVCachePool):
         return [self._kv_buffer[:, layer].movedim(1, 0)
                 for layer in range(self._kv_buffer.shape[1])]
 
-    def rebuild(self, num_pages: int) -> None:
-        """Reallocate the KV buffer for ``num_pages`` pages IN PLACE.
+    def _allocate(self, shape, dtype, device, runtime) -> None:
+        """The KV buffer; with a shared runtime, banks whose pages map when allocated."""
+        self.banks = None
+        if runtime is None:
+            self._kv_buffer = torch.empty(shape, device=device, dtype=dtype)
+        else:
+            from .runtime_pool import banked
+
+            self._kv_buffer, self.banks = banked(runtime, "kv", shape, dtype)
+        self._k_buffer = self._kv_buffer[0]
+        self._v_buffer = self._kv_buffer[1]
+
+    def rebuild(self, num_pages: int, runtime=None) -> None:
+        """Reallocate the KV buffer for ``num_pages`` pages IN PLACE (on ``runtime`` if shared).
 
         Geometry (storage layers, page_size, kv heads, head_dim) is taken from the
         existing buffer; only the page count changes. Views and ``_storage_shape`` are
@@ -79,13 +88,9 @@ class MHAKVCache(BaseKVCachePool):
         if device.type == "cuda":
             torch.cuda.synchronize(device)
             torch.cuda.empty_cache()
-        self._kv_buffer = torch.empty(
+        self._allocate(
             (2, num_storage_layers, num_pages, page_size, local_kv_heads, head_dim),
-            device=device,
-            dtype=dtype,
-        )
-        self._k_buffer = self._kv_buffer[0]
-        self._v_buffer = self._kv_buffer[1]
+            dtype, device, runtime)
         self._storage_shape = (num_pages * page_size, local_kv_heads, head_dim)
 
     @classmethod
@@ -98,6 +103,14 @@ class MHAKVCache(BaseKVCachePool):
             if not spec.is_swa
         )
         return per_token * config.page_size, 0, config.page_size, 0
+
+    @classmethod
+    def runtime_banks(cls, config) -> list[tuple[int, int]]:
+        """(banks, bytes of one page in each) of the pool on a shared runtime: a K and a V
+        bank per attention layer."""
+        layers = sum(spec.num_layers for spec in config.model_config.kv_cache_group_specs()
+                     if not spec.is_swa)
+        return [(2 * layers, cls.kv_cost(config)[0] // (2 * layers))]
 
     def rebuild_from_config(
         self, config, num_pages: int, *, num_swa_pages: int | None = None

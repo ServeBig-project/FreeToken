@@ -131,7 +131,7 @@ class HostTier:
         out = []
         for comp in comps:
             copy = HostCopy(self.store, comp, units)
-            if copy.where is None:
+            if copy.where is None and self.m.tree is not None:
                 self.m.tree.evict_host(lambda n=copy.nbytes: self.store.fits(n))
                 self.m._release(self.m.tree.take_released())
                 copy = HostCopy(self.store, comp, units)
@@ -169,17 +169,31 @@ class HostTier:
         if window_tokens is None:
             tree.abandon(plan)
             return True  # wait for the copies in flight to return their window budget
-        locs = m._page_to_token(m._allocate(tokens // ps)) if tokens else m.empty
-        values, off = [], 0
-        for n, _ in plan.kv:
-            values.append(locs[off : off + n.length])
-            off += n.length
-        new = {id(n): v for (n, _), v in zip(plan.kv, values)}
-        win_locs = [new.get(id(n), n.value) for n, _ in plan.window]
-        if plan.window:
-            m.ensure_swa_slots(win_tokens)
-            m.swa_pool.alloc_swa(torch.cat(win_locs))
-        slot = m._alloc_state() if plan.state else None
+        def split(locs):
+            """Each node's new KV locations, and every window node's locations."""
+            values, off = [], 0
+            for n, _ in plan.kv:
+                values.append(locs[off : off + n.length])
+                off += n.length
+            new = {id(n): v for (n, _), v in zip(plan.kv, values)}
+            return values, [new.get(id(n), n.value) for n, _ in plan.window]
+
+        if m.page_units is not None:  # one claim: pages, window slots and the state
+            got = m.claim(tokens // ps, states=int(plan.state),
+                          window=(lambda t: torch.cat(split(t)[1])) if plan.window else None)
+            if got is None:
+                self.window_inflight -= window_tokens
+                tree.abandon(plan)
+                return False
+            locs, slot = got[0], (got[1][0] if plan.state else None)
+            values, win_locs = split(locs)
+        else:
+            locs = m._page_to_token(m._allocate(tokens // ps)) if tokens else m.empty
+            values, win_locs = split(locs)
+            if plan.window:
+                m.ensure_swa_slots(win_tokens)
+                m.swa_pool.alloc_swa(torch.cat(win_locs))
+            slot = m._alloc_state() if plan.state else None
         tasks, keep = [], [locs]
         for (n, units), value in zip(plan.kv, values):
             idx = units_of(value, ps)
@@ -196,6 +210,44 @@ class HostTier:
         self.transfer.submit("h2d", tasks, lambda: self._done(
             window_tokens, lambda: tree.finish_restore(plan, values, slot)), keep)
         return True
+
+    # ---------------------------------------------------------------- paused requests
+    def credit(self, window_tokens: int, save: bool) -> bool:
+        """Whether a private copy holding ``window_tokens`` window slots may start now, under
+        the copy queue and window budget the prefix copies use (one copy larger than the
+        whole window budget may run alone, so every request can still be offloaded)."""
+        if save and self.transfer.backup_full:
+            return False
+        return (not self.window_inflight
+                or self.window_inflight + window_tokens <= self.window_limit)
+
+    def save(self, units, window_tokens: int, done) -> list | None:
+        """Private host copies of a paused request's ``units`` (component, unit indices) pairs,
+        ``done`` once copied; None, with nothing copied, when the host budget cannot hold them.
+        Cold prefix data may be evicted for them; they are never evicted for prefixes."""
+        copies = []
+        for comp, idx in units:
+            got = self._copies([comp], len(idx))
+            if got is None:
+                for c in copies:
+                    c.release()
+                return None
+            copies.append(got[0])
+        self.window_inflight += window_tokens
+        self.transfer.submit("d2h", self._tasks(units, copies),
+                             lambda: self._done(window_tokens, done))
+        return copies
+
+    def load(self, units, copies, window_tokens: int, done) -> None:
+        """Copy saved units back into ``units`` (component, new unit indices) pairs."""
+        self.window_inflight += window_tokens
+        self.transfer.submit("h2d", self._tasks(units, copies),
+                             lambda: self._done(window_tokens, done))
+
+    @staticmethod
+    def _tasks(units, copies) -> list:
+        return [CopyTask(comp, idx, HostSpan(copy, 0, len(idx)))
+                for (comp, idx), copy in zip(units, copies, strict=True)]
 
     # ---------------------------------------------------------------- lifecycle
     def poll(self) -> None:
