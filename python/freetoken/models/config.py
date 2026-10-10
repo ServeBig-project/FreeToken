@@ -97,6 +97,8 @@ class KVCacheGroupSpec:
     mla: bool = False
     index_head_dim: int = 0
     num_index_layers: int = 0
+    # QSA: one index-key row per ``index_ratio`` tokens (1 keeps the BSA/DSA per-token slab).
+    index_ratio: int = 1
     # Attention-type taxonomy value for this group; drives the backend capability
     # matrix and (with the pool factory) selects the KV pool family.
     attn_type: AttnType = AttnType.FULL
@@ -134,6 +136,8 @@ class FullAttentionGroupConfig(BaseAttentionGroupConfig):
     mla: bool = False
     index_head_dim: int = 0
     num_index_layers: int = 0
+    # QSA compression ratio (> 1 -> AttnType.QSA): index keys are stored per token group.
+    index_ratio: int = 1
 
 
 @dataclass(frozen=True)
@@ -157,7 +161,8 @@ class LinearGatedDeltaGroupConfig(BaseAttentionGroupConfig):
     key_head_dim: int
     value_head_dim: int
     conv_kernel_dim: int
-    output_gate: bool
+    # Output-gate activation of the gated norm ("silu" for Qwen3.5/3.6, "sigmoid" for Qwen3.8).
+    output_gate: str
 
 
 @dataclass(frozen=True)
@@ -188,11 +193,24 @@ def _full_group_attn_type(group: FullAttentionGroupConfig) -> AttnType:
     # GQA (non-mla) + index slab -> BSAKVCache (MiniMax-M3 block-sparse attention).
     if not group.mla:
         if group.index_head_dim > 0 and group.num_index_layers > 0:
-            return AttnType.BSA
+            return AttnType.QSA if group.index_ratio > 1 else AttnType.BSA
         return AttnType.FULL
     if group.index_head_dim > 0 and group.num_index_layers > 0:
         return AttnType.DSA
     return AttnType.MLA
+
+
+@dataclass(frozen=True)
+class SlotStateSpec:
+    """One extra per-request tensor riding the LinearStatePool slots, allocated as
+    ``[max(1, len(layer_ids)), num_slots, *shape]`` and cleared, copied, snapshot and
+    rebuilt with the GDN state (read back through ``pool.slot_state(name, layer_id)``)."""
+
+    name: str
+    shape: Tuple[int, ...]
+    layer_ids: Tuple[int, ...] = ()
+    dtype: Any | None = None  # torch dtype; None -> the pool's compute dtype
+    fill_value: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -294,6 +312,16 @@ class ModelConfig:
     # swigluoai/dense-MLP scalars the model module needs. Opaque to model-agnostic engine
     # code; None for every other model.
     m3_args: Any | None = None
+    # Qwen3.8-Flash-Next (qwen4_exp) payload (Qwen4ExpArgs): hyper-connection widths, PLE
+    # n-gram geometry and the QSA indexer geometry. Opaque to model-agnostic code.
+    qwen4_args: Any | None = None
+    # Extra per-request tensors riding the LinearStatePool slots; () for models without any.
+    slot_states: Tuple[SlotStateSpec, ...] = ()
+    # Resolved public dense-projection plan ("source" | "bf16" | "fp8", freetoken.quant.dense);
+    # injected from EngineConfig.dense_quantization. Under "source" every operator keeps the
+    # scheme its checkpoint declares; an explicit value overrides it in the quant_linear
+    # factories and the loaders of models whose ModelSpec declares dense_plan.
+    dense_precision: str = "source"
     # Generic execution-path capability flags (set by a model's parse_config) so the engine and
     # factories stay model-agnostic instead of branching on dsv4_args:
     single_stream_only: bool = False  # model runs one sequence at a time -> force bs=1
@@ -415,6 +443,7 @@ class ModelConfig:
                         mla=group.mla,
                         index_head_dim=group.index_head_dim,
                         num_index_layers=group.num_index_layers,
+                        index_ratio=group.index_ratio,
                         attn_type=_full_group_attn_type(group),
                     )
                 )

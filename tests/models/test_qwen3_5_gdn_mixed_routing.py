@@ -2,9 +2,9 @@ from types import MethodType, SimpleNamespace
 
 import torch
 
-import freetoken.models.qwen3_5_moe.gdn as gdn_module
+import freetoken.layers.gated_delta as gdn_module
 from freetoken.core import Batch
-from freetoken.models.qwen3_5_moe.gdn import Qwen3_5GatedDeltaNet
+from freetoken.layers.gated_delta import GatedDeltaNet
 
 
 class _Projection:
@@ -23,7 +23,7 @@ class _Identity:
 
 
 def test_mixed_gdn_routes_and_merges_decode_first(monkeypatch):
-    op = object.__new__(Qwen3_5GatedDeltaNet)
+    op = object.__new__(GatedDeltaNet)
     op._fp8 = False
     op.in_proj = _Projection()
     op._in_proj_split = [3, 2, 1, 1]

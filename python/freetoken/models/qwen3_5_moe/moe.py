@@ -22,7 +22,17 @@ class _SharedExpert(BaseOP):
     """Always-present shared SwiGLU expert of width ``shared_expert_intermediate_size``."""
 
     def __init__(self, config: ModelConfig, hidden_size: int, intermediate_size: int):
-        if config.dense_quant == "fp8_block":
+        plan = getattr(config, "dense_precision", "source")
+        if plan != "source":
+            from freetoken.models.quant_linear import make_col_merged_quant, make_replicated_quant
+
+            self.gate_up_proj = make_col_merged_quant(
+                "none", hidden_size, [intermediate_size, intermediate_size], dense_precision=plan,
+            )
+            self.down_proj = make_replicated_quant(
+                "none", intermediate_size, hidden_size, dense_precision=plan
+            )
+        elif config.dense_quant == "fp8_block":
             self.gate_up_proj = Fp8BlockColMerged(
                 hidden_size, [intermediate_size, intermediate_size], has_bias=False
             )

@@ -14,7 +14,7 @@ from freetoken.kvcache.radix_cache import CacheHandle, RadixCache
 from freetoken.kvcache.runtime_pool import Claim, upload
 
 from .host_tier import HostTier, build_components, wait_ms
-from freetoken.kvcache.prefix_store import units_of
+from freetoken.kvcache.prefix_store import HostSeries, HostSpan, units_of
 from freetoken.utils import align_down, div_ceil
 
 if TYPE_CHECKING:
@@ -233,6 +233,7 @@ class CacheManager:
         self._reset_pages(num_pages, page_table)
         self.linear_state_pool = linear_state_pool
         kv_pool = swa_pool
+        self.residency = getattr(kv_pool, "residency", None)
         if draft_kv is not None and draft_kv.swa_paged:
             # SD targets have no window of their own: the drafter's window rides the tree.
             swa_pool, sliding_window_size = draft_kv, draft_kv.window
@@ -284,6 +285,7 @@ class CacheManager:
         self._prefill_execution: _PrefillExecutionSession | None = None
         self.speculative_slots: list[int] | None = None  # shared runtime: claimed for one round
         # Shared runtime: requests paused under memory pressure, kept on the host or recomputed.
+        self._paused_states: dict[int, PausedState] = {}  # host copies held by paused requests
         self.paused_stats = dict(paused=0, recompute=0, restored=0, recomputed_tokens=0,
                                  paused_ms=0.0, short_decode=0, short_prefill=0, compactions=0,
                                  claim_ms=0.0)
@@ -434,6 +436,10 @@ class CacheManager:
         if self.page_units is not None:
             out["runtime"] = dict(self.page_units.blocks.status(), **self.paused_stats,
                                   evictable_bytes=self._evictable_bytes())
+            if self.residency is not None:
+                out["runtime"].update(self.residency.status())
+            if self.host is not None:
+                out["runtime"].update(self._host_split())
         if self.swa_paged:
             # Physical slots: free, held by the tree (locked by request handles or window
             # copies, else evictable), and the rest owned by running requests. Copies in
@@ -979,6 +985,13 @@ class CacheManager:
             self.host.poll()
             if self.tree is not None:
                 self._release(self.tree.take_released())
+        if self.residency is not None:
+            self.residency.poll()
+
+    def backup_completed(self, req: Req, length: int) -> None:
+        if self.residency is not None and self.host is not None:
+            end = align_down(length, self.page_size)
+            self.host.backup_active(units_of(self.rows[req.table_idx, :end], self.page_size))
 
     # ----- paused requests (shared runtime) -----
     def pause(self, req: Req) -> PausedState | None:
@@ -999,6 +1012,7 @@ class CacheManager:
         state = PausedState(window=window)
         state.copies = self.host.save(units, len(window), lambda: setattr(state, "saved", True))
         if self._agree(state.copies is not None):
+            self._paused_states[id(state)] = state
             return state
         if state.copies is not None:  # another TP rank keeps no copy: all recompute
             self.discard_paused(state)
@@ -1009,10 +1023,19 @@ class CacheManager:
         claims reclaim it for any component. Logical bytes, not whole physical blocks."""
         unit = lambda units: sum(length for *_, length in units.banks) if units else 0
         pages = self._evictable("kv") // self.page_size * unit(self.page_units)
+        if self.residency is not None:
+            # tiered K/V payload lives outside page_units; a cold page's GPU copy is reclaimable
+            pages += len(self._cold_pages() & self.residency.gpu) * self.residency.page_bytes
         states = self._evictable("state") * unit(getattr(self.linear_state_pool, "units", None))
         windows = (self._evictable("window") * unit(self.swa_pool.slot_units)
                    if self.swa_paged else 0)
         return pages + states + windows
+
+    def _cold_pages(self) -> set[int]:
+        """Pages of the cached prefixes no request holds."""
+        ps = self.page_size
+        return {int(p) for kv in (self.tree.unlocked_kv() if self.tree is not None else ())
+                for p in kv[::ps] // ps}
 
     def drop_cached(self) -> None:
         """Release every unlocked cached prefix from the GPU, so the next claims, taking the
@@ -1037,7 +1060,8 @@ class CacheManager:
         got = self.claim(div_ceil(c, self.page_size),
                          window=(lambda tokens: tokens[state.window]) if len(state.window)
                          else None,
-                         states=int(self.private_states), table=table)
+                         states=int(self.private_states), table=table,
+                         payload_pages=int(c % self.page_size != 0) if self.residency else None)
         if got is None:
             return False
         tokens, slots, req.table_idx = got
@@ -1050,6 +1074,7 @@ class CacheManager:
         units, _ = self._paused_units(req)
 
         def loaded():
+            self._paused_states.pop(id(state), None)
             for copy in state.copies:
                 copy.release()
             state.loaded = True
@@ -1057,8 +1082,32 @@ class CacheManager:
         return True
 
     def discard_paused(self, state: PausedState) -> None:
+        self._paused_states.pop(id(state), None)
         for copy in state.copies:
             copy.release()
+
+    def _host_split(self) -> dict:
+        """Host data bytes by owner, each byte once: K/V of pages requests still hold, then
+        paused requests' copies; the rest is cold (prefix copies, unheld pages, copies in
+        flight)."""
+        # A host unit several pages or paused requests share is counted once, by its first owner.
+        active, counted = 0, set()
+        if self.residency is not None:
+            cold = self._cold_pages()
+            for page, span in self.residency.backups.items():
+                if page not in cold and (id(span.copy), span.start) not in counted:
+                    counted.add((id(span.copy), span.start))
+                    active += self.residency.page_bytes
+        paused = 0
+        for state in self._paused_states.values():
+            for copy in state.copies:
+                parts = copy.parts if isinstance(copy, HostSeries) else [HostSpan(copy, 0, copy.units)]
+                for part in parts:
+                    units = {(id(part.copy), part.start + i) for i in range(part.count)} - counted
+                    counted |= units
+                    paused += len(units) * sum(part.copy.rows)
+        cold = max(self.host.store.used - active - paused, 0)
+        return dict(host_active_kv_bytes=active, host_paused_bytes=paused, host_cold_bytes=cold)
 
     def _paused_units(self, req: Req):
         """(component, unit indices) of a request's state through ``cached_len``, and the
@@ -1271,7 +1320,8 @@ class CacheManager:
         self.free_slots = self.free_slots[needed_pages:]
         return allocated
 
-    def claim(self, pages: int = 0, *, window=None, states: int = 0, table=None):
+    def claim(self, pages: int = 0, *, window=None, states: int = 0, table=None,
+              payload_pages: int | None = None):
         """Shared runtime: one operation's units, held together or not at all -- ``pages``
         pages (as token locations), window slots for the locations ``window(tokens)`` names,
         ``states`` GDN state slots, and ``table``'s next row with its records.
@@ -1279,11 +1329,11 @@ class CacheManager:
         before any is recorded as taken. Returns (tokens, slots, row), or None."""
         begin = time.perf_counter()
         try:
-            return self._claim(pages, window, states, table)
+            return self._claim(pages, window, states, table, payload_pages)
         finally:  # time on the scheduler thread spent taking memory, evictions included
             self.paused_stats["claim_ms"] += (time.perf_counter() - begin) * 1e3
 
-    def _claim(self, pages, window, states, table):
+    def _claim(self, pages, window, states, table, payload_pages):
         pool, ps, out = self.linear_state_pool, self.page_size, {}
 
         def build():
@@ -1293,6 +1343,12 @@ class CacheManager:
                 return None
             tokens = self._page_to_token(ids)
             claim.add(self.page_units, ids.numpy() // ps, lambda _: self._pop_pages(pages))
+            if self.residency is not None:
+                page_ids = ids.numpy() // ps
+                count = pages if payload_pages is None else payload_pages
+                writable = page_ids[-count:] if count else page_ids[:0]
+                claim.add(self.residency.payload, writable,
+                          lambda _: self.residency.allocated(page_ids, writable))
             if window is not None:
                 locs = window(tokens).to(torch.int64)
                 slots = self.swa_pool.next_slots(len(locs))
@@ -1316,7 +1372,8 @@ class CacheManager:
         # Cached data goes one entry at a time, and only while the claim really lacks ids or
         # blocks: never more than the operation needs.
         while (claim := build()) is None or not self.page_units.blocks.acquire(claim.plan):
-            if not self._evict_any(ps):
+            if not (self._evict_any(ps) or
+                    (self.residency is not None and self.residency.evict_one())):
                 claim = None
                 break
         if not self._agree(claim is not None):
@@ -1360,6 +1417,8 @@ class CacheManager:
         if self.page_units is None:
             self.free_slots = torch.cat([self.free_slots, pages])
             return
+        if self.residency is not None:
+            self.residency.release(pages.numpy() // self.page_size)
         # Kept descending, the lowest page next (claims take the tail): live pages pack into
         # the fewest blocks. Inserted in place of a full sort: returns happen every step.
         free, back = self.free_slots.numpy()[::-1], np.sort(pages.numpy())

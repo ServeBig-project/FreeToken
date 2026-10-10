@@ -423,8 +423,31 @@ class Fp8PerTensorColMerged(Fp8PerTensorLinear):
         super().__init__(in_features, sum(output_sizes), has_bias)
 
 
+class Fp8LMHead(Fp8PerTensorLinear):
+    """Per-row-FP8 LM head (TP=1, untied), the W8A16 counterpart of ``ParallelLMHead``: slice
+    to the last token per sequence at prefill, then the fp8 GEMV/GEMM instead of a bf16
+    ``F.linear`` over the full vocabulary matrix."""
+
+    def __init__(self, num_embeddings: int, embedding_dim: int):
+        super().__init__(embedding_dim, num_embeddings)
+        self.num_embeddings = num_embeddings
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        from freetoken.core import get_global_ctx
+
+        batch = get_global_ctx().batch
+        if batch.uses_extend_path and not batch.is_speculative_verify:
+            x = x[batch.attn_metadata.get_last_indices(batch.size)].contiguous()
+        return self.forward_selected(x)
+
+    def forward_selected(self, x: torch.Tensor) -> torch.Tensor:
+        """Project rows already selected as one output position per request."""
+        return super().forward(x)
+
+
 __all__ = [
     "FP8",
+    "Fp8LMHead",
     "Fp8PerTensorLinear",
     "Fp8PerTensorColMerged",
     "fp8_pertensor_linear",

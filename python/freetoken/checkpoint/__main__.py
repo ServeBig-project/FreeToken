@@ -16,6 +16,7 @@ import time
 import torch
 
 from freetoken.gpu_select import assign_gpu, bind_assigned_gpu, single_gpu_arg
+from freetoken.quant.dense import DENSE_OPTIONS
 
 from .convert import convert_checkpoint
 
@@ -29,6 +30,8 @@ def main(argv: list[str] | None = None, prog: str = "freetoken.checkpoint") -> i
     p.add_argument("--dtype", choices=sorted(_DTYPES), default="bfloat16")
     p.add_argument("--moe-backend", default="offload",
                    help="offload (experts -> banks) or e.g. triton (experts stay dense)")
+    p.add_argument("--dense-quant", default="auto", choices=DENSE_OPTIONS,
+                   help="dense projection precision stored in the FTW (auto follows the source)")
     p.add_argument("--shard-gib", type=float, default=8.0, help="max shard size in GiB")
     p.add_argument("--nowag-expert-path", default=None,
                    help="expert-only NoWAG output to store as the routed experts; the FTW then "
@@ -51,6 +54,7 @@ def main(argv: list[str] | None = None, prog: str = "freetoken.checkpoint") -> i
     index = convert_checkpoint(
         ns.model, ns.out, dtype=_DTYPES[ns.dtype],
         moe_backend=ns.moe_backend, shard_limit=shard_limit, device=device,
+        dense_quantization=ns.dense_quant,
         nowag_expert_path=ns.nowag_expert_path,
     )
     dt = time.perf_counter() - t

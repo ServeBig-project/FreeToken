@@ -134,6 +134,21 @@ def create_m3_sparse_backend(config: ModelConfig):
     return M3SparseAttnBackend(config)
 
 
+@SUPPORTED_ATTENTION_BACKENDS.register(
+    "qsa_sparse",
+    BackendInfo(
+        supported_types=frozenset({AttnType.QSA}),
+        # 64-token pages: a 4-token compress group never straddles a page, so the compressed
+        # row of a group is page_base // 4 + group-in-page.
+        page_sizes=(64,),
+    ),
+)
+def create_qsa_sparse_backend(config: ModelConfig):
+    from .qsa_sparse import QSASparseAttnBackend
+
+    return QSASparseAttnBackend(config)
+
+
 def attention_backend_info(name: str) -> BackendInfo:
     return SUPPORTED_ATTENTION_BACKENDS.info(name)
 

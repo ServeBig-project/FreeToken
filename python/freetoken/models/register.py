@@ -14,6 +14,9 @@ class ModelSpec:
     model_cls: str
     parse_config: str = "parse_config"
     iter_weights: str = "iter_weights"
+    # The reader applies the public dense plan (--dense-quant); other readers follow their
+    # checkpoint's scheme and reject an explicit choice.
+    dense_plan: bool = False
 
 
 _MODEL_REGISTRY: dict[str, ModelSpec] = {
@@ -57,6 +60,13 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
     "Qwen3_5MoeForConditionalGeneration": ModelSpec(
         "freetoken.models.qwen3_5_moe",
         "Qwen3_5MoEForCausalLM",
+    ),
+    # Qwen3.8-Flash-Next (model_type qwen4_exp): multimodal wrapper config (text tower in
+    # text_config, weights under model.language_model.); served text-only.
+    "Qwen4ExpForConditionalGeneration": ModelSpec(
+        "freetoken.models.qwen4_exp",
+        "Qwen4ExpForCausalLM",
+        dense_plan=True,
     ),
     # Dense Qwen3.x (no "Moe" in the arch name, num_experts==0, e.g. Qwen3.6-27B). Shares the
     # qwen3_5_moe package: the decoder routes its MLP through the dense Qwen3_5DenseMLP and the

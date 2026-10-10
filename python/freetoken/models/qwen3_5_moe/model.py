@@ -11,11 +11,11 @@ from freetoken.layers import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from freetoken.layers.gated_delta import GatedDeltaNet
 from freetoken.models.blocks import LayerGroupState, ResidualLayerGroupCausalLM, record_draft_feature
 from freetoken.utils import nvtx_annotate
 
 from .attention import Qwen3_5Attention
-from .gdn import Qwen3_5GatedDeltaNet
 from .moe import Qwen3_5DenseMLP, Qwen3_5MoE
 
 if TYPE_CHECKING:
@@ -33,7 +33,7 @@ class Qwen3_5DecoderLayer(BaseOP):
         if self._is_linear:
             g = config.linear_attention_group()
             assert g is not None
-            self.linear_attn = Qwen3_5GatedDeltaNet(
+            self.linear_attn = GatedDeltaNet(
                 hidden_size=config.hidden_size,
                 num_k_heads=g.num_key_heads,
                 num_v_heads=g.num_value_heads,
@@ -43,6 +43,7 @@ class Qwen3_5DecoderLayer(BaseOP):
                 rms_norm_eps=config.rms_norm_eps,
                 layer_id=layer_id,
                 attn_quant=config.attn_quant,
+                output_gate=g.output_gate,
             )
         else:
             self.self_attn = Qwen3_5Attention(config, layer_id)
@@ -112,9 +113,9 @@ class Qwen3_5MoEForCausalLM(ResidualLayerGroupCausalLM):
         super().__init__()
 
     def create_layered_execution_adapter(self, engine):
-        from .layered_execution import Qwen3_5LayeredExecutionAdapter
+        from freetoken.engine.layered_execution import LinearStateLayeredExecutionAdapter
 
-        return Qwen3_5LayeredExecutionAdapter(engine)
+        return LinearStateLayeredExecutionAdapter(engine)
 
     def forward(self) -> torch.Tensor:
         output = self.model.forward(get_global_ctx().batch.input_ids)

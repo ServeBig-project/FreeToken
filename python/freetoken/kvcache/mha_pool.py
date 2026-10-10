@@ -22,6 +22,8 @@ class MHAKVCache(BaseKVCachePool):
     dense slot, avoiding a multiple-x over-allocation of unused slabs.
     """
 
+    shared_runtime = True
+
     def __init__(
         self,
         num_kv_heads: int,

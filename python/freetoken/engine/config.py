@@ -48,6 +48,12 @@ class EngineConfig:
     moe_backend: str = "auto"
     # NVFP4 routed-expert GEMM backend (--nvfp4-backend): auto|marlin|flashinfer|triton.
     nvfp4_backend: str = "triton"
+    # Dense projection precision (--dense-quant): auto|bf16|fp8, see freetoken.quant.dense.
+    dense_quantization: str = "auto"
+    # K/V cache encoding (--kv-dtype): auto|bf16|int8, resolved against the pool family's
+    # codecs (freetoken.quant.kv); auto keeps the pool's native format.
+    kv_dtype: str = "auto"
+    kv_placement: str = "gpu"
     # Expert-bank host load (--expert-load): auto|serial|parallel. "auto" reads scattered
     # experts in parallel but falls back to serial when free RAM can't cover the banks + the
     # parallel reader's extra (non-reclaimable) whole-shard buffer; "serial" forces the

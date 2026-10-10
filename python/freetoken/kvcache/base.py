@@ -28,7 +28,8 @@ def spec_kv_bytes_per_token(spec, config) -> int:
         * config.dtype.itemsize
         * spec.num_layers
     )
-    return per_token + spec.index_head_dim * spec.num_index_layers * 2
+    # QSA (index_ratio > 1) stores one index key per token group.
+    return per_token + spec.index_head_dim * spec.num_index_layers * 2 // spec.index_ratio
 
 
 class BaseKVCachePool(ABC):
@@ -40,6 +41,25 @@ class BaseKVCachePool(ABC):
     # Pools whose buffers are bound into per-forward model scratch (DSV4's tiers) need the
     # model re-bound after a rebuild; the engine asks before it resizes.
     needs_rebind_on_rebuild: ClassVar[bool] = False
+    # K/V encodings this family can store (freetoken.quant.kv); the first is its native one.
+    kv_codecs: ClassVar[tuple[str, ...]] = ("bf16",)
+    shared_runtime: ClassVar[bool] = False
+    kv_placements: ClassVar[tuple[str, ...]] = ("gpu",)
+
+    @classmethod
+    def runtime_write_banks(cls, config) -> list[tuple[int, int]]:
+        """Writable tail-page storage when history payload can live on the host."""
+        return []
+
+    @classmethod
+    def page_bytes(cls, config) -> int:
+        """Stored history bytes per logical page, independent of its current residency."""
+        return cls.kv_cost(config)[0]
+
+    @classmethod
+    def runtime_scratch_banks(cls, config) -> list[tuple[int, int]]:
+        """Permanent per-request scratch banks, separate from reclaimable history pages."""
+        return []
 
     # ---- sizing/cost classmethods: run BEFORE the pool exists (startup budget solve,
     # --moe-cache-auto). The engine measures memory and passes bytes in; each pool family

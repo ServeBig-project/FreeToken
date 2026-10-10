@@ -147,6 +147,8 @@ def _resolve_auto_attention_backend(
         candidates.append(("dsa", True))
     if AttnType.BSA in required:
         candidates.append(("m3_sparse", True))
+    if AttnType.QSA in required:
+        candidates.append(("qsa_sparse", True))
     if AttnType.SWA in required:
         candidates.append(("triton", True))
     if AttnType.FULL in required:
@@ -195,7 +197,10 @@ def _validate_attention_backend_choice(config, override, required: frozenset[Att
         if missing:
             valid = [
                 name
-                for name in ("fa", "fi", "trtllm", "triton", "dsa", "dsv4_sparse", "m3_sparse")
+                for name in (
+                    "fa", "fi", "trtllm", "triton", "dsa", "dsv4_sparse", "m3_sparse",
+                    "qsa_sparse",
+                )
                 if required <= attention_backend_info(name).supported_types
             ]
             missing_names = "/".join(sorted(t.value for t in missing))
@@ -315,6 +320,7 @@ class Engine:
     dflash_layout = None  # the drafter's storage layout, set when a DFlash path is given
     runtime = None  # shared runtime blocks (--runtime-cache-gib)
     runtime_limits = None  # the context and concurrency limits derived from it
+    _runtime_initial_cache_size = None  # with --moe-cache-auto: the expert cache planned around R
     page_units = None  # the runtime chunks each KV page id maps, target and drafter
 
     def __init__(self, config: EngineConfig):
@@ -331,6 +337,9 @@ class Engine:
             speculative_num_steps=config.speculative_num_steps,
             speculative_draft_model_path=config.speculative_draft_model_path,
             speculative_phase=config.speculative_phase,
+            dense_quant=config.dense_quantization,
+            kv_dtype=config.kv_dtype,
+            kv_placement=config.kv_placement,
         )
         if config.tp_info.size > 1 and is_ftw_checkpoint(config.model_path):
             # FTW stores dense weights whole, as TP1 loads them; only the model readers shard.
@@ -401,6 +410,10 @@ class Engine:
         self._resident_expert_host_bytes = 0
         self.expert_workspace_bytes = 0
         self.expert_shared_bytes = 0
+        # Host-resident tables (qwen4_exp's pinned PLE table): after the weights so a load
+        # failure is not masked, before the expert banks so their host-memory planning sees it.
+        if hasattr(self.model, "load_host_tables"):
+            self.model.load_host_tables(config)
         if is_offload_moe_backend(config.moe_backend):
             self._init_offload_moe_cache(config)
         elif has_expert_weight_override(config.model_config.expert_quant):
@@ -422,9 +435,13 @@ class Engine:
         available_memory -= transfer_device_bytes(config)
         if config.runtime_cache_gib is not None:
             # This rank's own room: ranks agree only that every one of them holds its R.
-            self._init_runtime(config, _startup_kv_budget(
-                config.memory_ratio, local_init_free, self._local_free)
-                - transfer_device_bytes(config))
+            available = _startup_kv_budget(
+                config.memory_ratio, local_init_free, self._local_free) - transfer_device_bytes(config)
+            if self._runtime_initial_cache_size is not None:
+                # The auto-sized expert cache left R in its plan; a fresh reading would count the
+                # allocator slack since the weights against R (the KV-pages plan is honored too).
+                available = max(available, int(config.runtime_cache_gib * (1 << 30)))
+            self._init_runtime(config, available)
             self._alloc_expert_workspace(config)  # part of the runtime's execution room
         else:
             available_memory -= state_pool_bytes(config)
@@ -480,6 +497,7 @@ class Engine:
                 device=self.device,
                 tp_size=config.tp_info.size,
                 records=replay_records(config),
+                slot_states=config.model_config.slot_states,
                 runtime=self.runtime,
             )
             self.ctx.linear_state_pool = self.linear_state_pool
@@ -628,6 +646,8 @@ class Engine:
             granularity(self.device),
             pages=self._pool_cls.runtime_banks(config) + (draft.page_banks() if draft else []),
             windows=draft.window_banks() if draft else [],
+            scratch=self._pool_cls.runtime_scratch_banks(config),
+            writable=self._pool_cls.runtime_write_banks(config),
             states=state_banks(config), rows=record_banks(config))
 
     def _runtime_page_bytes(self, config: EngineConfig) -> int:
@@ -659,12 +679,20 @@ class Engine:
         # the prompt-end checkpoint its prefix-cache handle keeps locked, its record row (rows
         # are handed out from 0), the window sentinel and its window.
         checkpoint = int(getattr(config, "cache_type", "naive") != "naive")  # a prefix cache
+        fixed_requests = prior.get("max_running_requests", 1)
         alone = lambda length: layout.blocks(
             pages=up(length + 1, ps) + 1, windows=1 + min(length + 1, window),
-            states=2 + checkpoint, rows=1) <= total
+            states=2 + checkpoint, rows=1, scratch=fixed_requests + 1, writable=0
+        ) + layout.blocks_at("writable", (0, up(length + 1, ps))) <= total
         asked = prior.get("requested_context_tokens", config.max_seq_len_override)
         model_max = prior.get("model_context_tokens", config.max_seq_len)
-        context = largest(alone, model_max if asked is None else asked)
+        high = model_max if asked is None else asked
+        if layout.unit_bytes("writable"):
+            # Complete host history includes the prefix index copy and a recurrent snapshot.
+            host_bytes = int(config.prefix_cache_host_gib * (1 << 30))
+            page_bytes = self._pool_cls.page_bytes(config)
+            high = min(high, max(0, (host_bytes - layout.unit_bytes("states")) // page_bytes * ps - 1))
+        context = largest(alone, high)
         if context < 1 or (asked is not None and context < asked):
             raise ValueError(f"{mem_GB(budget)} of runtime holds one request of {context} "
                              f"tokens; {asked or 1} are required")
@@ -679,10 +707,17 @@ class Engine:
                                + _graph_rows(config, c) * (4 * vocab + 4 * width)
                                + self._expert_workspace_bytes(config, c, cache_size=cache_size))
         resource = largest(lambda c: layout.blocks(
-            pages=c + 1, windows=1 + c * window, states=c + 1, rows=c) <= total
+            pages=c + 1, windows=1 + c * window, states=c + 1, rows=c,
+            scratch=c + 1, writable=c + 1) <= total
             and executing(c) <= execution, _MAX_AUTO_RUNNING)
         requested = prior.get("requested_running_requests", config.max_running_req)
         effective = resource if requested is None else min(requested, resource)
+        if effective < 1 and not prior and executing(1) > execution:
+            # A larger runtime would leave even less of this memory.
+            raise ValueError(
+                f"{mem_GB(max(execution, 0))} of GPU memory beside the weights, the expert cache "
+                f"and the {mem_GB(budget)} runtime cannot hold one request's execution buffers "
+                f"({mem_GB(executing(1))}); free GPU memory, e.g. with a smaller --moe-cache-size")
         if effective < 1 or (prior and effective < prior["max_running_requests"]):
             raise ValueError(
                 f"{mem_GB(budget)} of runtime holds {resource} requests at their minimum; "
@@ -690,6 +725,12 @@ class Engine:
                 + (" (the concurrency the server started with is kept; start it with a lower "
                    "--max-running-requests to allow a smaller runtime)" if prior else ""))
         effective = prior.get("max_running_requests", effective)
+        # Scratch for every table row stays mapped even when only one request runs.
+        fixed_requests = effective
+        context = largest(alone, context)
+        if context < 1 or (asked is not None and context < asked):
+            raise ValueError(f"{mem_GB(budget)} of runtime with {effective} request rows "
+                             f"holds one request of {context} tokens; {asked or 1} are required")
         return dict(context_tokens=context, max_running_requests=effective,
                     requested_running_requests=requested, resource_running_requests=resource,
                     requested_context_tokens=asked, model_context_tokens=model_max,
@@ -702,6 +743,9 @@ class Engine:
         draft = self.dflash.context.page_banks if self.dflash is not None else []
         self.page_units = Units(self.kv_cache.banks + draft)
         self.page_units.pin([0])  # the dummy page, and every layer view's base
+        residency = getattr(self.kv_cache, "residency", None)
+        if residency is not None:
+            residency.initialize_dummy()
 
     def _map_capture_scratch(self, config: EngineConfig, mapped: bool) -> None:
         """SD graph capture writes scratch K/V at the first positions; map them while it runs."""
@@ -840,6 +884,7 @@ class Engine:
                 self.device,
                 include_moe_experts=not is_offload_moe_backend(config.moe_backend)
                 and not has_expert_weight_override(config.model_config.expert_quant),
+                dense_precision=config.model_config.dense_precision,
             ),
             device=self.device,
         )
@@ -1772,6 +1817,9 @@ class Engine:
 
     def execution_status(self) -> dict:
         """Requested versus resolved batching/SD settings, and why an auto choice fell back."""
+        from freetoken.quant.dense import effective_dense_precision
+        from freetoken.quant.kv import kv_storage_name
+
         config, runner = self.config, self.graph_runner
         steps = config.speculative_num_steps
         layered = getattr(config, "batching_policy", "legacy") == "layered-pipeline"
@@ -1779,6 +1827,9 @@ class Engine:
             requested=dict(self.execution_requested),
             effective=dict(
                 batching_policy=getattr(config, "batching_policy", "legacy"),
+                dense_quant=effective_dense_precision(config.model_config),
+                kv_dtype=kv_storage_name(config.kv_dtype, config.dtype),
+                kv_placement=config.kv_placement,
                 drafter=("dflash" if config.speculative_draft_model_path else "self") if steps else None,
                 speculative_num_steps=steps,
                 speculative_phase=(config.speculative_phase if layered else "outwave") if steps else None,
@@ -2012,8 +2063,7 @@ class Engine:
         if getattr(config, "batching_policy", "legacy") != "layered-pipeline":
             return 0
         adapter = self._layered_execution_adapter
-        return (2 * config.model_config.hidden_size * config.dtype.itemsize
-                + (adapter.retained_feature_bytes_per_token if adapter is not None else 0))
+        return adapter.retained_bytes_per_token
 
     def _synced_used_bytes(self) -> int:
         """Device bytes in use now (PyTorch's free cache counted as usable), the most of any
@@ -2298,10 +2348,8 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
             )
 
     if getattr(config, "runtime_cache_gib", None) is not None:
-        from freetoken.kvcache.mha_pool import MHAKVCache
-
         family = resolve_pool_class(model_config)
-        if family is not MHAKVCache:
+        if not family.shared_runtime:
             raise ValueError(f"--runtime-cache-gib: the {family.__name__} attention cache has no "
                              "shared runtime storage")
     elif config.max_running_req is None:
@@ -2351,8 +2399,12 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
     # comma part must serve every required type, with packages/arch available.
     required_attn_types = _required_attn_types(model_config)
     _dtype = getattr(config, "dtype", None)  # duck-typed test configs omit it
-    if AttnType.BSA in required_attn_types and _dtype is not None and _dtype.itemsize != 2:
-        # Reject at config time: the BSA pool's own assert only fires after the
+    if (
+        required_attn_types & {AttnType.BSA, AttnType.QSA}
+        and _dtype is not None
+        and _dtype.itemsize != 2
+    ):
+        # Reject at config time: the BSA/QSA pool's own assert only fires after the
         # model is resident (and not at all under `python -O`).
         raise ValueError(
             f"--dtype {config.dtype}: block-sparse attention serves 16-bit "
@@ -2637,6 +2689,26 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
     if is_moe:
         object.__setattr__(model_config, "moe_backend", config.moe_backend)
     object.__setattr__(model_config, "nvfp4_backend", config.nvfp4_backend)
+    from freetoken.quant.dense import resolve_dense_precision
+    from freetoken.quant.kv import resolve_kv_dtype
+
+    object.__setattr__(
+        model_config, "dense_precision",
+        resolve_dense_precision(
+            getattr(config, "dense_quantization", "auto"), getattr(config, "model_path", None)
+        ),
+    )
+    override("kv_dtype", resolve_kv_dtype(getattr(config, "kv_dtype", "auto"),
+                                          resolve_pool_class(model_config)))
+    placement = getattr(config, "kv_placement", "gpu")
+    pool_cls = resolve_pool_class(model_config)
+    if placement not in pool_cls.kv_placements:
+        raise ValueError(f"{pool_cls.__name__} does not support --kv-placement {placement}")
+    if placement == "tiered" and (
+        (config.runtime_cache_gib or 0) <= 0 or config.prefix_cache_host_gib <= 0
+    ):
+        raise ValueError("--kv-placement tiered requires --runtime-cache-gib and "
+                         "--prefix-cache-host-gib greater than zero")
 
     if config.speculative_num_steps == 0:
         override("speculative_draft_model_path", None)
@@ -2652,6 +2724,11 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
         # A shared runtime has no GDN partition: SD rounds are sized from the joint budget.
         if config.runtime_cache_gib is None and (shortfall := _sd_state_shortfall(config)):
             raise ValueError(shortfall)
+        if AttnType.QSA in required_attn_types:
+            raise ValueError(
+                "speculative decoding is not implemented for QSA sparse attention "
+                f"({model_config.model_type}); pass --speculative-num-steps 0"
+            )
 
     if config.speculative_num_steps and config.cuda_graph_max_bs != 0 and config.cuda_graph_bs != []:
         # Never fall back silently: eager SD is far slower and would mislead comparisons.

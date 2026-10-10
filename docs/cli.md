@@ -34,6 +34,9 @@ parsers all resolve automatically from the checkpoint and the GPU.
 |---|---|---|
 | `--model-path`, `--model` | required | Local dir, HF repo id, or an FTW dir (auto-detected) |
 | `--served-model-name` | basename of `--model` | Model id reported by `/v1/models` |
+| `--dense-quant` | auto | Dense projection precision: `auto` follows source metadata, `bf16` keeps or decodes BF16, `fp8` uses per-output-row FP8 weights with BF16 activations. Independent of expert precision; explicit choices require loader support |
+| `--kv-dtype` | auto | K/V encoding: `auto` keeps the pool's native format; `bf16` and `int8` require a pool that implements that encoding. INT8 stores a separate BF16 scale per token, KV head and K/V vector |
+| `--kv-placement` | gpu | `tiered` allows QSA history K/V to remain in host memory while its index stays on GPU. Requires positive runtime and host-cache budgets; only selected K/V groups are read for attention |
 
 ### Server & runtime
 

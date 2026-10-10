@@ -744,6 +744,12 @@ class LayeredExecutionAdapter:
         return self._engine.finish_layer_group_logits(batch, state)
 
     @property
+    def retained_bytes_per_token(self) -> int:
+        """Model state and draft features that survive between layer groups."""
+        return (self._engine.model.layer_group_state_width * self._engine.dtype.itemsize
+                + self.retained_feature_bytes_per_token)
+
+    @property
     def retained_feature_bytes_per_token(self) -> int:
         """Draft features a wave keeps per prefill token until its last layer."""
         dflash = self._engine.dflash
@@ -836,8 +842,33 @@ class LayeredExecutionAdapter:
         return outputs
 
 
+class LinearStateLayeredExecutionAdapter(LayeredExecutionAdapter):
+    """Layered execution for hybrid-linear models: keeps the GDN state slots and the linear
+    metadata views behind the model execution boundary (Qwen3.5/3.6, Qwen3.8-Flash-Next)."""
+
+    def prepare_metadata_view(self, source: Batch, target: Batch) -> bool:
+        if self._engine.linear_state_pool is None:
+            return super().prepare_metadata_view(source, target)
+        from freetoken.attention.linear import FLAMetadata
+
+        source_metadata = source.fla_metadata
+        if not isinstance(source_metadata, FLAMetadata):
+            raise RuntimeError("source batch is missing linear attention metadata")
+        if target.is_decode_only:
+            if source_metadata.decode is None:
+                raise RuntimeError("source batch has no linear decode metadata")
+            target.linear_table_idx = source_metadata.decode.cache_indices
+            target.fla_metadata = FLAMetadata(decode=source_metadata.decode)
+        elif target.has_prefill:
+            if source_metadata.prefill is None:
+                raise RuntimeError("source batch has no linear prefill metadata")
+            target.fla_metadata = FLAMetadata(prefill=source_metadata.prefill)
+        return super().prepare_metadata_view(source, target)
+
+
 __all__ = [
     "LayeredExecutionAdapter",
     "LayeredGroupResult",
     "LayeredGroupRun",
+    "LinearStateLayeredExecutionAdapter",
 ]

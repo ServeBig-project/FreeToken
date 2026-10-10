@@ -47,6 +47,10 @@ class ResidualLayerGroupCausalLM(BaseLLMModel):
     """Explicit opt-in for the common hidden/residual decoder-layer interface."""
 
     @property
+    def layer_group_state_width(self) -> int:
+        return 2 * self.model.embed_tokens.weight.shape[-1]
+
+    @property
     def layer_group_num_layers(self) -> int:
         return len(self.model.layers.op_list)
 

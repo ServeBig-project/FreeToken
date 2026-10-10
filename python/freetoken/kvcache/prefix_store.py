@@ -79,6 +79,7 @@ class Component:
     name: str
     storage_kind: str  # paged | window | boundary_state | composite
     views: Callable[[], List[torch.Tensor]]
+    residency: object | None = None
 
     def row_bytes(self) -> List[int]:
         return [v[0].numel() * v.element_size() for v in self.views()]
@@ -97,6 +98,11 @@ class HostCopy:
         self.refs = 1
         self.where = store.alloc(self.nbytes)
         self.on_free: Callable[[], None] | None = None
+        self.queued = self.ready = False
+        self.event = None
+
+    def spans(self, start: int, count: int) -> list[HostSpan]:
+        return [HostSpan(self, start, count)]
 
     def view(self, family: int, start: int, count: int) -> torch.Tensor:
         off = self.where + self.units * sum(self.rows[:family]) + start * self.rows[family]
@@ -123,6 +129,35 @@ class HostSpan:
     @property
     def nbytes(self) -> int:
         return self.count * sum(self.copy.rows)
+
+
+class HostSeries:
+    """A snapshot sharing existing host spans; no second allocation of active history."""
+
+    def __init__(self, comp: Component, parts: list[HostSpan]):
+        self.comp, self.parts, self.refs = comp, parts, 1
+        self.units = sum(p.count for p in parts)
+        self.rows = comp.row_bytes()
+        self.nbytes = self.units * sum(self.rows)
+        for part in parts:
+            part.copy.refs += 1
+
+    def release(self) -> None:
+        self.refs -= 1
+        if self.refs == 0:
+            for part in self.parts:
+                part.copy.release()
+
+    def spans(self, start: int, count: int) -> list[HostSpan]:
+        out, end, offset = [], start + count, 0
+        for part in self.parts:
+            lo, hi = max(start, offset), min(end, offset + part.count)
+            if lo < hi:
+                out.extend(part.copy.spans(part.start + lo - offset, hi - lo))
+            offset += part.count
+            if offset >= end:
+                break
+        return out
 
 
 @dataclass(frozen=True)
@@ -176,13 +211,40 @@ class PrefixTransfer:
                keep=()) -> None:
         """Run ``tasks`` after all work already queued on the current stream; ``done`` runs
         from ``poll`` once they completed."""
-        tasks = _merge_adjacent(tasks)  # before the wait: the side stream reads merged indices
+        expanded = []
+        for task in tasks:
+            offset = 0
+            for span in task.span.copy.spans(task.span.start, task.span.count):
+                idx = task.index[offset:offset + span.count]
+                offset += span.count
+                if direction == "d2h" and span.copy.queued:
+                    continue
+                item = CopyTask(task.comp, idx, span)
+                if direction == "h2d" and task.comp.residency is not None:
+                    expanded.extend(task.comp.residency.restore(item))
+                else:
+                    expanded.append(item)
+        tasks = _merge_adjacent(expanded)
+        copies = {t.span.copy for t in tasks} if direction == "d2h" else set()
+        for copy in copies:
+            copy.queued = True
+
+        def completed():
+            for copy in copies:
+                copy.ready = True
+            if direction == "h2d":
+                for task in tasks:
+                    if task.comp.residency is not None:
+                        task.comp.residency.finish_restore(task.index)
+            done()
         # A shared runtime keeps page ids on the host.
         tasks = [t if t.index.is_cuda else CopyTask(t.comp, upload(t.index, self.device), t.span)
                  for t in tasks]
         stream = self.streams[direction]
         stream.wait_stream(torch.cuda.current_stream(self.device))
-        job = _Job(tasks, done, [*keep, *(t.index for t in tasks)])
+        job = _Job(tasks, completed, [*keep, *(t.index for t in tasks)])
+        for copy in copies:
+            copy.event = job.end
         with torch.cuda.stream(stream):
             job.start.record()
             for task in tasks:

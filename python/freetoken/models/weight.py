@@ -225,12 +225,14 @@ def load_weight(
     device: torch.device,
     *,
     include_moe_experts: bool = True,
+    dense_precision: str = "source",
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     # FTW checkpoint: dense weights are stored post-iter_weights, so we replay them
     # model-agnostically instead of re-running the per-model reader. Routed experts may be
     # replaced independently; every other key still reaches strict model-state validation.
-    from freetoken.checkpoint.ftw import is_ftw_checkpoint, iter_ftw_weights
+    from freetoken.checkpoint.ftw import FTWReader, is_ftw_checkpoint, iter_ftw_weights
     from freetoken.models.config import VISION_KEY_PREFIXES, vision_load_enabled
+    from freetoken.quant.dense import FTW_META_KEY
 
     if is_ftw_checkpoint(model_path):
         # The FTW dense shard stores whatever existed at conversion, including the vision
@@ -239,7 +241,10 @@ def load_weight(
         # strict unexpected-key check. Skip them here to match the model the engine built.
         skip_vision = not vision_load_enabled()
         include = None if include_moe_experts else lambda name: not _resident_expert_weight(name)
-        for name, tensor in iter_ftw_weights(model_path, include_name=include):
+        weights = iter_ftw_weights(model_path, include_name=include)
+        if dense_precision == "bf16" and FTWReader(model_path).meta(FTW_META_KEY) == "fp8":
+            weights = _decode_fp8_rows(weights)
+        for name, tensor in weights:
             if skip_vision and name.startswith(VISION_KEY_PREFIXES):
                 continue
             yield name, tensor
@@ -247,12 +252,41 @@ def load_weight(
 
     _config, spec = _spec_for_model_path(model_path)
     iter_weights = _load_attr(spec.module, spec.iter_weights)
+    extra = {"dense_precision": dense_precision} if spec.dense_plan else {}
+    if not spec.dense_plan and dense_precision != "source":
+        raise ValueError(
+            f"{spec.module} follows its checkpoint's dense precision; --dense-quant "
+            f"{dense_precision} is not available for this model"
+        )
     yield from iter_weights(
         model_path,
         device,
         include_moe_experts=include_moe_experts,
         include_non_moe=True,
+        **extra,
     )
+
+
+def _decode_fp8_rows(weights: Iterator[Tuple[str, torch.Tensor]]) -> Iterator[Tuple[str, torch.Tensor]]:
+    """An FTW converted with the fp8 plan, served with ``--dense-quant bf16``: each per-row
+    FP8 ``.weight`` is decoded with the ``.weight_scale`` that follows it."""
+    from freetoken.quant.dense import dequant_fp8_per_row
+
+    pending: tuple[str, torch.Tensor] | None = None
+    for name, tensor in weights:
+        if pending is not None:
+            base, q = pending
+            pending = None
+            if name == base + ".weight_scale":
+                yield base + ".weight", dequant_fp8_per_row(q, tensor)
+                continue
+            yield base + ".weight", q
+        if name.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn:
+            pending = (name[: -len(".weight")], tensor)
+            continue
+        yield name, tensor
+    if pending is not None:
+        yield pending[0] + ".weight", pending[1]
 
 
 def _resident_expert_weight(name: str) -> bool:
