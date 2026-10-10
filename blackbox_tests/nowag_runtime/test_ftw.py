@@ -146,8 +146,9 @@ def test_ftw_missing_data_rejected(tmp_path):
     gpu = need_gpu()
     dest = converted("qwen36")["dest"]
     broken = S.link_copy(dest, tmp_path / "broken", mutable=())
-    shards = sorted(broken.rglob("*.safetensors"), key=lambda p: p.stat().st_size)
-    assert shards, f"no safetensors in {dest}"
+    # FTW = freetoken-NNNNN.ftw shards + freetoken_weight.json index + copied non-weight files
+    shards = sorted(broken.glob("freetoken-*.ftw"), key=lambda p: p.stat().st_size)
+    assert shards, f"no freetoken-*.ftw shards in {dest}"
     shards[-1].unlink()
     expect_rejected("ftw_missing_shard", serve_args(broken, "qwen36"), gpu)
 
