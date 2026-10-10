@@ -97,17 +97,11 @@ class Qwen4ExpModel(BaseOP):
         self.hyper_connection_mixer = GatedResidual(config, use_combine=False)
 
     def embed(self, input_ids: torch.Tensor, batch: Batch) -> torch.Tensor:
-        """The streams before layer 0; also the moment a capture at a chunk start keeps the
-        state before this forward (the GDN layers copy their own, the declared slot states
-        are copied once here)."""
+        """The streams before layer 0."""
         if batch.fla_metadata is None:  # direct-op callers; the engine builds it before forward
             from freetoken.attention.linear import build_fla_metadata
 
             batch.fla_metadata = build_fla_metadata(batch, input_ids.device)
-        prefill = batch.fla_metadata.prefill
-        if prefill is not None and prefill.track_start_dst is not None:
-            for t in get_global_ctx().linear_state_pool.slot_states.values():
-                t.index_copy_(1, prefill.track_start_dst, t.index_select(1, prefill.track_start_src))
         return self.embed_tokens.forward(input_ids).repeat(1, self.hc_count)
 
 

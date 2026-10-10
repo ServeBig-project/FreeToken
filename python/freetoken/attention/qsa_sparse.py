@@ -274,6 +274,8 @@ class QSASparseAttnBackend(BaseAttnBackend):
             # Graph-bound decode never plans here: each range graph may replay alone, so its
             # plan lives in static buffers restaged before every replay (_stage_decode).
             self._plan_index_writes(md, batch)
+        if batch.fla_metadata.prefill is not None:
+            batch.fla_metadata.prefill.keep_start(self._pending(layer_id))
         self.write_history(k, v, index, layer_id, batch.out_loc, md)
         return self.attend(q, self.select(index, md, layer_id), md, layer_id)
 

@@ -273,44 +273,24 @@ class NGramEmbedding(BaseOP):
         assert self._table is not None, "PLE table was never attached"
         return self._table
 
-    def _window(self, meta: PLEMetadata):
-        """The hash window as ``(packed [B, W], select)``; ``select`` picks this forward's rows."""
+    def _shifted_tokens(self, meta: PLEMetadata) -> List[torch.Tensor]:
+        """``out[s][t]`` = the token ``s`` places left of row ``t``, or eos when an eos lies
+        between them (the n-gram does not cross a boundary). Per real row, not per request."""
         ids = meta.input_ids.long()
-        ctx_len = self.ngram_size - 1
         if meta.is_decode:
-            # a window of exactly ngram_size columns holds every shift the hash can reach
-            return torch.cat([meta.ngram_context, ids.view(-1, 1)], dim=1), lambda t: t[:, -1]
-        num_reqs = len(meta.seq_lens)
-        cu = meta.cu_seqlens
-        flat_pos = torch.arange(ids.numel(), device=ids.device)
-        req = (torch.searchsorted(cu, flat_pos, right=True) - 1).clamp_(max=num_reqs - 1)
-        col = flat_pos - cu[req] + ctx_len
-        # As wide as every row: a captured verify graph's padding rows join the last request.
-        packed = ids.new_full((num_reqs, ctx_len + ids.numel()), self.eos_token_id)
-        packed[:, :ctx_len] = meta.ngram_context
-        packed[req, col] = ids
-        return packed, lambda t: t[req, col]
-
-    def _shift_ignore_eos(self, packed: torch.Tensor) -> List[torch.Tensor]:
-        """``out[s][b, p]`` = the token ``s`` places left of ``p``, or eos past a boundary."""
-        num_reqs, width = packed.shape
-        pos = torch.arange(width, device=packed.device)
-        eos_pos = torch.where(packed == self.eos_token_id, pos, -1)
-        prev_eos = torch.cummax(eos_pos, dim=1).values
-        prev_eos = torch.cat([eos_pos.new_full((num_reqs, 1), -1), prev_eos[:, :-1]], dim=1)
-        in_segment = pos.unsqueeze(0) - prev_eos - 1
-        shifted = [packed]
-        for shift in range(1, self.ngram_size):
-            src = pos - shift
-            gathered = packed.gather(1, src.clamp_min(0).unsqueeze(0).expand(num_reqs, -1))
-            valid = (src.unsqueeze(0) >= 0) & (in_segment >= shift)
-            shifted.append(torch.where(valid, gathered, packed.new_full((), self.eos_token_id)))
-        return shifted
+            before = meta.ngram_context
+        else:
+            rows = torch.arange(ids.numel(), device=ids.device)
+            req = torch.searchsorted(meta.cu_seqlens, rows, right=True) - 1
+            before = ngram_context_after(meta, rows - 1, req.clamp_(max=len(meta.seq_lens) - 1))
+        before = before.flip(1)  # column s - 1: the token s places left
+        cut = (before == self.eos_token_id).cumsum(1) > 0
+        before = torch.where(cut, before.new_full((), self.eos_token_id), before)
+        return [ids, *before.unbind(1)]
 
     def row_ids(self, meta: PLEMetadata) -> torch.Tensor:
         """Global table row per (token, hash head): ``[T, num_ngram_heads]`` int64."""
-        packed, select = self._window(meta)
-        tokens = [select(s) for s in self._shift_ignore_eos(packed)]
+        tokens = self._shifted_tokens(meta)
         blocks = []
         for ngram in range(2, self.ngram_size + 1):
             start = (ngram - 2) * self.heads_per_ngram
@@ -368,6 +348,10 @@ class PLELayer(BaseOP):
     def forward(self, R: torch.Tensor, batch: Batch) -> torch.Tensor:
         pool = get_global_ctx().linear_state_pool
         context_pool = pool.slot_state(PLE_NGRAM_STATE)
+        states = pool.slot_state(PLE_CONV_STATE, self.layer_id)
+        prefill = batch.fla_metadata.prefill
+        if prefill is not None:
+            prefill.keep_start(context_pool, states)
         meta = build_ple_metadata(batch, context_pool, self.args.ngram_boundary_token_id)
         embeddings = self.ple_embedding.forward(meta).to(R.dtype)
         key = self.norm_key.forward(self.key_proj.forward(embeddings))
@@ -377,9 +361,7 @@ class PLELayer(BaseOP):
         gate = (key.view(shape) * query.view(shape)).sum(-1, keepdim=True) / math.sqrt(self.hidden_size)
         gate = torch.sigmoid(gate.sign() * gate.abs().clamp_min(1e-6).sqrt())
         gated = (gate * value.unsqueeze(-2)).flatten(-2)
-        states = pool.slot_state(PLE_CONV_STATE, self.layer_id)
         x = self.norm_conv.forward(gated)
-        prefill = batch.fla_metadata.prefill
         track = None
         if prefill is not None and prefill.track_boundary_row is not None:
             # The boundary row indexes the prefill rows, which follow the decode rows here.

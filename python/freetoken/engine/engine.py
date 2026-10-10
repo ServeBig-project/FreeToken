@@ -1607,6 +1607,7 @@ class Engine:
     def execution_status(self) -> dict:
         """Requested versus resolved batching/SD settings, and why an auto choice fell back."""
         from freetoken.quant.dense import effective_dense_precision
+        from freetoken.quant.kv import kv_storage_name
 
         config, runner = self.config, self.graph_runner
         steps = config.speculative_num_steps
@@ -1616,7 +1617,7 @@ class Engine:
             effective=dict(
                 batching_policy=getattr(config, "batching_policy", "legacy"),
                 dense_quant=effective_dense_precision(config.model_config),
-                kv_dtype=config.kv_dtype,
+                kv_dtype=kv_storage_name(config.kv_dtype, config.dtype),
                 kv_placement=config.kv_placement,
                 drafter=config.speculative_drafter,
                 speculative_num_steps=steps,

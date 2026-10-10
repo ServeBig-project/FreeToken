@@ -73,6 +73,10 @@ class MTPRuntime:
         the rows it made history. A prefill's state captures inside the forward (page-aligned
         prefix snapshots) get the MTP state there too."""
         reqs = batch.reqs
+        prefill = batch.fla_metadata.prefill if batch.fla_metadata is not None else None
+        if prefill is not None:  # a capture at the forward's start: the state before its rows
+            pool = get_global_ctx().linear_state_pool
+            prefill.keep_start(pool.slot_state(self.mtp.pending_state, self.mtp.layer_id), self._tail())
         captures = [[(c.pos, c.slot) for c in r.state_captures if c.slot is not None
                      and c.pos is not None and r.cached_len < c.pos < r.device_len]
                     for r in reqs]

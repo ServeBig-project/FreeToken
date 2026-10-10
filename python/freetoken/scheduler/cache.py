@@ -1023,10 +1023,19 @@ class CacheManager:
         claims reclaim it for any component. Logical bytes, not whole physical blocks."""
         unit = lambda units: sum(length for *_, length in units.banks) if units else 0
         pages = self._evictable("kv") // self.page_size * unit(self.page_units)
+        if self.residency is not None:
+            # tiered K/V payload lives outside page_units; a cold page's GPU copy is reclaimable
+            pages += len(self._cold_pages() & self.residency.gpu) * self.residency.page_bytes
         states = self._evictable("state") * unit(getattr(self.linear_state_pool, "units", None))
         windows = (self._evictable("window") * unit(self.swa_pool.slot_units)
                    if self.swa_paged else 0)
         return pages + states + windows
+
+    def _cold_pages(self) -> set[int]:
+        """Pages of the cached prefixes no request holds."""
+        ps = self.page_size
+        return {int(p) for kv in (self.tree.unlocked_kv() if self.tree is not None else ())
+                for p in kv[::ps] // ps}
 
     def drop_cached(self) -> None:
         """Release every unlocked cached prefix from the GPU, so the next claims, taking the
@@ -1081,22 +1090,22 @@ class CacheManager:
         """Host data bytes by owner, each byte once: K/V of pages requests still hold, then
         paused requests' copies; the rest is cold (prefix copies, unheld pages, copies in
         flight)."""
-        active, held = 0, set()
+        # A host unit several pages or paused requests share is counted once, by its first owner.
+        active, counted = 0, set()
         if self.residency is not None:
-            ps = self.page_size
-            cold = {int(p) for kv in (self.tree.unlocked_kv() if self.tree is not None else ())
-                    for p in kv[::ps] // ps}
+            cold = self._cold_pages()
             for page, span in self.residency.backups.items():
-                if page not in cold:
+                if page not in cold and (id(span.copy), span.start) not in counted:
+                    counted.add((id(span.copy), span.start))
                     active += self.residency.page_bytes
-                    held.add((id(span.copy), span.start))
         paused = 0
         for state in self._paused_states.values():
             for copy in state.copies:
                 parts = copy.parts if isinstance(copy, HostSeries) else [HostSpan(copy, 0, copy.units)]
                 for part in parts:
-                    free = sum((id(part.copy), part.start + i) not in held for i in range(part.count))
-                    paused += free * sum(part.copy.rows)
+                    units = {(id(part.copy), part.start + i) for i in range(part.count)} - counted
+                    counted |= units
+                    paused += len(units) * sum(part.copy.rows)
         cold = max(self.host.store.used - active - paused, 0)
         return dict(host_active_kv_bytes=active, host_paused_bytes=paused, host_cold_bytes=cold)
 

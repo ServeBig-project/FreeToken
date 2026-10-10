@@ -47,6 +47,14 @@ class FLAPathMetadata:
     rows: torch.Tensor | None = None
     speculative: bool = False
 
+    def keep_start(self, *states: torch.Tensor) -> None:
+        """Copy the live rows of ``states`` (``[slots, ...]``) to this extend's start capture
+        slots. Each owner calls it when its own layer runs: in a layered wave a later tile of
+        the same request is embedded before the earlier tile reaches this layer."""
+        if self.track_start_dst is not None:
+            for t in states:
+                t.index_copy_(0, self.track_start_dst, t.index_select(0, self.track_start_src))
+
 
 @dataclass
 class FLAVerifyStep:

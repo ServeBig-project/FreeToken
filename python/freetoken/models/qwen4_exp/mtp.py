@@ -28,7 +28,7 @@ from freetoken.moe.fused import fused_topk
 from freetoken.utils import torch_dtype
 
 from .attention import Qwen4ExpAttention
-from .config import MTP_TAIL_STATE
+from .config import MTP_PENDING_STATE, MTP_TAIL_STATE
 from .hc import GatedResidual, GroupedPlusOneRMSNorm
 from .model import Qwen4ExpDecoderLayer
 
@@ -71,9 +71,10 @@ class MTPLayer(Qwen4ExpDecoderLayer):
 class Qwen4ExpMTP(BaseOP):
     """The draft layer. ``config`` is the target's; the layer's dense projections are BF16
     whatever the target's dense plan, since its checkpoint weights are. Its history is the
-    attention layer ``layer_id``; the target's last streams wait in slot state ``tail_state``."""
+    attention layer ``layer_id`` (its open group in slot state ``pending_state``); the
+    target's last streams wait in slot state ``tail_state``."""
 
-    tail_state = MTP_TAIL_STATE
+    pending_state, tail_state = MTP_PENDING_STATE, MTP_TAIL_STATE
 
     def __init__(self, config: ModelConfig) -> None:
         args = config.qwen4_args
