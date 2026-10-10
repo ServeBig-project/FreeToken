@@ -16,7 +16,8 @@ python /absolute/path/to/test-worktree/blackbox_tests/flash_next_tiered_kernels/
 record per case and exits nonzero on failure. It records exception type and
 message, without a traceback or production source inspection.
 
-Candidate `7139b31` passed all 11 cases on physical GPU 2 in
+Before counter coverage was added, candidate `7139b31` passed all 11 numerical
+cases on physical GPU 2 in
 `ft-flash-next-i3a-gpu2`, using the unchanged tolerances below.
 See [the numerical acceptance report](results-7139b31.json).
 
@@ -33,6 +34,12 @@ See [the numerical acceptance report](results-7139b31.json).
   Tolerances were fixed before running the candidate: `atol=1/64, rtol=1/64`.
 - Empty selection rows produce exact zeros. Both an allocated return value and
   caller-supplied output storage are exercised.
+- The optional CUDA `int64[1]` counter starts at `2**32 - 137` and accumulates exactly
+  `host_selected_slots * Hkv * (2 * D * element_bytes + scale_bytes)` per call,
+  where `scale_bytes` is 4 for INT8 and 0 for BF16. GPU-resident and padding
+  positions do not contribute. Crossing 4 GiB verifies the accumulator's 64-bit
+  behavior. Explicit `counter=None` preserves numerical
+  behavior; graph replays accumulate using each replay's selection and residency.
 
 ## Supported input coverage
 
@@ -47,6 +54,6 @@ See [the numerical acceptance report](results-7139b31.json).
   residency, selection, tables, queries, and cache contents at fixed shapes.
   Host allocations remain alive throughout replay.
 
-These are numerical and output-integrity tests. They do not measure transfer
-volume, prove that whole pages were not copied internally, or establish a
-latency threshold: those require an observable performance contract or profiling.
+The counter reports logical host-read bytes. These tests do not measure PCIe bus
+transactions, prove that whole pages were not copied internally, or establish a
+latency threshold: those require profiling or a performance contract.

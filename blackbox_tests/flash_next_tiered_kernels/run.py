@@ -13,6 +13,7 @@ from freetoken.kernel.triton.qsa.gather import gather_host_kv
 
 
 PAGE, HKV, DIM, LAYERS = 64, 2, 256, 3
+COUNTER_START = 2**32 - 137
 # Fixed before candidate execution; BF16 output rounds to roughly 0.8% precision.
 ATOL, RTOL = 1 / 64, 1 / 64
 
@@ -113,6 +114,20 @@ class Fixture:
         scales = self.scales[self.layer] if self.scales is not None else None
         return data[:, 0].contiguous(), data[:, 1].contiguous(), scales
 
+    def host_slots(self):
+        for row in range(self.tokens):
+            for slot, token in enumerate(self.indices[row].tolist()):
+                if token < 0:
+                    continue
+                page = int(self.tables[self.requests[row], token // PAGE])
+                if self.resident[page] == 0:
+                    yield row, slot, page, token % PAGE
+
+    def logical_read_bytes(self):
+        payload = 2 * DIM * self.encoded.element_size()
+        scales = 4 if self.scales is not None else 0
+        return sum(1 for _ in self.host_slots()) * HKV * (payload + scales)
+
     def reference(self):
         keys, values, scales = self.full_cache()
         if scales is not None:
@@ -160,6 +175,7 @@ class DeviceInputs:
         self.fills = fills
         self.outputs = tuple(outputs + [None] * (4 - len(outputs)))
         self.out_storage, self.out = guarded(tuple(fixture.q.shape), torch.bfloat16, 17)
+        self.counter = torch.full((1,), COUNTER_START, dtype=torch.int64, device="cuda")
         self.load(fixture)
 
     def load(self, fixture):
@@ -188,9 +204,15 @@ class DeviceInputs:
             storage.fill_(fill)
         self.out_storage.fill_(17)
 
-    def gather(self, fixture):
+    def gather(self, fixture, counted=True):
         gather_host_kv(self.indices, self.tables, self.requests, self.addresses,
-                       self.outputs, layer=fixture.layer, layers=LAYERS, page_size=PAGE)
+                       self.outputs, layer=fixture.layer, layers=LAYERS, page_size=PAGE,
+                       counter=self.counter if counted else None)
+
+    def check_counter(self, expected):
+        actual = self.counter.item()
+        require(actual == expected,
+                f"cumulative logical host-read bytes: expected {expected}, got {actual}")
 
     def attend(self, supplied_out=True):
         return qsa_sparse_paged_attention(
@@ -201,19 +223,13 @@ class DeviceInputs:
     def check_gather(self, fixture):
         expected = [torch.full(tuple(output.shape), fill, dtype=output.dtype)
                     for output, fill in zip(self.outputs, self.fills)]
-        for row in range(fixture.tokens):
-            for slot, token in enumerate(fixture.indices[row].tolist()):
-                if token < 0:
-                    continue
-                page = int(fixture.tables[fixture.requests[row], token // PAGE])
-                if fixture.resident[page]:
-                    continue
-                for payload in range(2):
-                    expected[payload][row, slot] = fixture.encoded[
-                        fixture.layer, page, payload, token % PAGE]
-                    if fixture.scales is not None:
-                        expected[2 + payload][row, slot] = fixture.scales[
-                            fixture.layer, page, payload, token % PAGE]
+        for row, slot, page, offset in fixture.host_slots():
+            for payload in range(2):
+                expected[payload][row, slot] = fixture.encoded[
+                    fixture.layer, page, payload, offset]
+                if fixture.scales is not None:
+                    expected[2 + payload][row, slot] = fixture.scales[
+                        fixture.layer, page, payload, offset]
         for number, (storage, values, fill) in enumerate(zip(self.storages, expected, self.fills)):
             with_guards = torch.full(tuple(storage.shape), fill, dtype=storage.dtype)
             with_guards[64:-64] = values.flatten()
@@ -245,9 +261,13 @@ class DeviceInputs:
 def eager_case(dtype, kind, heads, mode, layer):
     fixture = Fixture(dtype, kind, heads, mode, seed=341, layer=layer)
     device = DeviceInputs(fixture)
+    device.gather(fixture, counted=False)
+    device.check_gather(fixture)
+    device.check_counter(COUNTER_START)
     device.gather(fixture)
     torch.cuda.synchronize()
     device.check_gather(fixture)
+    device.check_counter(COUNTER_START + fixture.logical_read_bytes())
     returned = device.attend(supplied_out=False)
     device.check_attention(fixture, returned)
     device.attend(supplied_out=True)
@@ -269,11 +289,15 @@ def graph_case(dtype):
     with torch.cuda.graph(graph):
         device.gather(fixtures[0])
         device.attend()
+    device.counter.fill_(COUNTER_START)
+    expected_bytes = COUNTER_START
     for iteration in [0, 1, 0, 1]:
         fixture = fixtures[iteration]
         device.load(fixture)
         graph.replay()
         torch.cuda.synchronize()
+        expected_bytes += fixture.logical_read_bytes()
+        device.check_counter(expected_bytes)
         device.check_gather(fixture)
         device.check_attention(fixture, device.out)
 
