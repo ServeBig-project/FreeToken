@@ -78,13 +78,56 @@ def converted(which):
     before = (inventory(base_copy), inventory(side_copy))
     dest = scratch / f"ftw-{which}"
     shutil.rmtree(dest, ignore_errors=True)
-    proc = ft(["checkpoint", "--model", base_copy, "--nowag-expert-path", side_copy, "--out", dest,
-               "--moe-backend", "offload", "--gpu", gpu], label=f"ftw_convert_{which}")
-    assert proc.returncode == 0, proc.stdout[-3000:]
-    after = (inventory(base_copy), inventory(side_copy))
-    shutil.rmtree(work)                                   # FTW must not need them any more
+    try:
+        proc = ft(["checkpoint", "--model", base_copy, "--nowag-expert-path", side_copy, "--out", dest,
+                   "--moe-backend", "offload", "--gpu", gpu], label=f"ftw_convert_{which}")
+        assert proc.returncode == 0, proc.stdout[-3000:]
+        after = (inventory(base_copy), inventory(side_copy))
+    except BaseException:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
+    finally:
+        shutil.rmtree(work, ignore_errors=True)           # FTW must not need them any more
     _FTW[which] = {"dest": dest, "sources_unchanged": before == after, "base": base, "side": side}
     return _FTW[which]
+
+
+# Shared conversions live in NOWAG_SCRATCH (host memory when it is /dev/shm; DSV4 is ~75 GiB),
+# so each is deleted after the last test of this module that uses it, pass or fail.
+FIXED_USES = {"test_ftw_renamed_gives_identical_output": "qwen36",
+              "test_ftw_missing_data_rejected": "qwen36",
+              "test_gptoss_ftw_rewritten_index_still_serves": "gptoss",
+              "test_gptoss_ftw_missing_one_bias_group_rejected": "gptoss"}
+
+
+def ftw_use(item):
+    callspec = getattr(item, "callspec", None)
+    if callspec and "which" in callspec.params:
+        return callspec.params["which"]
+    return FIXED_USES.get(getattr(item, "originalname", None))
+
+
+@pytest.fixture(autouse=True)
+def _drop_unneeded_ftw(request):
+    yield
+    items = request.session.items
+    later = items[items.index(request.node) + 1:]
+    needed = {ftw_use(item) for item in later if item.module is request.module}
+    for which in [w for w in _FTW if w not in needed]:
+        shutil.rmtree(_FTW.pop(which)["dest"], ignore_errors=True)
+
+
+@pytest.fixture
+def own_scratch():
+    """Directories a single test creates under NOWAG_SCRATCH, removed when it ends."""
+    made = []
+
+    def make(name):
+        made.append(need_scratch() / name)
+        return made[-1]
+    yield make
+    for path in made:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 @pytest.mark.parametrize("which", VARIANTS)
@@ -191,24 +234,24 @@ def expert_bias(key, layer=None):
     return hit and (layer is None or f".layers.{layer}." in key)
 
 
-def test_gptoss_native_without_base_bias_rejected():
+def test_gptoss_native_without_base_bias_rejected(own_scratch):
     """Native NoWAG has no bias; a missing BASE expert bias must not be read as zero."""
     gpu = need_gpu()
     base, side = sources("gptoss")
-    copy = base_copy_without(base, need_scratch() / "gptoss-nobias", expert_bias)
+    copy = base_copy_without(base, own_scratch("gptoss-nobias"), expert_bias)
     expect_rejected("gptoss_no_bias", serve_args(copy, "gptoss", side), gpu)
 
 
-def test_gptoss_one_layer_without_bias_rejected_native_and_converted():
+def test_gptoss_one_layer_without_bias_rejected_native_and_converted(own_scratch):
     """Only the last layer's expert biases are missing from BASE: the native load must refuse,
     and conversion must either refuse or yield a FTW that the server refuses before ready."""
     gpu = need_gpu()
     base, side = sources("gptoss")
     last = json.loads((base / "config.json").read_text())["num_hidden_layers"] - 1
-    copy = base_copy_without(base, need_scratch() / "gptoss-nobias-last-layer",
+    copy = base_copy_without(base, own_scratch("gptoss-nobias-last-layer"),
                              lambda k: expert_bias(k, last))
     expect_rejected("gptoss_no_bias_last_layer", serve_args(copy, "gptoss", side), gpu)
-    dest = need_scratch() / "ftw-gptoss-nobias-last-layer"
+    dest = own_scratch("ftw-gptoss-nobias-last-layer")
     shutil.rmtree(dest, ignore_errors=True)
     proc = ft(["checkpoint", "--model", copy, "--nowag-expert-path", side, "--out", dest,
                "--moe-backend", "offload", "--gpu", gpu], label="ftw_convert_gptoss_nobias_last")
