@@ -735,8 +735,6 @@ class Engine:
         """Swap the physical blocks under idle pools, which re-create their views on them."""
         from freetoken.kvcache.runtime_pool import PhysicalBlocks
 
-        self.page_units = None
-        self.runtime.close()
         self.runtime = PhysicalBlocks(budget, self.device, self.stream)
         self.runtime.limits = self.runtime_limits = limits
         object.__setattr__(config, "runtime_cache_gib", budget / (1 << 30))
@@ -1483,6 +1481,10 @@ class Engine:
         if moe_cache_size is not None:
             for layer in iter_offload_moe_layers(self.model):
                 layer.expert_workspace = None
+        if runtime_cache_gib is not None:
+            # A smaller runtime may fund larger expert banks and scratch below.
+            self.page_units = None
+            self.runtime.close()
         # 2. Resize caches in place (each frees its old GPU tensors before allocating).
         # Pin the new window first (validated above) so any KV-pool rebuild below sizes the window
         # to it (_dsv4_pool_sizes / _swa_paged_num_tokens read config.swa_num_pages_override).
@@ -1495,7 +1497,7 @@ class Engine:
             self.moe_offload_cache.rebuild(moe_cache_size)
             object.__setattr__(config, "moe_cache_size", moe_cache_size)
             self._alloc_expert_workspace(config)
-            if shared:
+            if shared and runtime_cache_gib is None:
                 self.runtime.limits = self.runtime_limits = limits
         if runtime_cache_gib is not None:
             self._replace_runtime(config, budget, limits)
