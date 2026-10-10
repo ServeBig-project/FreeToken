@@ -2371,6 +2371,13 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
             "and let every layer decode on the GPU offload path instead."
         )
 
+    if is_moe and (config.moe_backend in ("cpu", "hybrid") or config.moe_cpu_layers):
+        from freetoken.moe.cpu_executor import require_compiled_support
+        from freetoken.moe.expert_banks import cpu_expert_format
+
+        cpu_format = cpu_expert_format(config.model_path, model_config)
+        require_compiled_support(model_config.hidden_act, cpu_format)
+
     if is_moe and config.moe_backend == "auto":
         # A MoE model always defaults to the offload family: experts stream from pinned host
         # banks into an auto-sized GPU slot cache, which is the only default that serves a model
@@ -2398,6 +2405,7 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
             gpu_uuid=gpu_uuid,
         ) == "hybrid":
             from freetoken.moe.cpu_executor import compiled_extension_supports
+            from freetoken.moe.expert_banks import cpu_expert_format
 
             _act = getattr(model_config, "hidden_act", "silu")
             if not _cpu_moe_act_ok:
@@ -2406,8 +2414,8 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
                     f"support this model's expert activation "
                     f"{getattr(model_config, 'hidden_act', None)!r}; staying on offload"
                 )
-            elif moe_wfmt != "mxfp4" and not compiled_extension_supports(
-                _act, bench_fmt
+            elif not compiled_extension_supports(
+                _act, cpu_expert_format(config.model_path, model_config)
             ):
                 # Stale prebuilt _cpu_moe.so: an explicit cpu/hybrid pick still
                 # hard-fails in the executor, but a default must not turn into a

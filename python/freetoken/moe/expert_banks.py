@@ -318,6 +318,23 @@ def has_expert_weight_override(quant_format: str) -> bool:
     return quant_format in _WEIGHT_OVERRIDES
 
 
+def cpu_expert_format(model_path: str, model_config) -> str:
+    """The CPU-readable bank format selected by the source component."""
+    from freetoken.checkpoint.ftw import ftw_quant_format
+
+    stored = ftw_quant_format(model_path)
+    if stored is not None:
+        return stored
+    quant = model_config.expert_quant
+    if has_expert_weight_override(quant):
+        return quant
+    model_format = _model_hook(model_config, "expert_bank_format")
+    if model_format is not None:
+        return model_format(model_config)
+    fmt = quant if quant != "none" else (model_config.moe_weight_format or "bf16")
+    return "mxfp4_triton" if fmt == "mxfp4" else fmt
+
+
 def _build_expert_banks(model_path, model_config, device, dtype, dummy, parallel, workers, chunk, decode_target="gpu", layer_sink=None) -> ExpertBanks:
     """Dispatch to the model's setup-override or the per-quant provider. ``parallel=True``
     is the parallel read; a provider that hasn't implemented it raises NotImplementedError (the

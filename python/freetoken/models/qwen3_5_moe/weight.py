@@ -861,17 +861,24 @@ def setup_offload_expert_banks(
         raise NotImplementedError("qwen3_5_moe fp8 expert banks support TP=1 only")
     from freetoken.moe.expert_banks import ExpertBanks
 
-    mode = os.environ.get("FREETOKEN_FP8_EXPERTS", "fp8").strip().lower()
-    if mode not in ("fp8", "bf16"):
-        raise ValueError(f"FREETOKEN_FP8_EXPERTS must be 'fp8' or 'bf16', got {mode!r}")
     sink = None if dummy else layer_sink
-    if mode == "bf16":
+    if expert_bank_format(model_config) == "bf16":
         return _setup_bf16_dequant_banks(model_path, model_config, device, dummy, layer_sink=sink)
     banks = _build_fp8_expert_banks(
         model_path, model_config, dummy=dummy, parallel=parallel, workers=workers, chunk=chunk,
         pin=True, layer_sink=sink,
     )
     return ExpertBanks("fp8_block", banks, streamed=sink is not None)
+
+
+def expert_bank_format(model_config) -> str:
+    quant = model_config.expert_quant
+    if quant != "fp8_block":
+        return "bf16" if quant == "none" else quant
+    mode = os.environ.get("FREETOKEN_FP8_EXPERTS", "fp8").strip().lower()
+    if mode not in ("fp8", "bf16"):
+        raise ValueError(f"FREETOKEN_FP8_EXPERTS must be 'fp8' or 'bf16', got {mode!r}")
+    return "bf16" if mode == "bf16" else "fp8_block"
 
 
 def _moe_dims(model_config):

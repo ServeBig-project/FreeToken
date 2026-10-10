@@ -2371,6 +2371,7 @@ struct CpuMoeExecutor {
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   namespace py = pybind11;
+  m.attr("executor_interface_version") = 1;
   py::class_<CpuMoeExecutor>(m, "CpuMoeExecutor")
       .def(py::init<int, int, int, int, int, int, int, int, int, int, uintptr_t, uintptr_t,
                     uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t,

@@ -88,11 +88,11 @@ def compiled_extension_supports(
     """
     if activation not in _ACT_IDS:
         return False
-    if quant_format is None and _ACT_IDS[activation] < 3:
-        return True
     try:
         from freetoken.kernel import _cpu_moe
     except ImportError:
+        return False
+    if getattr(_cpu_moe, "executor_interface_version", 0) != 1:
         return False
     if quant_format is not None:
         format_id = _WFMT_IDS.get(quant_format)
@@ -101,6 +101,17 @@ def compiled_extension_supports(
         if format_id > getattr(_cpu_moe, "max_weight_format_id", lambda: 4)():
             return False
     return _ACT_IDS[activation] <= getattr(_cpu_moe, "max_generic_act_id", lambda: 2)()
+
+
+def require_compiled_support(activation: str, quant_format: str) -> None:
+    if quant_format not in _WFMT_IDS:
+        raise NotImplementedError(f"CPU MoE has no compute method for {quant_format!r} expert banks")
+    if not compiled_extension_supports(activation, quant_format):
+        raise RuntimeError(
+            f"the compiled _cpu_moe extension cannot execute {quant_format!r} experts "
+            f"with activation {activation!r} through the current expert interface; "
+            "rebuild it with `python setup.py build_ext --inplace` (or reinstall the wheel)"
+        )
 
 
 def physical_core_cpus() -> list[int]:
@@ -184,28 +195,9 @@ class CpuMoeExecutor:
                 f"{sorted(_WFMT_IDS)} formats, but this checkpoint's experts are "
                 f"{fmt!r}; use --moe-backend offload (GPU-side dequant) instead."
             )
-        max_format = getattr(_cpu_moe, "max_weight_format_id", lambda: 4)()
-        if _WFMT_IDS[fmt] > max_format:
-            raise RuntimeError(
-                f"the compiled _cpu_moe extension predates the {fmt!r} CPU weight "
-                f"format (max format id {max_format}); rebuild it with "
-                "`python setup.py build_ext --inplace` (or reinstall the wheel)."
-            )
         if activation not in _ACT_IDS:
             raise NotImplementedError(f"CPU MoE backend: unsupported activation {activation!r}")
-        # ABI probe: a stale prebuilt _cpu_moe.so accepts newer act ids without
-        # error and silently computes the wrong activation in the generic
-        # epilogue -- fail loudly with the rebuild instruction instead. (mxfp4
-        # handles its act inside the kernel and predates the marker.)
-        if _ACT_IDS[activation] >= 3 and fmt != "mxfp4_triton":
-            supported = getattr(_cpu_moe, "max_generic_act_id", lambda: 2)()
-            if _ACT_IDS[activation] > supported:
-                raise RuntimeError(
-                    f"the compiled _cpu_moe extension predates activation "
-                    f"{activation!r} (max generic act id {supported}); rebuild it "
-                    "with `python setup.py build_ext --inplace` (or reinstall the "
-                    "wheel) before serving this model on the cpu/hybrid backend."
-                )
+        require_compiled_support(activation, fmt)
 
         self.num_layers = int(cache.num_layers)
         self.num_experts = int(cache.num_experts)
