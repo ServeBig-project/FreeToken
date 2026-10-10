@@ -79,6 +79,7 @@ class QSASparseMetadata(BaseAttnMetadata):
     cmp_rows:         torch.Tensor | None = None  # [T] int32, compressed slab destination
     ring_rows:        torch.Tensor | None = None  # [T] int32, flat pending row or -1
     positions:        torch.Tensor | None = None  # [T] int32, logical query positions
+    verify_records:   tuple | None = None         # speculative verify: per-row pending records
     # fmt: on
 
     def get_last_indices(self, bs: int) -> torch.Tensor:
@@ -334,8 +335,7 @@ class QSASparseAttnBackend(BaseAttnBackend):
         arithmetic: no host sync, graph-capturable. The pending slot per request is the GDN
         state slot of the batch's linear metadata (decode rows first, then prefill rows)."""
         fla = batch.fla_metadata
-        if fla.verify is not None:
-            raise NotImplementedError("qsa_sparse does not serve speculative verify")
+        md.verify_records = batch.verify_records
         slots = fla.decode.cache_indices if fla.prefill is None else (
             fla.prefill.cache_indices if fla.decode is None
             else torch.cat([fla.decode.cache_indices, fla.prefill.cache_indices])
@@ -378,9 +378,28 @@ class QSASparseAttnBackend(BaseAttnBackend):
             pooled, first, self._index_rope_cache(), index.k_norm_weight, index.eps,
             self.kvcache.cmp_k_cache(slot), dest_rows=md.cmp_rows,
         )
+        if md.verify_records is not None:
+            self._record_pending(index.k, pending, md, layer_id)
+            return
         # After the compression read: the pending rows this forward overwrites are exactly the
         # ones a straddling group just consumed.
         qsa_store_rows(pending, md.ring_rows, index.k)
+
+    def _record_pending(self, keys, pending, md: QSASparseMetadata, layer_id: int) -> None:
+        """Verify: the open group's raw keys after every row, from the untouched live pending
+        keys and this forward's last ``index_ratio`` rows of the same request."""
+        rows = torch.arange(keys.shape[0], device=self.device)
+        req = md.token_to_req.long()
+        first = md.cu_seqlens.long()[req]
+        positions = md.positions.long()
+        ring = pending.index_select(0, md.state_slots.long()[req])
+        for back in range(self.ratio):
+            src = (rows - back).clamp_min(0)
+            column = positions[src] % self.ratio
+            ring[rows, column] = torch.where((rows - back >= first).unsqueeze(1), keys[src],
+                                             ring[rows, column])
+        get_global_ctx().linear_state_pool.write_verify(
+            self.pending_state, layer_id, md.verify_records, ring)
 
     def _select(self, index, md: QSASparseMetadata, slot: int) -> torch.Tensor:
         """Score complete visible blocks, take the top-k, expand them to token indices."""

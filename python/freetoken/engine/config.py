@@ -223,11 +223,12 @@ class EngineConfig:
         self_draft = self.speculative_drafter == "self"
         if self_draft and (not model.num_experts or model.moe_router not in ROUTERS):
             raise ValueError("self-speculative decoding requires a shared MoE router component")
-        unsupported = {model.attn_type_for_layer(i) for i in range(model.num_layers)} - {
-            AttnType.FULL, AttnType.LINEAR,
-        }
+        # A target verifies drafts over QSA; drafting from its own state there is not served.
+        served = {AttnType.FULL, AttnType.LINEAR} | (set() if self_draft else {AttnType.QSA})
+        unsupported = {model.attn_type_for_layer(i) for i in range(model.num_layers)} - served
         if unsupported:
-            raise ValueError(f"the target cannot verify drafts over {unsupported} attention yet")
+            action = "draft from its own state" if self_draft else "verify drafts"
+            raise ValueError(f"the target cannot {action} over {unsupported} attention yet")
         if self_draft and self.speculative_draft_experts > self.model_config.num_experts_per_tok:
             raise ValueError(
                 "speculative_draft_experts must not exceed the target's experts per token "

@@ -155,6 +155,8 @@ class PLEMetadata:
       state_slots    [B] int64 device, linear-state slot per request
       fresh_slots    [B] bool device or None: the request starts a new sequence
       is_decode      one token per request, read off the persistent decode view
+      verify         speculative verify: the record of each row's state (``batch.verify_records``);
+                     the live states stay as they are
     """
 
     input_ids: torch.Tensor
@@ -164,6 +166,7 @@ class PLEMetadata:
     state_slots: torch.Tensor
     fresh_slots: torch.Tensor | None
     is_decode: bool
+    verify: tuple[torch.Tensor, ...] | None = None
 
 
 def build_ple_metadata(batch: Batch, context_pool: torch.Tensor, eos: int) -> PLEMetadata:
@@ -171,8 +174,14 @@ def build_ple_metadata(batch: Batch, context_pool: torch.Tensor, eos: int) -> PL
     the two states always index the same slots. The decode-only view is pure device
     arithmetic over the persistent decode buffers (capture-safe)."""
     fla = batch.fla_metadata
-    if fla.verify is not None:
-        raise NotImplementedError("qwen4_exp does not serve speculative verify")
+    if batch.is_speculative_verify:
+        # Rows continue each request's live state (ReplaySSM views them as one decode path).
+        path = fla.prefill if fla.prefill is not None else fla.decode
+        slots = path.cache_indices.long()
+        return PLEMetadata(batch.input_ids, path.cu_seqlens.long(),
+                           tuple(r.extend_len for r in batch.reqs),
+                           context_pool.index_select(0, slots).long(), slots, None, False,
+                           batch.verify_records)
     device = batch.input_ids.device
     if fla.prefill is None:
         slots = fla.decode.cache_indices.long()
@@ -210,6 +219,18 @@ def build_ple_metadata(batch: Batch, context_pool: torch.Tensor, eos: int) -> PL
     )
 
 
+def ngram_context_after(meta: PLEMetadata, rows: torch.Tensor, req: torch.Tensor) -> torch.Tensor:
+    """The last ``ngram_size-1`` token ids once each flat row ``rows`` (of request ``req``) is
+    consumed: ``[N, ngram_size-1]``."""
+    ids = meta.input_ids.long()
+    ctx_len = meta.ngram_context.shape[1]
+    cand = rows.unsqueeze(1) + 1 - ctx_len + torch.arange(ctx_len, device=ids.device)
+    first = meta.cu_seqlens[req].unsqueeze(1)
+    # a token from before this forward sits in the old context, whose last column is the latest
+    old = meta.ngram_context[req].gather(1, (cand - first + ctx_len).clamp_(0, ctx_len - 1))
+    return torch.where(cand >= first, ids[cand.clamp_min(0)], old)
+
+
 def commit_ngram_context(meta: PLEMetadata, context_pool: torch.Tensor,
                          track: tuple[torch.Tensor, torch.Tensor] | None) -> None:
     """Roll each request's ``ple_ngram_ctx`` past this forward's tokens, and write the
@@ -220,14 +241,8 @@ def commit_ngram_context(meta: PLEMetadata, context_pool: torch.Tensor,
     if meta.is_decode:
         nxt = torch.cat([meta.ngram_context[:, 1:], ids.view(-1, 1)], dim=1)
     else:
-        cu = meta.cu_seqlens
-        cand = cu[1:].unsqueeze(1) - ctx_len + steps
-        # a request shorter than the window keeps the old context's tail: token j of the new
-        # window sits at old column extend_len + j when it predates this forward
-        old = meta.ngram_context.gather(
-            1, ((cu[1:] - cu[:-1]).unsqueeze(1) + steps).clamp_(max=ctx_len - 1)
-        )
-        nxt = torch.where(cand >= cu[:-1].unsqueeze(1), ids[cand.clamp_min(0)], old)
+        nxt = ngram_context_after(meta, meta.cu_seqlens[1:] - 1,
+                                  torch.arange(len(meta.seq_lens), device=ids.device))
     context_pool.index_copy_(0, meta.state_slots, nxt.to(context_pool.dtype))
     if track is not None:
         rows, dst = track
@@ -370,7 +385,12 @@ class PLELayer(BaseOP):
             track = (prefill.track_boundary_row + batch.decode_size, prefill.track_dst)
             self._write_track_snapshot(states, x, *track)
         out = gated + self._short_conv(x, meta, states)
-        commit_ngram_context(meta, context_pool, track)
+        if meta.verify is None:
+            commit_ngram_context(meta, context_pool, track)
+        else:
+            rows = torch.arange(x.shape[0], device=x.device)
+            req = torch.searchsorted(meta.cu_seqlens, rows, right=True) - 1
+            pool.write_verify(PLE_NGRAM_STATE, None, meta.verify, ngram_context_after(meta, rows, req))
         return out
 
     def _write_track_snapshot(self, states: torch.Tensor, x: torch.Tensor, rows: torch.Tensor,
@@ -413,8 +433,14 @@ class PLELayer(BaseOP):
         history.index_copy_(1, state_index, state.permute(1, 0, 2).reshape(width, -1))
         history.index_copy_(1, out_index + self.state_len, x.transpose(0, 1).contiguous())
         out = F.conv1d(history.unsqueeze(0), self.conv1d.weight, groups=width, dilation=self.dilation).squeeze(0)
-        new_state = history.index_select(1, next_state_index).view(width, num_reqs, self.state_len)
-        states.index_copy_(0, meta.state_slots, new_state.permute(1, 0, 2).to(states.dtype).contiguous())
+        if meta.verify is None:
+            new_state = history.index_select(1, next_state_index).view(width, num_reqs, self.state_len)
+            states.index_copy_(0, meta.state_slots, new_state.permute(1, 0, 2).to(states.dtype).contiguous())
+        else:
+            # The history after each row: the state_len columns ending at its own input.
+            columns = out_index.unsqueeze(1) + 1 + torch.arange(self.state_len, device=x.device)
+            get_global_ctx().linear_state_pool.write_verify(
+                PLE_CONV_STATE, self.layer_id, meta.verify, history[:, columns].permute(1, 0, 2))
         return F.silu(out.index_select(1, out_index).transpose(0, 1))
 
     def _prefill_indices(self, lens: List[int], device: torch.device):
