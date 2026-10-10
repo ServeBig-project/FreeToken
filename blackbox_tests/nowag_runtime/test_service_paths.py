@@ -189,7 +189,8 @@ def test_busy_rebuild_is_refused_and_cancel_releases_requests():
             while get(server.url, "/v1/stats")["body"]["requests"]["active"] == 0:
                 assert not request.done() and time.monotonic() < deadline, "never observed an active request"
                 time.sleep(0.05)
-            result = post(server.url, "/v1/cache/rebuild", {"mode": "if_idle", "timeout": 0,
+            # a normal timeout: timeout 0 returns 504 before the scheduler's busy reply arrives
+            result = post(server.url, "/v1/cache/rebuild", {"mode": "if_idle", "timeout": 10,
                                                             "moe_cache_size": 3 * expert_count()})
             assert result["body"]["status"] == "busy", result
             cancelled = request.result(timeout=900)
