@@ -307,10 +307,10 @@ class CacheManager:
     def page_usage(self) -> tuple[int, int]:
         """(used_pages, total_pages): allocated, non-evictable pages over the pool total
         (active requests + protected prefix; evictable prefix-cache pages are excluded)."""
-        used = self.num_pages - len(self.free_slots) - self._evictable("kv") // self.page_size
-        if self.page_units is not None:  # the page count is address space, not memory
-            return used, used + self.available_size // self.page_size
-        return used, self.num_pages
+        if self.page_units is not None:  # page ids are address space; memory is in the runtime
+            return 0, 0
+        total = self.num_pages
+        return total - len(self.free_slots) - self._evictable("kv") // self.page_size, total
 
     def _evictable(self, kind: str) -> int:
         return self.tree.evictable[kind] if self.tree is not None else 0

@@ -7,6 +7,8 @@ from freetoken.core import Batch, get_global_ctx
 from .graph import GraphCaptureBuffer, _LayerRangeCapture
 from .model_forward import forward_model
 
+MAX_BATCH = 32  # the largest batch SD graphs are captured for
+
 
 class SpeculativeGraphs:
     def __init__(self, runner, model, config, max_seq_len: int, vocab_size: int):
@@ -21,7 +23,8 @@ class SpeculativeGraphs:
         self._prepared_range_batch = None
         self.verify_sizes: dict[int, list[int]] = {}  # captured verify token counts per batch size
         # Every running batch size gets SD graphs; AR keeps its own sparser set.
-        self.batch_sizes = list(range(1, min(runner.graph_bs_limit, config.max_running_req, 32) + 1))
+        self.batch_sizes = list(range(1, min(runner.graph_bs_limit, config.max_running_req,
+                                             MAX_BATCH) + 1))
         self.attention = runner.attn_backend.create_speculative_graphs(max_seq_len, self.batch_sizes[-1])
         ctx = get_global_ctx()
         kv = ctx.kv_cache

@@ -237,6 +237,8 @@ class DFlashContext:
             window = self.window_views() if self.pool is not None else []
             out.update(full_context_bytes=runtime.held_bytes(self.paged_views()),
                        window_context_bytes=runtime.held_bytes(window))
+            if layout.window_layers:  # its free window slots are a host list
+                out["metadata_bytes"] -= 8 * layout.window_capacity(pages)
         out.update(compact_kv=bool(self.engine.config.dflash_compact_kv),
                    attention_window=self.engine.config.dflash_attention_window,
                    window_tokens=self.window,

@@ -1,6 +1,6 @@
 # 共享 runtime 池与请求暂停恢复设计
 
-状态：PR #9 正在做生产收尾与独立黑盒验收，实现基线为 DFlash 合入后的 `main@732f1ee`。本轮 TP、多模态验收按用户决定暂缓；不据此宣称全部交付范围已完成。独立验收结果见 `test/runtime-pool` 分支的 `docs/runtime-pool-blackbox-report.md`。
+状态：PR #9 已补生产修复与单卡服务验收；当前结果、实际版本及尚未归因的 Graph 启动 OOM 见[收尾报告](runtime-pool-closeout.md)。基线为 `main@732f1ee`。TP、多模态验收按用户决定暂缓，不作为本轮补验前置，也不计为已通过。
 工作树：`.worktrees/runtime-pool`，分支 `feat/runtime-pool`。
 
 ## 1. 目标和已确认边界
@@ -134,7 +134,7 @@ C是可执行的容量上限，不是推荐的最快batch。运行时不把runti
 
 ### 执行余量必须保证已准入工作可完成
 
-已有真实trace在layered＋DFlash的后续prefill发生运行期OOM；特征预估已经存在，完整峰值根因尚未隔离。原`PrefillMemoryBudget`的历史测量和“至少一个配置tile”兜底不是容量保证。共享模式按同时存活的波次状态、GDN临时结果、草稿／验证缓冲和Graph padding计峰值；放不下配置tile就缩小实际tile／波次，不能强行放行或OOM后重试。
+历史真实trace在layered＋DFlash的后续prefill发生运行期OOM。本轮确认共享模式不能将启动实测tile容量外推成更大的保留波次；已按实测容量限制波次，并完成原58请求，详见[收尾报告](runtime-pool-closeout.md)。原`PrefillMemoryBudget`的历史测量和“至少一个配置tile”兜底不是容量保证。共享模式按同时存活的波次状态、GDN临时结果、草稿／验证缓冲和Graph padding计峰值；放不下配置tile就缩小实际tile／波次，不能强行放行或OOM后重试。
 
 波次开启时取得到安全边界所需的R与E，后续decode／SD不能侵占；未完成状态不能因压力直接卸载。R内空物理块仍计入R，不自动变成PyTorch workspace；Graph捕获新增reserved量也不等于Graph全部占用。具体接入及已知负载见[实现交接第6节](runtime-pool-integration.md#6-实现agent必须完成的接入)。
 
