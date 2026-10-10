@@ -352,6 +352,10 @@ class PLELayer(BaseOP):
     def forward(self, R: torch.Tensor, batch: Batch) -> torch.Tensor:
         pool = get_global_ctx().linear_state_pool
         context_pool = pool.slot_state(PLE_NGRAM_STATE)
+        states = pool.slot_state(PLE_CONV_STATE, self.layer_id)
+        prefill = batch.fla_metadata.prefill
+        if prefill is not None:
+            prefill.keep_start(context_pool, states)
         meta = build_ple_metadata(batch, context_pool, self.args.ngram_boundary_token_id)
         embeddings = self.ple_embedding.forward(meta).to(R.dtype)
         key = self.norm_key.forward(self.key_proj.forward(embeddings))
@@ -361,9 +365,7 @@ class PLELayer(BaseOP):
         gate = (key.view(shape) * query.view(shape)).sum(-1, keepdim=True) / math.sqrt(self.hidden_size)
         gate = torch.sigmoid(gate.sign() * gate.abs().clamp_min(1e-6).sqrt())
         gated = (gate * value.unsqueeze(-2)).flatten(-2)
-        states = pool.slot_state(PLE_CONV_STATE, self.layer_id)
         x = self.norm_conv.forward(gated)
-        prefill = batch.fla_metadata.prefill
         track = None
         if prefill is not None and prefill.track_boundary_row is not None:
             # The boundary row indexes the prefill rows, which follow the decode rows here.
