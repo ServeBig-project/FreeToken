@@ -12,6 +12,12 @@ def fp32(value):
     return struct.unpack("f", struct.pack("f", value))[0]
 
 
+def bf16(value):
+    bits = struct.unpack("I", struct.pack("f", value))[0]
+    bits = (bits + 0x7FFF + ((bits >> 16) & 1)) & 0xFFFF0000
+    return struct.unpack("f", struct.pack("I", bits))[0]
+
+
 def exact(actual, expected, label):
     actual = actual.detach().cpu()
     if actual.shape != expected.shape or actual.dtype != expected.dtype:

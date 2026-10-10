@@ -1,0 +1,51 @@
+{
+  "phase": "I2 INT8 KV",
+  "device": "cpu",
+  "results": [
+    {
+      "name": "zero-vector",
+      "status": "passed",
+      "shape": [
+        256
+      ],
+      "encoding_and_scale": "exact",
+      "input_bytes": 512,
+      "stored_bytes": 258
+    },
+    {
+      "name": "rounding-boundaries-vector",
+      "status": "passed",
+      "shape": [
+        256
+      ],
+      "encoding_and_scale": "exact",
+      "input_bytes": 512,
+      "stored_bytes": 258
+    },
+    {
+      "name": "tokens-heads-final-bf16-scale",
+      "status": "passed",
+      "shape": [
+        3,
+        2,
+        256
+      ],
+      "encoding_and_scale": "exact",
+      "input_bytes": 3072,
+      "stored_bytes": 1548
+    },
+    {
+      "name": "multiple-prefix-dimensions",
+      "status": "passed",
+      "shape": [
+        2,
+        3,
+        2,
+        256
+      ],
+      "encoding_and_scale": "exact",
+      "input_bytes": 6144,
+      "stored_bytes": 3096
+    }
+  ]
+}

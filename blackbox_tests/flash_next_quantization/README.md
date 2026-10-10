@@ -27,3 +27,27 @@ python /absolute/path/to/test-worktree/blackbox_tests/flash_next_quantization/de
 
 Each runner prints JSON case results without production tracebacks and exits
 nonzero on failure. `--device cuda` is reserved for an authorized GPU window.
+
+## I2: INT8 KV
+
+`kv.py` compares exact INT8 encodings and stored BF16 scales. Its scalar reference
+rounds scale to BF16 by manipulating IEEE floating-point bits, then divides by
+that stored scale and rounds to the nearest even integer before clipping.
+All-zero vectors use scale 1. Acceptance is exact, with no numerical tolerance.
+
+Fixtures cover zero vectors, positive/negative ties and neighbors, token/head
+scale differences, and supported prefix dimensions ending in `head_dim=256`.
+The maximum-1.5 vector contains 0.75: its final BF16 scale produces code 63,
+distinguishing it from code 64 obtained using the unrounded scale.
+
+Candidate `8075e8d` passed all four CPU cases with CUDA hidden; see
+[the I2 CPU report](results-i2-8075e8d-cpu.json). Each 256-element BF16 vector
+uses 512 input bytes and 258 encoded bytes including its BF16 scale.
+
+Run CPU acceptance by replacing `dense.py` above with `kv.py`.
+`kv_tiered.py --device cuda` is a separately authorized GPU integration run:
+BF16 and actual quantized INT8 payloads use `Hq=24, Hkv=2, D=256`, mixed host/GPU
+residency, five queries, and eager/CUDA Graph execution. It reuses the existing
+independent selected-token attention reference with unchanged `atol=rtol=1/64`
+and exact tiered-versus-all-GPU comparison. It does not rerun the old I3 matrix.
+GPU integration is prepared but has not yet been executed.
