@@ -668,7 +668,7 @@ def parse_args(
         help=(
             "K/V cache encoding. auto keeps the attention pool's native format; int8 stores "
             "K and V as int8 with one BF16 scale per token and KV head (pools that implement "
-            "the codec only); bf16 forces the plain format."
+            "the codec only); bf16 forces the plain (unquantized) format in the model's dtype."
         ),
     )
 

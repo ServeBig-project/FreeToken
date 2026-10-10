@@ -35,6 +35,13 @@ def resolve_kv_dtype(option: str, pool_cls) -> str:
     return option
 
 
+def kv_storage_name(codec: str, dtype: torch.dtype) -> str:
+    """What the pool stores for ``codec``: int8, or the plain format in the model ``dtype``."""
+    if codec == "int8":
+        return codec
+    return {torch.bfloat16: "bf16", torch.float16: "fp16", torch.float32: "fp32"}[dtype]
+
+
 def quantize_kv_int8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """``x [..., head_dim]`` -> ``(q int8 [..., head_dim], scale bf16 [...])``."""
     amax = x.float().abs().amax(dim=-1)
