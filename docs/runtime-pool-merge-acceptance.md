@@ -8,14 +8,14 @@ review was read. The result reviewer does not start services or GPU work.
 
 | Stage | Source | Result | Evidence to review |
 |---|---|---|---|
-| J1–J6 | `f4647b2` | J1–J4: 10 passed; J5/J6 pending | [pytest log](/tmp/claude-1003/-home-nengneng-AIPrometheus-servebig-servebig-project/16c14e97-5fd3-4de1-a41f-67f277900f86/scratchpad/blackbox_j.log); [public artifacts](/home/nengneng/AIPrometheus/servebig/servebig-project/.worktrees/runtime-pool-blackbox/blackbox_tests/runtime_pool/_results) |
+| J1–J6 | `f4647b2` | 14 passed in 2217.84 s; no skipped cases | [pytest log](/tmp/claude-1003/-home-nengneng-AIPrometheus-servebig-servebig-project/16c14e97-5fd3-4de1-a41f-67f277900f86/scratchpad/blackbox_j.log); [public artifacts](/home/nengneng/AIPrometheus/servebig/servebig-project/.worktrees/runtime-pool-blackbox/blackbox_tests/runtime_pool/_results) |
 | Original 58-request trace | `17bbe02` | Pending | [trace artifacts](/data2/servebig-envs/runtime_pool_closeout_20261009/merge-final-trace) |
 | Joint idle maintenance | `17bbe02` | Pending | [maintenance artifacts](/data2/servebig-envs/runtime_pool_closeout_20261009/joint-rebuild-final); [driver](../blackbox_tests/runtime_pool/test_service_joint_rebuild.py) |
 
 Results from different source revisions remain attributed separately. Pending
 stages do not establish acceptance of the final revision.
 
-## Completed J1–J4 evidence
+## Completed J1–J6 evidence
 
 | Group | Public result |
 |---|---|
@@ -23,15 +23,21 @@ stages do not establish acceptance of the final revision.
 | J2: tight DFlash | 0.5 GiB; requested concurrency 6, published effective limit 2. Both submitted requests complete with 256 output tokens each. SD performs 12 verification rounds and accepts 8 draft tokens; Graph executes. |
 | J3: context 64 | Published context 64; three 32-token outputs and a subsequent 16-token output pass. The overlength prompt receives the asserted 4xx `context_length_exceeded` error; later service remains usable. |
 | J4: automatic concurrency | Two bursts each submit 98 requests, before and after successful runtime maintenance from 6 to 7 GiB. Published concurrency stays 98; each request completes with 64 output tokens (12544 total). Both bursts have observed output overlap 4, which does not establish a simultaneous batch of 98. |
+| J5: DFlash without Graph | 0.5 GiB, derived concurrency 2; both requests complete with 256 output tokens each. SD performs 10 verification rounds and accepts 9 draft tokens. Graph remains disabled with zero replays; runtime and 2048 experts are unchanged; service finishes idle. |
+| J6: startup errors | Both configurations fail before ready for the expected public reason: shared runtime with `joint` batching is refused with `layered-pipeline` / `legacy` alternatives; an 8-token prefill limit is refused as smaller than a 16-token page. Neither result is a substituted failure or an unreachable-case skip. |
 
 J4 uses temperature 0.8, top-p 0.95 and top-k 20, with nominal 100-token
-prompts (reported range 92–101). J1/J2/J4 stream summaries have no errors,
+prompts (reported range 92–101). J1/J2/J4/J5 stream summaries have no errors,
 missing completion markers or usage-sum discrepancies; their token sums match
 final public request statistics. Their sampled runtime usage remains within
-budget. All four groups retain 2048 experts, finish idle and serving, and report
+budget. J1–J4 retain 2048 experts, finish idle and serving, and report
 Graph execution; J4's final snapshot reports 126 target-decode replays after
 maintenance. Evidence: group `ready`/`final` JSON and
 [observations.jsonl](/home/nengneng/AIPrometheus/servebig/servebig-project/.worktrees/runtime-pool-blackbox/blackbox_tests/runtime_pool/_results/observations.jsonl).
+
+J6's actual error messages were independently read in
+[joint startup output](/home/nengneng/AIPrometheus/servebig/servebig-project/.worktrees/runtime-pool-blackbox/blackbox_tests/runtime_pool/_results/j6_joint.log)
+and [sub-page prefill startup output](/home/nengneng/AIPrometheus/servebig/servebig-project/.worktrees/runtime-pool-blackbox/blackbox_tests/runtime_pool/_results/j6_subpage_prefill.log).
 
 ## Fixed public configuration
 
@@ -61,7 +67,6 @@ successful rebuild. The driver repeats this calculation against live geometry.
 
 ## Final evidence still required
 
-- J5/J6: final test counts, public failures and any missing cases.
 - Trace: request identity and unchanged input/output limits; all completions,
   errors, finish reasons and usage; actual Graph/SD execution; unchanged
   expert/runtime budgets and configured concurrency.
