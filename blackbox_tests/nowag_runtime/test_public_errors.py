@@ -97,12 +97,13 @@ def test_model_without_experts(qwen_side):
                     ["--model", dense, "--nowag-expert-path", qwen_side], gpu)
 
 
-def test_zero_expert_capacity(qwen_side):
-    """A cache that cannot hold a single expert cannot run any routed token."""
+def test_capacity_below_public_minimum(qwen_side):
+    """--moe-cache-size 0 means auto-size (existing CLI); an illegal capacity is a positive
+    count below the minimum, which is at least one layer's experts for every policy."""
     gpu = need_gpu()
-    args = qwen_args(qwen_side)
-    args[args.index("--moe-cache-size") + 1] = "0"
-    expect_rejected("err_zero_capacity", args, gpu)
+    args = qwen_args(qwen_side, "--batching-policy", "legacy")
+    args[args.index("--moe-cache-size") + 1] = "1"
+    expect_rejected("err_capacity_below_minimum", args, gpu)
 
 
 def test_cpu_experts_with_speculation_rejected(qwen_side):
