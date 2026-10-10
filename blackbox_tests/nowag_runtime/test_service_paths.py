@@ -133,24 +133,36 @@ def test_existing_self_sd_controls(control):
         check_sd_observed(server, before)
 
 
-@pytest.mark.parametrize("kind,phase,backend", [("self", "outwave", "offload"),
-                                               ("self", "inwave", "hybrid"),
-                                               ("dflash", "all", "hybrid")])
-def test_layered_sd_phases(kind, phase, backend):
+@pytest.mark.parametrize("phase,backend", [("outwave", "offload"), ("inwave", "hybrid")])
+def test_layered_sd_phases(phase, backend):
     gpu = need_gpu()
     reference = offload_reference()
     # SD CUDA Graph needs FlashInfer attention; with triton,fi the public rule is eager SD
     options = ["--batching-policy", "layered-pipeline", "--attention-backend", "triton,fi",
                "--speculative-num-steps", 4, "--speculative-phase", phase, "--cuda-graph-max-bs", 0]
-    if kind == "dflash":
-        options += ["--speculative-draft-model-path", need_path(DFLASH_DRAFT, "Qwen3.6 DFlash"),
-                    "--page-size", 1, "--enable-gdn-replayssm", "--gdn-state-budget-bytes", 3000000000]
-    with Server(f"layered_sd_{kind}_{phase}_{backend}", qwen(*options, backend=backend), gpu) as server:
+    with Server(f"layered_sd_self_{phase}_{backend}", qwen(*options, backend=backend), gpu) as server:
         before = get(server.url, "/v1/stats")["body"]
         cross_path(reference, run_prompts(server), phase)
         mixed_load(server)
         check_sd_observed(server, before)
         assert get(server.url, "/v1/stats")["body"]["execution"]["effective"]["batching_policy"] == "layered-pipeline"
+
+
+def test_dflash_phase_all_hybrid():
+    """DFlash accepts only fi attention while layered-pipeline needs Triton prefill, so phase
+    "all" is covered with the legal legacy policy."""
+    gpu = need_gpu()
+    reference = offload_reference()
+    options = ["--batching-policy", "legacy", "--attention-backend", "fi", "--page-size", 1,
+               "--speculative-num-steps", 4, "--speculative-phase", "all",
+               "--speculative-draft-model-path", need_path(DFLASH_DRAFT, "Qwen3.6 DFlash"),
+               "--enable-gdn-replayssm", "--gdn-state-budget-bytes", 3000000000]
+    with Server("dflash_all_hybrid", qwen(*options, backend="hybrid"), gpu) as server:
+        before = get(server.url, "/v1/stats")["body"]
+        cross_path(reference, run_prompts(server), "dflash all")
+        mixed_load(server)
+        check_sd_observed(server, before)
+        assert get(server.url, "/v1/stats")["body"]["execution"]["effective"]["batching_policy"] == "legacy"
 
 
 def test_layered_sd_with_graph_and_triton_attention_rejected():
