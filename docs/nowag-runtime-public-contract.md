@@ -18,6 +18,8 @@ ft serve --model DEST --moe-backend offload ...
 
 Python 使用现有 `freetoken.llm.LLM` 的相应参数；HTTP 继续沿用现有服务 API。省略 NoWAG 路径且加载非 NoWAG checkpoint 时保持原行为。重命名有效目录不改变解析结果；FTW 源目录隔离后仍可独立运行。
 
+BASE也可为本项目已有FTW。显式SIDE决定路由专家投影来源，不能被BASE保存的专家覆盖；非专家和模型必需bias仍来自BASE自身。无SIDE时按FTW自身的格式与权重加载。适用于已有专家bank和全驻普通weight布局；不能因替换专家而忽略未知或不匹配的非专家权重。
+
 本轮目标格式为专家共用一个 codebook、BF16激活／codebook／normalizer、12-bit assignment，D=4或6。量化位宽由权重元数据决定；不得偷偷改精度、重新训练或把所有专家展开成 BF16。
 
 `--moe-backend fused` 全驻 GPU，`offload` 按需搬运，`cpu` CPU decode＋GPU prefill，`hybrid` CPU/GPU 合作，已有 CPU 层配置继续可用。各模式只在模型及公共组件支持时组合；显式配置在 ready 前得到实际能力检查。
@@ -108,6 +110,8 @@ method.run(x, expert_rows, route_weights, banks, shared, workspace=..., out=...)
 
 保留流式／非流式、stop／EOS／max_tokens、usage、温度与采样、取消、cache_group和多轮会话语义。正常 stop、长度截断与错误必须正确区分。
 
+确定性HTTP对照显式设置 `temperature=0, top_p=1`，避免继承模型采样默认值；流式／非流式比较使用独立冷cache_group并核对usage。温度采样另测，不能通过改变用户显式采样参数或放宽文本／数值阈值消除失败。
+
 `/v1/cache/status`在原有geometry中增加 `experts`，含 `format`、`format_parameters` 和 `ranks`。NoWAG的 `format_parameters`包含 `d`、`assignment_bits`，由格式模块提供，公共状态层只转发。每个rank记录 `rank`、`device`、`compute_backend`、`kernel_backend`、`storage_mode`、`expert_host_bytes`、`expert_device_bytes`、`shared_host_bytes`、`shared_device_bytes`、`workspace_device_bytes`；按实际存储计量，不把共享codebook重复算进每个专家。多种kernel时 `kernel_backend`为实际已绑定名称的列表。
 
 Graph与SD的实际执行继续由既有配置、Graph／speculative统计和独立profiler证据判定；仅发布“支持”不证明本轮使用。上述状态在初始化／重建后更新，读取状态不改变执行。不要求逐token日志或新性能分析服务。
@@ -138,7 +142,7 @@ Graph与SD的实际执行继续由既有配置、Graph／speculative统计和独
 
 ## 8. 尚需协调者提供的材料
 
-设计阶段尚未提供本轮实现，因此下列运行材料不是已完成项：
+以下运行材料由协调者按受测版本提供；材料已准备不代表对应验收已通过：
 
 - 每phase实现commit、公开入口的可运行环境；接口与字段以上文为准，若需改变须同步契约并说明影响。
 - 合法独立小模型参考、真实NoWAG产物、DFlash配对权重、可复现运行环境。

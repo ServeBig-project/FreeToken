@@ -86,6 +86,8 @@ FTW新增的NoWAG数据使用现有tensor存储和metadata机制：`quant_format
 
 NoWAG FTW存全局编码，不存转换时的TP局部切片；运行时按目标TP生成layout。`BASE`配置／tokenizer／非专家权重一并保留，源NoWAG绝对路径只可作来源说明，不能成为加载依赖。
 
+模型的 `load_expert_biases.bank_names` 声明必要bias组；FTW在TP分片及rank1省略down bias之前检查全局bank完整性。显式SIDE优先于BASE FTW保存的专家格式／bank，BASE仅供非专家与模型必需bias。普通weight式FTW通过现有专家参数名过滤被替换专家，未知条目继续参与严格权重检查。GPT-OSS模型hook读取BASE自身的普通weight、MXFP4 bank或NoWAG bank，不回读来源目录；未显式指定SIDE时保持原FTW加载。
+
 状态接口固定见公开契约。状态里的物理字节来自实际分配，不能把逻辑压缩率换算值当实际显存；多rank分别报告，不能用某rank乘TP假定所有rank相同。
 
 ## 7. 判断边界是否成立的实际变化

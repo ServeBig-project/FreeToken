@@ -1,42 +1,56 @@
 # NoWAG 在线接入验收
 
-状态：进行中，未达到可交付标准。当前生产 `982d6aa`（含共享runtime合并 `c3771c0`），独立黑盒 `54db439`；[PR #11](https://github.com/ServeBig-project/FreeToken/pull/11)。以下运行结果按各自版本记录。
+状态：**交接中，尚未达到可交付标准**。2026-10-10，最新生产 `fd59354`，独立黑盒 `9f03cf4`；[PR #11](https://github.com/ServeBig-project/FreeToken/pull/11)。受测版本按下表记录，旧结果不冒充最新提交的完整验收。[接手入口与审计处理](nowag-runtime-handoff.md)。
 
-## 当前结论
+## 已有证据
 
-- 审计后的四批生产修复已提交，工作树与远程已同步。生产实现者没有读写测试；黑盒作者只收到公开契约、公开权重和运行环境。
-- native C++、sm89 CUDA和wheel构建通过。wheel包含在线CUDA源、CPU头文件和实测profile，未带入已删除的实验kernel。运行目标为 `freetoken:555efd8` Docker、Torch 2.11.0+cu130、CUDA 13；该容器编译的扩展不能直接用于glibc较旧的宿主机。
-- 首个GPU段（生产 `0d20e8d`、测试 `4f96f55`）23项通过：Qwen真权重的T=1/4/7/16、空间查询、层0，以及在该几何上的DSV4舍入／路由位置、SwiGLU-OAI与tanh-GELU数学。组件数学通过不代表对应真实模型服务通过。
-- 第24项加载末层bank时资源OOM：测试进程占1.23 GiB，外部进程同时占22.16 GiB，剩余58.75 MiB不足分配66 MiB。已首错退出；本段不提供性能结论，未放宽容差或修改实现。
-- 既有CPU定向回归35通过、3跳过；4个内部配置桩缺少真实配置字段，待独立公开启动检查通过后替代，不为旧桩增加生产兼容。
-- 既有模型、CPU层配置与MoE基准入口回归45通过、8跳过；两项最初因CPU容器缺少驱动库失败，使用 `NVIDIA_VISIBLE_DEVICES=none` 挂载库但不暴露GPU后复验通过。没有因此修改生产代码。
-- 合入公共修复后的调度／预算回归139通过，4个上述旧桩排除。最初17项Torch重复注册错误在基线相同；原因是容器无用户名导致默认编译缓存目录初始化中断，固定容器用户环境与缓存目录后通过。
-- `982d6aa` 修复同次缩小runtime、增大专家缓存的分配顺序：目标预算验证后，先释放将被替换的旧runtime；预算政策不变，GPU联合维护仍待独立验收。
+日志目录为 `/data2/servebig-envs/nowag_runtime_acceptance_20261009/`，下表文件名均相对此目录。
 
-## 尚未完成
+| 范围 | 结果与版本 | 证据 |
+| --- | --- | --- |
+| 构建 | native C++、sm89 CUDA、wheel通过；两项最新FTW修复为Python-only，最终wheel尚需刷新 | `build-native.log`、`build-cuda.log`、`build-wheel-current.log` |
+| Qwen真实权重组件 | 45通过：生产 `0d20e8d`／测试 `4f96f55` 首段23；生产 `c2612eb`／测试 `af773ad` 补齐22 | `components-qwen-real.log`、`components-qwen-remaining-gpu2.log` |
+| GPT-OSS带bias组件 | 独立随机小模型5通过，生产 `c2612eb`／测试 `af773ad`；不代表训练模型质量 | `components-gptoss-bias-gpu2.log` |
+| DSV4真实权重组件 | 5通过，同上版本 | `components-dsv4-real-gpu2.log` |
+| D4／布局／精确样本 | 20通过，同上版本 | `components-layouts-exact-gpu2.log` |
+| 旧CPU扩展公开错误 | 3通过；独立旧扩展环境验证cpu／hybrid／CPU层配置在载权重前明确要求重编译 | `stale-extension-errors-gpu1.log` |
+| Qwen服务后端 | fused／cpu／hybrid对offload参考3通过；生产 `5b28b26`、测试 `af773ad`。采样注意事项见下节 | `service-execution-modes-gpu1.log` |
+| 模型与CPU层配置回归 | 45通过、8跳过；模型、逐层CPU配置及MoE基准入口 | `cpu-public-regression.log`、`cpu-driver-recheck.log` |
+| 公共调度与预算回归 | 合入 `d912bbe` 后139通过，4个过时内部桩排除；独立公开错误3项通过后已移除这4项 | `cpu-runtime-integration-env-fixed.log` |
 
-| 验收部分 | 当前状态 |
-| --- | --- |
-| 单卡组件 | 首段23通过；末层、缓冲、并发流、Graph、D4／布局、真实DSV4及精确小样本待继续 |
-| 真实服务与资源 | Qwen3.6／DSV4的驻留、offload、cpu／hybrid、缓存边界与维护待运行 |
-| SD与Graph | self-SD／DFlash、实际回放与起草计数、尾批及控制项待运行 |
-| FTW | 往返、缺数据、重命名、隔离两份源目录后的运行待完成 |
-| TP2 | 真实双卡组件、合法小模型服务及FTW待资源安排；Qwen3.6／DSV4基座TP1限制保持 |
-| 回归与性能 | 非NoWAG、三个交错配对block、显存／搬运证据待完成；最终公共runtime基座仍需同步 |
-| GPT-OSS | 真实训练BASE缺失；独立随机小模型已生成并通过HF CPU重载／计算，可辨识三组bias遗漏，GPU／FTW待验，不计为训练模型质量 |
+GPU组件共 **75项通过**，包括D4/D6、两种assignment布局、数学族／bias、输出与workspace、缓存槽重映射／容量、空批与padding、独立流和实际CUDA Graph回放。不是完整服务／SD Graph通过。
 
-黑盒已准备309项：116项CPU／独立参考、193项GPU门控；准备数量不是通过数量。具体选择与环境变量见独立测试树的 `blackbox_tests/nowag_runtime/README.md`。
+首个GPU1段23项通过后因其他任务占22.16 GiB而OOM：本进程1.23 GiB，剩余58.75 MiB不足下一次66 MiB分配；缺项已在明确交接的GPU2窗口补齐。没有改变数值容差。CPU容器初始驱动库缺失、用户名缺失导致的Torch编译缓存错误分别通过环境修正解决，后一错误在共同基线同样复现，未因此改生产代码。
 
-## 运行材料
+## 尚未关闭的HTTP对照
 
-- 生产树：`.worktrees/nowag-runtime`；独立测试树：`.worktrees/nowag-runtime-blackbox`。
-- 配对基线：`.worktrees/nowag-runtime-baseline`，固定 `d912bbe`，与候选包含相同的公共runtime修复。旧 `e6f6d90` 留在 `research/nowag-runtime-baseline-e6f6d90` 引用。基线所需外部在线插件只加入基线的PYTHONPATH，候选使用自己的在线模块。
-- 原始日志、运行脚本、安装包：`/data2/servebig-envs/nowag_runtime_acceptance_20261009/`。首段为 `components-qwen-real.log`；构建为 `build-native.log`、`build-cuda.log`、`build-wheel.log`。
-- 临时生成权重：`/dev/shm/nowag-runtime-acceptance-20261009`，逐组生成／验收，不同时保留多份大模型FTW。
-- GPU使用与交接统一记录在根 `RESEARCH_PLAN.md`。用户已明确runtime-pool最高优先，后续只等Check明确交GPU2；不再尝试GPU1任务间隙。
+流式与非流式16-token结果不同；分离冷 `cache_group` 后仍复现。共同基线 `d912bbe`＋原外部NoWAG插件产生完全相同的两段差异文本。因此不能直接归为本轮NoWAG回归，也未宣称问题已解决。
+
+原请求只有 `temperature=0`，继承模型 `top_p=0.95`，在当前公共采样语义下未进入greedy分支；BF16最大logit并列时仍可能随机选择。独立作者提交 `9f03cf4`，只给这对请求显式补 `top_p=1`，保留冷缓存、usage和严格文本断言；**该控制尚未运行**，启动被GPU占用保护拒绝。
+
+证据：`service-qwen-http-gpu1.log`、`service-qwen-http-cold-control-gpu1.log`、`service-baseline-http-cold-control-gpu1.log`；公开请求与响应在 `logs/svc_http-stream-control.json`、`logs-baseline-http/svc_http-stream-control.json`。控制通过后，再由独立作者修正其他意图为greedy的默认请求并复验受影响对照；显式采样参数、温度采样与冻结容差保持不变。
+
+## 剩余交付项
+
+- Qwen3.6完整服务、缓存／状态／资源边界、CPU层分配、并发／取消、各batching路径、预取／D2D、固定池及共享池维护；DSV4真实服务。
+- `982d6aa` 联合缩小runtime／增大专家缓存，独立 `test_rebuild_shared_exchange.py` 已编写但未跑。
+- self-SD／DFlash及控制项、步数1/2/4/8、实际Graph／草稿计数和自然尾批。
+- FTW往返、缺数据、重命名、原目录不可见的容器运行；最新 `adc204f` 缺整组bias拒绝和 `fd59354` 显式SIDE覆盖FTW均待独立验收。现有套件尚缺GPT-OSS整组FTW bias缺失／TP后不可见缺失及新覆盖优先级用例。
+- 真实TP2组件、合法小模型服务与FTW；Qwen3.6／DSV4基座加载器仍TP1。真实训练GPT-OSS BASE仍缺，已有随机fixture只提供数学和加载证据。
+- 非NoWAG回归、相同输出工作量的三个交错性能对照、显存／搬运记录、最终清洁安装和P5生产整理。当前没有可用的性能交付结论。
+
+独立套件已集成：310项（116 CPU／reference、194 GPU门控），准备数量不是通过数量。测试选择与环境变量见 `blackbox_tests/nowag_runtime/README.md`。生产实现者没有读写测试；黑盒作者未读生产源码或实现笔记。
 
 ## 代码量
 
-审计后、合入后续公共修复之前，相对 `bf4acec`：生产+737／−1818，净−1081；之后联合重建修复 `982d6aa` 为+5／−3。生产agent测试改动0。前四阶段提交为 `d2491e6`（+29／−21）、`d10266c`（+138／−60）、`384f525`（+530／−1724）、`d060783`（+55／−28）；端点不重复计算中间修改。公共runtime合并另计+84／−53，不计入NoWAG实现差异。
+统计端点 `d912bbe..fd59354`：共同基线已含公共runtime修复、未含本轮NoWAG，避免把并行功能计入本实现。生成文件、第三方、文档和profile不计生产源码。
 
-相对已含共享runtime修复、未含本轮NoWAG的 `d912bbe`：生产+12412／−1335，净+11077，含项目自有在线kernel移入；实测profile JSON另计+1055。既有内部测试+336／−403；独立黑盒本次接手后另增+835／−63（含随机模型生成器），尚未集成，最终交付时重新核算。
+| 类别 | 增加 | 删除 | 净增 |
+| --- | ---: | ---: | ---: |
+| 生产源码 `python/`（排除JSON） | 12,473 | 1,339 | 11,134 |
+| 其中项目自有NoWAG kernel移入 | 10,872 | 0 | 10,872 |
+| 其余生产源码 | 1,601 | 1,339 | 262 |
+| 既有内部测试 | 334 | 425 | −91 |
+| 独立黑盒Python（含参考／输入生成器） | 3,272 | 0 | 3,272 |
+
+实测profile另计+1,055；构建配置+1/−1；benchmark+64/−33；黑盒README+226。项目自有旧kernel移入仍计FreeToken源码增加，不称为全新算法，也不按第三方剔除。分阶段修复的提交和代码量见[交接文档](nowag-runtime-handoff.md)。
