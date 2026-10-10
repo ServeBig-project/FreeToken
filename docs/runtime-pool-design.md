@@ -1,6 +1,6 @@
 # 共享 runtime 池与请求暂停恢复设计
 
-状态：PR #9 已补生产修复与单卡服务验收；当前结果、实际版本及尚未归因的 Graph 启动 OOM 见[收尾报告](runtime-pool-closeout.md)。基线为 `main@732f1ee`。TP、多模态验收按用户决定暂缓，不作为本轮补验前置，也不计为已通过。
+状态：本轮合并依据、实际验收版本和未完成项见[合并记录](runtime-pool-closeout.md)。实现基线为 `main@732f1ee`；用户已明确要求合并，TP、多模态验证暂缓，最终高预算重放与联合维护GPU验证尚未完成。
 工作树：`.worktrees/runtime-pool`，分支 `feat/runtime-pool`。
 
 ## 1. 目标和已确认边界
