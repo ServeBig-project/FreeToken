@@ -274,6 +274,8 @@ class QSASparseAttnBackend(BaseAttnBackend):
             self._plan_index_writes(md, batch)
         self._update_index_cache(index, md, layer_id, slot)
         indices = self._select(index, md, slot)
+        if self.kvcache.residency is not None:
+            return self._attend_tiered(q, indices, md, layer_id, slot)
         return qsa_sparse_paged_attention(
             q,
             self.kvcache.k_cache(layer_id),
@@ -285,6 +287,47 @@ class QSASparseAttnBackend(BaseAttnBackend):
             k_scale=self.kvcache.k_scale(layer_id),
             v_scale=self.kvcache.v_scale(layer_id),
         )
+
+    def _gather_rows(self, rows: int) -> int:
+        cache = self.kvcache.k_cache(next(iter(self._idx_slot)))
+        heads, dim = cache.shape[-2:]
+        scale = 2 if cache.dtype == torch.int8 else 0
+        per_row = 2 * self.select_width * heads * (dim * cache.element_size() + scale)
+        return max(1, min(rows, _LOGITS_WORKSPACE_BYTES // per_row))
+
+    def _gather_buffers(self, rows: int):
+        cache = self.kvcache.k_cache(next(iter(self._idx_slot)))
+        heads, dim = cache.shape[-2:]
+        k, v = (self._scratch(name, rows, self.select_width, heads, dim, dtype=cache.dtype)
+                for name in ("gather_k", "gather_v"))
+        ks = vs = None
+        if cache.dtype == torch.int8:
+            ks, vs = (self._scratch(name, rows, self.select_width, heads, dtype=torch.bfloat16)
+                      for name in ("gather_ks", "gather_vs"))
+        return k, v, ks, vs
+
+    def _attend_tiered(self, q, indices, md, layer_id, slot):
+        from freetoken.kernel.triton.qsa import qsa_sparse_paged_attention
+        from freetoken.kernel.triton.qsa.gather import gather_host_kv
+
+        residency = self.kvcache.residency
+        tile = self._gather_rows(q.shape[0])
+        buffers = self._gather_buffers(tile)
+        out = torch.empty_like(q)
+        for start in range(0, q.shape[0], tile):
+            end = min(start + tile, q.shape[0])
+            chunk = slice(start, end)
+            gathered = tuple(b[:end - start] if b is not None else None for b in buffers)
+            gather_host_kv(indices[chunk], md.block_table, md.token_to_req[chunk],
+                           residency.addresses, gathered, layer=slot,
+                           layers=len(self._idx_slot), page_size=self.page_size,
+                           counter=residency.read_bytes)
+            qsa_sparse_paged_attention(
+                q[chunk], self.kvcache.k_cache(layer_id), self.kvcache.v_cache(layer_id),
+                indices[chunk], md.block_table, md.token_to_req[chunk], out[chunk],
+                self.kvcache.k_scale(layer_id), self.kvcache.v_scale(layer_id),
+                gathered=gathered, resident=residency.gpu_flags)
+        return out
 
     def _plan_index_writes(self, md: QSASparseMetadata, batch: Batch) -> None:
         """Per-token slab row and pending row for this forward (layer-invariant). Pure device
@@ -442,6 +485,11 @@ class QSASparseAttnBackend(BaseAttnBackend):
         }
         if topk_scratch:
             self._graph["topk_scratch"] = empty(chunk, topk_scratch, dtype=torch.int32)
+        if self.kvcache.residency is not None:
+            for name, buf in zip(("gather_k", "gather_v", "gather_ks", "gather_vs"),
+                                 self._gather_buffers(self._gather_rows(max_bs))):
+                if buf is not None:
+                    self._graph[name] = buf
 
     def prepare_for_capture(self, batch: Batch) -> None:
         self.prepare_metadata(batch)

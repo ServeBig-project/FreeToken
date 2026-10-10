@@ -17,6 +17,11 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     v_cache_ptr,
     k_scale_ptr,
     v_scale_ptr,
+    resident_ptr,
+    gathered_k,
+    gathered_v,
+    gathered_ks,
+    gathered_vs,
     indices_ptr,
     block_table_ptr,
     token_to_req_ptr,
@@ -42,6 +47,7 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     num_rows,
     num_cache_blocks,
     num_requests,
+    resident_stride,
     TOPK: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     PAGE_TABLE_WIDTH: tl.constexpr,
@@ -53,6 +59,8 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     INT8: tl.constexpr,
+    TIERED: tl.constexpr,
+    KV_HEADS: tl.constexpr,
 ) -> None:
     # row * stride can overflow int32 for large row counts.
     row = tl.program_id(0).to(tl.int64)
@@ -108,34 +116,35 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         valid &= (physical_page >= 0) & (physical_page < num_cache_blocks)
         # physical_page * block stride can overflow int32 for large caches.
         safe_page = tl.maximum(physical_page, 0).to(tl.int64)
-        keys = tl.load(
-            k_cache_ptr
+        key_ptrs = (k_cache_ptr
             + safe_page[None, :] * stride_k_block
             + page_offset[None, :] * stride_k_token
             + kv_head * stride_k_head
-            + dim_offsets[:, None],
-            mask=valid[None, :],
-            other=0.0,
-        )
-        values = tl.load(
-            v_cache_ptr
+            + dim_offsets[:, None])
+        value_ptrs = (v_cache_ptr
             + safe_page[:, None] * stride_v_block
             + page_offset[:, None] * stride_v_token
             + kv_head * stride_v_head
-            + dim_offsets[None, :],
-            mask=valid[:, None],
-            other=0.0,
-        )
+            + dim_offsets[None, :])
+        if TIERED:
+            resident = tl.load(resident_ptr + safe_page * resident_stride, valid, other=1) != 0
+            scratch = ((row * TOPK + columns) * KV_HEADS + kv_head) * HEAD_DIM
+            key_ptrs = tl.where(resident[None, :], key_ptrs,
+                                gathered_k + scratch[None, :] + dim_offsets[:, None])
+            value_ptrs = tl.where(resident[:, None], value_ptrs,
+                                  gathered_v + scratch[:, None] + dim_offsets[None, :])
+        keys = tl.load(key_ptrs, valid[None, :], other=0.0)
+        values = tl.load(value_ptrs, valid[:, None], other=0.0)
         if INT8:
             # q * s per token and KV head, decoded to the query dtype before the dot
-            k_scale = tl.load(
-                k_scale_ptr + safe_page * stride_ks_block + page_offset * stride_ks_token + kv_head,
-                mask=valid, other=0.0,
-            ).to(tl.float32)
-            v_scale = tl.load(
-                v_scale_ptr + safe_page * stride_vs_block + page_offset * stride_vs_token + kv_head,
-                mask=valid, other=0.0,
-            ).to(tl.float32)
+            ks_ptrs = k_scale_ptr + safe_page * stride_ks_block + page_offset * stride_ks_token + kv_head
+            vs_ptrs = v_scale_ptr + safe_page * stride_vs_block + page_offset * stride_vs_token + kv_head
+            if TIERED:
+                offset = (row * TOPK + columns) * KV_HEADS + kv_head
+                ks_ptrs = tl.where(resident, ks_ptrs, gathered_ks + offset)
+                vs_ptrs = tl.where(resident, vs_ptrs, gathered_vs + offset)
+            k_scale = tl.load(ks_ptrs, valid, other=0.0).to(tl.float32)
+            v_scale = tl.load(vs_ptrs, valid, other=0.0).to(tl.float32)
             keys = (keys.to(tl.float32) * k_scale[None, :]).to(query.dtype)
             values = (values.to(tl.float32) * v_scale[:, None]).to(query.dtype)
         scores = tl.dot(query, keys)
@@ -253,6 +262,8 @@ def qsa_sparse_paged_attention(
     out: torch.Tensor | None = None,
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
+    gathered: tuple | None = None,
+    resident: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run sparse GQA directly over paged K/V caches: the query dtype, or int8 with per
     (token, head) ``k_scale``/``v_scale`` ``[pages, page_size, heads]`` (``quant.kv``)."""
@@ -334,6 +345,8 @@ def qsa_sparse_paged_attention(
         v_cache,
         k_scale,
         v_scale,
+        resident,
+        *(gathered if gathered is not None else (None, None, None, None)),
         logical_indices,
         block_table,
         token_to_req,
@@ -359,6 +372,7 @@ def qsa_sparse_paged_attention(
         q.shape[0],
         k_cache.shape[0],
         block_table.shape[0],
+        resident.stride(0) if resident is not None else 0,
         TOPK=logical_indices.shape[1],
         PAGE_SIZE=k_cache.shape[1],
         PAGE_TABLE_WIDTH=block_table.shape[1],
@@ -370,6 +384,8 @@ def qsa_sparse_paged_attention(
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         INT8=int8,
+        TIERED=gathered is not None,
+        KV_HEADS=k_cache.shape[2],
         num_warps=partial_warps,
         num_stages=2,
     )

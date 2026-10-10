@@ -103,6 +103,7 @@ def create_kv_pool(config, num_pages: int, device: torch.device, dtype: torch.dt
         dtype=dtype,
         num_req_slots=config.max_running_req + 1,  # + 1 for the dummy request row
         kv_dtype=getattr(config, "kv_dtype", "bf16"),
+        kv_placement=getattr(config, "kv_placement", "gpu"),
         runtime=runtime,
     )
 
@@ -116,6 +117,7 @@ def create_kvcache_pool(
     num_swa_tokens: int | None = None,
     num_req_slots: int | None = None,
     kv_dtype: str = "bf16",
+    kv_placement: str = "gpu",
     runtime=None,
 ) -> BaseKVCachePool:
     if model_config.has_swa_attention:
@@ -197,6 +199,7 @@ def create_kvcache_pool(
             num_req_slots=num_req_slots,
             layer_ids=spec.layer_ids,
             kv_dtype=kv_dtype,
+            kv_placement=kv_placement,
             runtime=runtime,
         )
 

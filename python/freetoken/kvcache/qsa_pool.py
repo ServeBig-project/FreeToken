@@ -31,6 +31,7 @@ _SCALE_DTYPE = torch.bfloat16
 
 class QSAKVCache(MHAKVCache):
     kv_codecs: ClassVar[tuple[str, ...]] = ("bf16", "int8")
+    kv_placements = ("gpu", "tiered")
 
     def __init__(
         self,
@@ -47,6 +48,7 @@ class QSAKVCache(MHAKVCache):
         num_req_slots: int,
         layer_ids: Sequence[int] | None = None,
         kv_dtype: str = "bf16",
+        kv_placement: str = "gpu",
         runtime=None,
     ) -> None:
         if index_ratio < 1 or page_size % index_ratio:
@@ -65,6 +67,8 @@ class QSAKVCache(MHAKVCache):
         self._index_dtype = dtype
         self._page_size = page_size
         self._int8 = kv_dtype == "int8"
+        self._tiered = kv_placement == "tiered"
+        self.residency = None
         super().__init__(
             num_kv_heads=num_kv_heads,
             num_layers=num_layers,
@@ -104,6 +108,7 @@ class QSAKVCache(MHAKVCache):
 
         from .runtime_pool import Units, banked
 
+        payload_banks = self.banks.copy()
         rows = self._page_size // self._index_ratio
         row_bytes = self._index_head_dim * self._index_dtype.itemsize
         # Scratch starts on its own physical block so history reclamation cannot unmap it.
@@ -113,7 +118,7 @@ class QSAKVCache(MHAKVCache):
             1, self._num_index_layers, self._cmp_scratch_base + self._num_req_slots,
             self._index_head_dim), self._index_dtype)
         self._cmp_k_buffer = slab[0]
-        self.banks += [(region, offset, stride * rows, length * rows)
+        index_banks = [(region, offset, stride * rows, length * rows)
                        for region, offset, stride, length in banks]
         scratch_bytes = self._num_req_slots * row_bytes
         self._index_scratch = Units([
@@ -124,7 +129,17 @@ class QSAKVCache(MHAKVCache):
         if self._int8:
             self._scale_buffer, scales = banked(
                 runtime, "kv_scale", self._kv_buffer.shape[:-1], _SCALE_DTYPE)
-            self.banks += scales
+            payload_banks += scales
+        if self._tiered:
+            from .residency import HostKV
+
+            if self.residency is None:
+                self.residency = HostKV(self, runtime, payload_banks)
+            else:
+                self.residency.rebuild(runtime, payload_banks)
+            self.banks = index_banks + self.residency.banks
+        else:
+            self.banks = payload_banks + index_banks
 
     def rebuild(self, num_pages: int, runtime=None) -> None:
         self._cmp_k_buffer = self._scale_buffer = None
@@ -138,11 +153,11 @@ class QSAKVCache(MHAKVCache):
             raise
 
     @classmethod
-    def runtime_banks(cls, config) -> list[tuple[int, int]]:
+    def _runtime_payload_banks(cls, config) -> list[tuple[int, int]]:
         from freetoken.utils import div_even
 
         banks = []
-        int8 = config.kv_dtype == "int8"
+        int8 = getattr(config, "kv_dtype", "bf16") == "int8"
         for spec in config.model_config.kv_cache_group_specs():
             heads = div_even(spec.num_kv_heads, config.tp_info.size, allow_replicate=True)
             cells = config.page_size * heads
@@ -150,9 +165,27 @@ class QSAKVCache(MHAKVCache):
                           * (1 if int8 else config.dtype.itemsize)))
             if int8:
                 banks.append((2 * spec.num_layers, cells * _SCALE_DTYPE.itemsize))
-            banks.append((spec.num_index_layers, config.page_size // spec.index_ratio
-                          * spec.index_head_dim * config.dtype.itemsize))
         return banks
+
+    @classmethod
+    def _runtime_index_banks(cls, config) -> list[tuple[int, int]]:
+        return [(spec.num_index_layers, config.page_size // spec.index_ratio
+                 * spec.index_head_dim * config.dtype.itemsize)
+                for spec in config.model_config.kv_cache_group_specs()]
+
+    @classmethod
+    def runtime_banks(cls, config) -> list[tuple[int, int]]:
+        specs = config.model_config.kv_cache_group_specs()
+        banks = cls._runtime_index_banks(config)
+        if getattr(config, "kv_placement", "gpu") == "tiered":
+            families = sum(s.num_layers for s in specs) * (2 if config.kv_dtype == "int8" else 1)
+            return banks + [(1, (families + 1) * 8)]
+        return cls._runtime_payload_banks(config) + banks
+
+    @classmethod
+    def runtime_write_banks(cls, config) -> list[tuple[int, int]]:
+        return (cls._runtime_payload_banks(config)
+                if getattr(config, "kv_placement", "gpu") == "tiered" else [])
 
     @classmethod
     def runtime_scratch_banks(cls, config) -> list[tuple[int, int]]:
@@ -161,27 +194,14 @@ class QSAKVCache(MHAKVCache):
 
     @classmethod
     def kv_cost(cls, config) -> tuple[int, int, int, int]:
-        from freetoken.attention import AttnType
-        from freetoken.utils import div_even
+        fixed = (config.max_running_req + 1) * sum(
+            banks * row for banks, row in cls.runtime_scratch_banks(config))
+        return cls.page_bytes(config), fixed, config.page_size, 0
 
-        from .base import spec_kv_bytes_per_token
-
-        per_token = fixed = 0
-        for spec in config.model_config.kv_cache_group_specs():
-            if spec.is_swa:
-                continue
-            if spec.attn_type is not AttnType.QSA:
-                per_token += spec_kv_bytes_per_token(spec, config)
-                continue
-            heads = div_even(spec.num_kv_heads, config.tp_info.size, allow_replicate=True)
-            if getattr(config, "kv_dtype", "bf16") == "int8":
-                kv = 2 * heads * (spec.head_dim + _SCALE_DTYPE.itemsize)
-            else:
-                kv = 2 * heads * spec.head_dim * config.dtype.itemsize
-            row = spec.index_head_dim * spec.num_index_layers * _INDEX_DTYPE_BYTES
-            per_token += kv * spec.num_layers + row // spec.index_ratio
-            fixed += (config.max_running_req + 1) * row
-        return per_token * config.page_size, fixed, config.page_size, 0
+    @classmethod
+    def page_bytes(cls, config) -> int:
+        return sum(banks * unit for banks, unit in
+                   cls._runtime_payload_banks(config) + cls._runtime_index_banks(config))
 
     def unit_bytes(self) -> tuple[int, int]:
         kv, swa = super().unit_bytes()
@@ -199,12 +219,25 @@ class QSAKVCache(MHAKVCache):
     def paged_views(self) -> list[torch.Tensor]:
         """K/V pages, the INT8 scales, and each page's compressed index rows (scratch rows
         excluded): a page copied without its index rows would score as all-zero blocks."""
+        return self.payload_views() + self.index_views()
+
+    def payload_views(self) -> list[torch.Tensor]:
         views = super().paged_views()
         if self._scale_buffer is not None:
             views += [self._scale_buffer[:, layer].movedim(1, 0)
                       for layer in range(self._scale_buffer.shape[1])]
-        views += [self.cmp_k_pages(slot) for slot in range(self._num_index_layers)]
         return views
+
+    def index_views(self) -> list[torch.Tensor]:
+        return [self.cmp_k_pages(slot) for slot in range(self._num_index_layers)]
+
+    def prefix_components(self):
+        from .prefix_store import Component
+
+        if self.residency is None:
+            return [Component("paged_kv", "paged", self.paged_views)]
+        return [Component("paged_kv", "paged", self.payload_views, self.residency),
+                Component("qsa_index", "paged", self.index_views)]
 
     def store_kv(self, k: torch.Tensor, v: torch.Tensor, out_loc: torch.Tensor, layer_id: int) -> None:
         if not self._int8:

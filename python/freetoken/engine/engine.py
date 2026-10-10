@@ -331,6 +331,7 @@ class Engine:
             speculative_phase=config.speculative_phase,
             dense_quant=config.dense_quantization,
             kv_dtype=config.kv_dtype,
+            kv_placement=config.kv_placement,
         )
         self.execution_fallbacks = _adjust_config(config)
         torch.manual_seed(42)
@@ -615,6 +616,7 @@ class Engine:
             pages=self._pool_cls.runtime_banks(config) + (draft.page_banks() if draft else []),
             windows=draft.window_banks() if draft else [],
             scratch=self._pool_cls.runtime_scratch_banks(config),
+            writable=self._pool_cls.runtime_write_banks(config),
             states=state_banks(config), rows=record_banks(config))
 
     def _runtime_page_bytes(self, config: EngineConfig) -> int:
@@ -649,10 +651,17 @@ class Engine:
         fixed_requests = prior.get("max_running_requests", 1)
         alone = lambda length: layout.blocks(
             pages=up(length + 1, ps) + 1, windows=1 + min(length + 1, window),
-            states=2 + checkpoint, rows=1, scratch=fixed_requests + 1) <= total
+            states=2 + checkpoint, rows=1, scratch=fixed_requests + 1, writable=0
+        ) + layout.blocks_at("writable", (0, up(length + 1, ps))) <= total
         asked = prior.get("requested_context_tokens", config.max_seq_len_override)
         model_max = prior.get("model_context_tokens", config.max_seq_len)
-        context = largest(alone, model_max if asked is None else asked)
+        high = model_max if asked is None else asked
+        if layout.unit_bytes("writable"):
+            # Complete host history includes the prefix index copy and a recurrent snapshot.
+            host_bytes = int(config.prefix_cache_host_gib * (1 << 30))
+            page_bytes = self._pool_cls.page_bytes(config)
+            high = min(high, max(0, (host_bytes - layout.unit_bytes("states")) // page_bytes * ps - 1))
+        context = largest(alone, high)
         if context < 1 or (asked is not None and context < asked):
             raise ValueError(f"{mem_GB(budget)} of runtime holds one request of {context} "
                              f"tokens; {asked or 1} are required")
@@ -667,7 +676,7 @@ class Engine:
                                + _graph_rows(config, c) * (4 * vocab + 4 * width))
         resource = largest(lambda c: layout.blocks(
             pages=c + 1, windows=1 + c * window, states=c + 1, rows=c,
-            scratch=c + 1) <= total
+            scratch=c + 1, writable=c + 1) <= total
             and executing(c) <= execution, _MAX_AUTO_RUNNING)
         requested = prior.get("requested_running_requests", config.max_running_req)
         effective = resource if requested is None else min(requested, resource)
@@ -696,6 +705,9 @@ class Engine:
         draft = self.dflash.context.page_banks if self.dflash is not None else []
         self.page_units = Units(self.kv_cache.banks + draft)
         self.page_units.pin([0])  # the dummy page, and every layer view's base
+        residency = getattr(self.kv_cache, "residency", None)
+        if residency is not None:
+            residency.initialize_dummy()
 
     def _map_capture_scratch(self, config: EngineConfig, mapped: bool) -> None:
         """SD graph capture writes scratch K/V at the first positions; map them while it runs."""
@@ -1588,6 +1600,7 @@ class Engine:
                 batching_policy=getattr(config, "batching_policy", "legacy"),
                 dense_quant=effective_dense_precision(config.model_config),
                 kv_dtype=config.kv_dtype,
+                kv_placement=config.kv_placement,
                 drafter=("dflash" if config.speculative_draft_model_path else "self") if steps else None,
                 speculative_num_steps=steps,
                 speculative_phase=(config.speculative_phase if layered else "outwave") if steps else None,
@@ -2447,6 +2460,15 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
     )
     override("kv_dtype", resolve_kv_dtype(getattr(config, "kv_dtype", "auto"),
                                           resolve_pool_class(model_config)))
+    placement = getattr(config, "kv_placement", "gpu")
+    pool_cls = resolve_pool_class(model_config)
+    if placement not in pool_cls.kv_placements:
+        raise ValueError(f"{pool_cls.__name__} does not support --kv-placement {placement}")
+    if placement == "tiered" and (
+        (config.runtime_cache_gib or 0) <= 0 or config.prefix_cache_host_gib <= 0
+    ):
+        raise ValueError("--kv-placement tiered requires --runtime-cache-gib and "
+                         "--prefix-cache-host-gib greater than zero")
 
     if config.speculative_num_steps == 0:
         override("speculative_draft_model_path", None)

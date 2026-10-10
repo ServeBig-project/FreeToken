@@ -33,7 +33,8 @@ def build_components(kv_pool, state_pool, draft_kv, *, window_pool, window: bool
                              f"{type(pool).__name__} ({method}); this cache layout has none")
         return None
 
-    paged = [comp(kv_pool, "paged_views", "paged_kv", "paged")]
+    paged = (kv_pool.prefix_components() if hasattr(kv_pool, "prefix_components")
+             else [comp(kv_pool, "paged_views", "paged_kv", "paged")])
     if draft_kv is not None and draft_kv.paged_views():
         paged.append(comp(draft_kv, "paged_views", "draft_kv", "paged"))
     out = {"paged": [c for c in paged if c is not None], "window": None, "state": None}
@@ -85,7 +86,8 @@ class HostTier:
             plan = tree.plan_backup(node)
             if plan is None:
                 continue
-            need = (sum(units for _, units in plan.kv) * sum(c.unit_bytes() for c in self.comps["paged"])
+            need = (sum(self._backup_bytes(c, units_of(n.value, self.m.page_size))
+                        for n, _ in plan.kv for c in self.comps["paged"])
                     + (sum(units for _, units in plan.window) * self.comps["window"].unit_bytes()
                        if plan.window else 0)
                     + (self.comps["state"].unit_bytes() if plan.state else 0))
@@ -97,13 +99,15 @@ class HostTier:
             if window_tokens is None:
                 tree.abandon(plan)  # restores come first: skip this optional copy
                 continue
-            kv = [self._copies(self.comps["paged"], units) for _, units in plan.kv]
+            kv = [self._copies(self.comps["paged"], units, units_of(n.value, self.m.page_size))
+                  for n, units in plan.kv]
             win = [self._copies([self.comps["window"]], units) for _, units in plan.window]
             st = self._copies([self.comps["state"]], 1) if plan.state else []
             if None in (*kv, *win, st):
                 for copies in (*kv, *win, st):
                     for c in copies or ():
                         c.release()
+                self._discard_unqueued()
                 self.window_inflight -= window_tokens
                 tree.abandon(plan)
                 continue
@@ -126,23 +130,71 @@ class HostTier:
                     w, lambda: tree.finish_backup(plan, kv, win, st if plan.state else None)),
                 keep)
 
-    def _copies(self, comps, units) -> list | None:
+    @staticmethod
+    def _backup_bytes(comp, indices) -> int:
+        return (comp.residency.missing_bytes(comp, indices) if comp.residency is not None
+                else len(indices) * comp.unit_bytes())
+
+    def _copies(self, comps, units, indices=None) -> list | None:
         """Host copies of ``units`` units for each component, freeing host data if needed."""
         out = []
         for comp in comps:
+            if indices is not None and comp.residency is not None:
+                def allocate(n):
+                    copies = self._copies([comp], n)
+                    return copies[0] if copies else None
+                copy = comp.residency.backup(comp, indices, allocate)
+                if copy is None:
+                    for c in out:
+                        c.release()
+                    return None
+                out.append(copy)
+                continue
             copy = HostCopy(self.store, comp, units)
             if copy.where is None and self.m.tree is not None:
+                self.m.tree.evict_host(lambda n=copy.nbytes: self.store.fits(n))
+                self.m._release(self.m.tree.take_released())
+                copy = HostCopy(self.store, comp, units)
+            # Cold logical pages can still hold the sole host payload after their tree
+            # backup was evicted. Reclaim them through the same cold-cache policy.
+            while copy.where is None and self.m.residency is not None and self.m._evict_any(
+                    self.m.page_size):
+                self.m.residency.poll(wait=True)
                 self.m.tree.evict_host(lambda n=copy.nbytes: self.store.fits(n))
                 self.m._release(self.m.tree.take_released())
                 copy = HostCopy(self.store, comp, units)
             if copy.where is None:
                 for c in out:
                     c.release()
+                self._discard_unqueued()
                 return None
             self.host_bytes[comp.name] += copy.nbytes
             copy.on_free = lambda c=copy: self._freed(c)
             out.append(copy)
         return out
+
+    def _discard_unqueued(self) -> None:
+        for comp in self.comps["paged"]:
+            if comp.residency is not None:
+                comp.residency.discard_unqueued()
+
+    def backup_active(self, indices) -> None:
+        """Completed private pages share the same store and copy queue as public prefixes."""
+        if self.transfer.backup_full:
+            return
+        for comp in self.comps["paged"]:
+            residency = comp.residency
+            if residency is None:
+                continue
+            residency.immutable.update(int(p) for p in indices)
+            missing = torch.tensor([int(p) for p in indices if int(p) not in residency.backups],
+                                   dtype=torch.int64)
+            if not len(missing):
+                continue
+            copies = self._copies([comp], len(missing), missing)
+            if copies is not None:
+                self.transfer.submit("d2h", self._tasks([(comp, missing)], copies),
+                                     lambda copies=copies: [c.release() for c in copies])
 
     def _freed(self, copy: HostCopy) -> None:
         self.host_bytes[copy.comp.name] -= copy.nbytes
@@ -180,7 +232,8 @@ class HostTier:
 
         if m.page_units is not None:  # one claim: pages, window slots and the state
             got = m.claim(tokens // ps, states=int(plan.state),
-                          window=(lambda t: torch.cat(split(t)[1])) if plan.window else None)
+                          window=(lambda t: torch.cat(split(t)[1])) if plan.window else None,
+                          payload_pages=0 if m.residency is not None else None)
             if got is None:
                 self.window_inflight -= window_tokens
                 tree.abandon(plan)
@@ -227,10 +280,11 @@ class HostTier:
         Cold prefix data may be evicted for them; they are never evicted for prefixes."""
         copies = []
         for comp, idx in units:
-            got = self._copies([comp], len(idx))
+            got = self._copies([comp], len(idx), idx)
             if got is None:
                 for c in copies:
                     c.release()
+                self._discard_unqueued()
                 return None
             copies.append(got[0])
         self.window_inflight += window_tokens

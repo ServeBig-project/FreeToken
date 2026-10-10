@@ -339,6 +339,13 @@ class RuntimeLayout:
         return sum(banks * -(-counts[kind] * unit // g)
                    for kind, parts in self.kinds.items() for banks, unit in parts)
 
+    def blocks_at(self, kind: str, ids) -> int:
+        """Blocks for non-adjacent units, such as a permanent dummy and a writable tail."""
+        g = self.granularity
+        return sum(banks * len({block for i in ids
+                               for block in range(i * unit // g, ((i + 1) * unit - 1) // g + 1)})
+                   for banks, unit in self.kinds[kind])
+
 
 def upload(values: torch.Tensor, device: torch.device) -> torch.Tensor:
     """Host indices on the device without making the host wait for the copy."""

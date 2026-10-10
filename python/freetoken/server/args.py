@@ -654,6 +654,12 @@ def parse_args(
     )
 
     from freetoken.quant.kv import KV_OPTIONS
+    from freetoken.kvcache.residency import KV_PLACEMENTS
+
+    parser.add_argument(
+        "--kv-placement", choices=KV_PLACEMENTS, default=ServerArgs.kv_placement,
+        help="K/V residency: gpu, or tiered host history under the runtime and host budgets.",
+    )
 
     parser.add_argument(
         "--kv-dtype",

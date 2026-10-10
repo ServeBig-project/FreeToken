@@ -1066,6 +1066,8 @@ class Scheduler(SchedulerIOMixin):
                         # popped the pending continuation (no next chunk launches), and this
                         # drain point frees the chunk's pages/slots exactly once.
                         self._free_req_resources(req)
+                    elif getattr(self.cache_manager, "residency", None) is not None:
+                        self.cache_manager.backup_completed(req, req.device_len)
                     continue
                 if req.aborted:
                     # Aborted while this final-chunk prefill / decode step was in flight: free
@@ -1156,6 +1158,11 @@ class Scheduler(SchedulerIOMixin):
                     # rather than re-read the freed page-table row (and on hybrid, deref the
                     # released GDN state slots).
                     self.cache_manager.cache_req(req, finished=False)
+                if (not finished and req.table_idx != -1
+                    and getattr(self.cache_manager, "residency", None) is not None
+                    and (i >= batch.decode_size or req.cached_len % self.config.page_size == 0)
+                ):
+                    self.cache_manager.backup_completed(req, req.cached_len)
 
         if commit_finished_reqs:
             self.finished_reqs = new_finished_reqs

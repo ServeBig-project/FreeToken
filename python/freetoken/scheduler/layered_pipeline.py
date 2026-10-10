@@ -443,6 +443,9 @@ class LayeredPipelineExecutor:
                 aborted_owners.append(req)
             elif isinstance(req, ChunkedReq):
                 req.commit_prefill_kv()
+                cache = self._prefill_manager.cache_manager
+                if getattr(cache, "residency", None) is not None:
+                    cache.backup_completed(req, req.cached_len)
             else:
                 selected_requests.append(request_index)
 

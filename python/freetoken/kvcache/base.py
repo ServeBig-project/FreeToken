@@ -44,6 +44,17 @@ class BaseKVCachePool(ABC):
     # K/V encodings this family can store (freetoken.quant.kv); the first is its native one.
     kv_codecs: ClassVar[tuple[str, ...]] = ("bf16",)
     shared_runtime: ClassVar[bool] = False
+    kv_placements: ClassVar[tuple[str, ...]] = ("gpu",)
+
+    @classmethod
+    def runtime_write_banks(cls, config) -> list[tuple[int, int]]:
+        """Writable tail-page storage when history payload can live on the host."""
+        return []
+
+    @classmethod
+    def page_bytes(cls, config) -> int:
+        """Stored history bytes per logical page, independent of its current residency."""
+        return cls.kv_cost(config)[0]
 
     @classmethod
     def runtime_scratch_banks(cls, config) -> list[tuple[int, int]]:

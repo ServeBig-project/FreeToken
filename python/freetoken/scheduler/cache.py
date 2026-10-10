@@ -233,6 +233,7 @@ class CacheManager:
         self._reset_pages(num_pages, page_table)
         self.linear_state_pool = linear_state_pool
         kv_pool = swa_pool
+        self.residency = getattr(kv_pool, "residency", None)
         if draft_kv is not None and draft_kv.swa_paged:
             # SD targets have no window of their own: the drafter's window rides the tree.
             swa_pool, sliding_window_size = draft_kv, draft_kv.window
@@ -434,6 +435,8 @@ class CacheManager:
         if self.page_units is not None:
             out["runtime"] = dict(self.page_units.blocks.status(), **self.paused_stats,
                                   evictable_bytes=self._evictable_bytes())
+            if self.residency is not None:
+                out["runtime"].update(self.residency.status())
         if self.swa_paged:
             # Physical slots: free, held by the tree (locked by request handles or window
             # copies, else evictable), and the rest owned by running requests. Copies in
@@ -979,6 +982,13 @@ class CacheManager:
             self.host.poll()
             if self.tree is not None:
                 self._release(self.tree.take_released())
+        if self.residency is not None:
+            self.residency.poll()
+
+    def backup_completed(self, req: Req, length: int) -> None:
+        if self.residency is not None and self.host is not None:
+            end = align_down(length, self.page_size)
+            self.host.backup_active(units_of(self.rows[req.table_idx, :end], self.page_size))
 
     # ----- paused requests (shared runtime) -----
     def pause(self, req: Req) -> PausedState | None:
@@ -1037,7 +1047,8 @@ class CacheManager:
         got = self.claim(div_ceil(c, self.page_size),
                          window=(lambda tokens: tokens[state.window]) if len(state.window)
                          else None,
-                         states=int(self.private_states), table=table)
+                         states=int(self.private_states), table=table,
+                         payload_pages=int(c % self.page_size != 0) if self.residency else None)
         if got is None:
             return False
         tokens, slots, req.table_idx = got
@@ -1272,7 +1283,7 @@ class CacheManager:
         return allocated
 
     def claim(self, pages: int = 0, *, window=None, states: int = 0, table=None,
-              evict: bool = True):
+              evict: bool = True, payload_pages: int | None = None):
         """Shared runtime: one operation's units, held together or not at all -- ``pages``
         pages (as token locations), window slots for the locations ``window(tokens)`` names,
         ``states`` GDN state slots, and ``table``'s next row with its records.
@@ -1280,11 +1291,11 @@ class CacheManager:
         before any is recorded as taken. Returns (tokens, slots, row), or None."""
         begin = time.perf_counter()
         try:
-            return self._claim(pages, window, states, table, evict)
+            return self._claim(pages, window, states, table, evict, payload_pages)
         finally:  # time on the scheduler thread spent taking memory, evictions included
             self.paused_stats["claim_ms"] += (time.perf_counter() - begin) * 1e3
 
-    def _claim(self, pages, window, states, table, evict):
+    def _claim(self, pages, window, states, table, evict, payload_pages):
         pool, ps, out = self.linear_state_pool, self.page_size, {}
 
         def build():
@@ -1294,6 +1305,12 @@ class CacheManager:
                 return None
             tokens = self._page_to_token(ids)
             claim.add(self.page_units, ids.numpy() // ps, lambda _: self._pop_pages(pages))
+            if self.residency is not None:
+                page_ids = ids.numpy() // ps
+                count = pages if payload_pages is None else payload_pages
+                writable = page_ids[-count:] if count else page_ids[:0]
+                claim.add(self.residency.payload, writable,
+                          lambda _: self.residency.allocated(page_ids, writable))
             if window is not None:
                 locs = window(tokens).to(torch.int64)
                 slots = self.swa_pool.next_slots(len(locs))
@@ -1320,7 +1337,8 @@ class CacheManager:
         # memory: it never evicts cached prefixes for drafts it may not run.
         while (claim := build()) is None or blocks.shortfall(claim.plan) or not blocks.acquire(
                 claim.plan):
-            if not evict or not self._evict_any(ps):
+            if not evict or not (self._evict_any(ps) or
+                    (self.residency is not None and self.residency.evict_one())):
                 claim = None
                 break
         if not self._agree(claim is not None):
@@ -1364,6 +1382,8 @@ class CacheManager:
         if self.page_units is None:
             self.free_slots = torch.cat([self.free_slots, pages])
             return
+        if self.residency is not None:
+            self.residency.release(pages.numpy() // self.page_size)
         # Kept descending, the lowest page next (claims take the tail): live pages pack into
         # the fewest blocks. Inserted in place of a full sort: returns happen every step.
         free, back = self.free_slots.numpy()[::-1], np.sort(pages.numpy())
