@@ -132,6 +132,46 @@ Latest collection: 309 rows (116 independent CPU/reference, 193 GPU-gated); no c
 pass is implied by collection. Forced SD zero-acceptance has no public control, and GPT-OSS
 TP bias plus long-running allocation/rebuild stress remain unverified.
 
+## Optional random small GPT-OSS input
+
+`make_gptoss_fixture.py` creates a complete, untrained BF16 HF BASE and the existing independent
+D6/B12 sidecar. H/I=2880, top-k=4, the attention heads and sliding/full attention pair follow the
+[public GPT-OSS config](https://huggingface.co/openai/gpt-oss-20b/raw/main/config.json).
+It reduces the model to 2 layers, 4 experts and a 256-entry WordLevel tokenizer. All gate/up/down
+expert biases are nonzero and distinct, following the [public HF weight definition](https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/gpt_oss/modeling_gpt_oss.py).
+
+This input is allowed by the current numeric and FTW tests: they read the layer/expert counts
+from the input, retain H/I/top-k, and already exclude GPT-OSS task-quality scoring. It does not
+replace trained GPT-OSS weights. The small tokenizer is not the trained Harmony vocabulary;
+candidate FTW/serving compatibility must still be observed. No performance or service matrix
+was changed, and no trained-model quality or performance conclusion may use this input.
+
+The generated input is `/dev/shm/nowag-runtime-acceptance-20261009/gptoss-random-small`.
+BASE parameters occupy 507,494,032 bytes; BASE+SIDE files occupy 557,622,302 bytes. Single-thread
+generation/self-check peak RSS was 1,206,169,600 bytes (1.12 GiB), below the 2 GiB limit.
+HF CPU forwards before saving and after reloading all 6 shards were finite; the reload
+process peaked at 1,196,011,520 bytes. Independently omitting gate/up/down bias gave relative
+Frobenius errors 4.08%/7.96%/5.77%, each exceeding the unchanged 1% bound. Details are in the
+generated `fixture.json`; these are fixture checks, not candidate GPU/FTW passes.
+
+Reproduce into a **new** output directory (the script does not overwrite existing inputs):
+
+```sh
+CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 $P "$T/make_gptoss_fixture.py" --out /path/to/new/gptoss-random-small
+```
+
+For the existing bias/FTW rows, after GPU approval, select the small input explicitly:
+
+```sh
+G=/dev/shm/nowag-runtime-acceptance-20261009/gptoss-random-small
+export NOWAG_GPTOSS_BASE="$G/base" NOWAG_SCRATCH="$G/scratch" NOWAG_GPTOSS_CACHE=8
+$P -m pytest -rs "$T/test_bind_contract.py" -k 'gptoss and cuda'
+$P -m pytest -rs "$T/test_ftw.py::test_conversion_leaves_sources_untouched[gptoss]" "$T/test_ftw.py::test_ftw_roundtrip_matches_native[gptoss]" "$T/test_ftw.py::test_gptoss_native_without_base_bias_rejected"
+```
+
+Use a separate scratch directory when trained GPT-OSS weights arrive: the existing synthetic
+sidecar cache path is intentionally tied to this input geometry by its containing directory.
+
 ## Environment
 
 | Variable | Meaning |
