@@ -403,7 +403,7 @@ python benchmarks/bench_decode_moe.py --model /path/to/model --backend offload,c
 ```
 
 **`bench_lab_agent_policies.py`** — closed-loop public-HTTP comparison of legacy,
-mixed, layered, joint, and layered-pipeline batching under a four-user, five-turn
+mixed, layered, and layered-pipeline batching under a four-user, five-turn
 tool-agent burst. It validates exact prompt/output lengths and prefix-cache reuse,
 and records TTFT, TPOT, inter-token gaps and makespan. Layered-pipeline freezes a
 multi-request wave, packs its uncached prompt rows into static FIFO ragged tiles,
@@ -426,8 +426,6 @@ python benchmarks/bench_lab_agent_policies.py --repetitions 3 --gpu 0 \
 
 Workload contract: [`workloads/lab_agent_burst_v1.json`](workloads/lab_agent_burst_v1.json).
 Measured setup and interpretation: [`results/lab_agent_burst_20260825.md`](results/lab_agent_burst_20260825.md).
-The focused resident-group probe and raw samples are recorded in
-[`results/joint_group_wave_20260825.md`](results/joint_group_wave_20260825.md).
 The paper-granularity one-group-per-iteration comparison is in
 [`results/layered_pipeline_paper_fair_20260827.md`](results/layered_pipeline_paper_fair_20260827.md).
 The sustained-decode experiment with serial periodic long prefills is in

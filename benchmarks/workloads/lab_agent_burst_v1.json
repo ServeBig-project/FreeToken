@@ -179,27 +179,6 @@
       "primary": true
     },
     {
-      "name": "joint_g2_wave1",
-      "batching_policy": "joint",
-      "prefill_layer_group_size": 2,
-      "prefill_wave_max_chunks": 1,
-      "primary": true
-    },
-    {
-      "name": "joint_g2_wave2",
-      "batching_policy": "joint",
-      "prefill_layer_group_size": 2,
-      "prefill_wave_max_chunks": 2,
-      "primary": true
-    },
-    {
-      "name": "joint_g2_wave4_exploratory",
-      "batching_policy": "joint",
-      "prefill_layer_group_size": 2,
-      "prefill_wave_max_chunks": 4,
-      "primary": false
-    },
-    {
       "name": "layered_pipeline_g2_wave1",
       "batching_policy": "layered-pipeline",
       "prefill_layer_group_size": 2,

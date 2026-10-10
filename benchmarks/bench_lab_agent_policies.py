@@ -33,13 +33,6 @@ MODE_ALIASES = {
     "mixed": "mixed",
     "layeredG2": "layered_g2_serial",
     "layered_g2_serial": "layered_g2_serial",
-    "jointG2-wave1": "joint_g2_wave1",
-    "joint_g2_wave1": "joint_g2_wave1",
-    "jointG2-wave2": "joint_g2_wave2",
-    "joint_g2_wave2": "joint_g2_wave2",
-    "jointG2-wave4": "joint_g2_wave4_exploratory",
-    "wave4": "joint_g2_wave4_exploratory",
-    "joint_g2_wave4_exploratory": "joint_g2_wave4_exploratory",
     "layered-pipeline": "layered_pipeline_g2_wave1",
     "layered_pipeline_g2_wave1": "layered_pipeline_g2_wave1",
 }
@@ -49,11 +42,6 @@ LAYERED_PIPELINE_WAVE_RE = re.compile(
     r"reqs=(\d+), groups=(\d+), group_forwards=(\d+), "
     r"iterations=(\d+), decode_iterations=(\d+), "
     r"prefill_layer_prepares=(\d+)"
-)
-JOINT_WAVE_RE = re.compile(
-    r"Joint wave complete: "
-    r"chunks=(\d+), wave_reqs=(\d+), frontier_batches=(\d+), groups=(\d+), "
-    r"effective_group_size=(\d+), prefill_layer_prepares=(\d+)"
 )
 MOE_CACHE_STATS_RE = re.compile(r"MoE cache stats snapshot: ([^\n]+)")
 
@@ -72,29 +60,11 @@ def parse_args() -> argparse.Namespace:
             "legacy",
             "mixed",
             "layeredG2",
-            "jointG2-wave1",
-            "jointG2-wave2",
             "layered-pipeline",
         ],
         help=(
             "Modes, separated by spaces or commas. Primary defaults: legacy mixed "
-            "layeredG2 jointG2-wave1 jointG2-wave2 layered-pipeline (G2/W1)."
-        ),
-    )
-    parser.add_argument(
-        "--joint-groups",
-        nargs="+",
-        help=(
-            "Joint layer-group sizes to sweep, separated by spaces or commas. "
-            "Requires --joint-waves."
-        ),
-    )
-    parser.add_argument(
-        "--joint-waves",
-        nargs="+",
-        help=(
-            "Joint prefill wave chunk counts to sweep, separated by spaces or commas. "
-            "Requires --joint-groups."
+            "layeredG2 layered-pipeline (G2/W1)."
         ),
     )
     parser.add_argument("--repetitions", type=int, default=1)
@@ -122,40 +92,7 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.max_prefill_length is not None and args.max_prefill_length < 1:
         parser.error("--max-prefill-length must be at least 1")
-    if (args.joint_groups is None) != (args.joint_waves is None):
-        parser.error("--joint-groups and --joint-waves must be provided together")
-    if args.joint_groups is not None:
-        args.joint_groups = parse_positive_int_values(
-            args.joint_groups, "--joint-groups", parser
-        )
-        args.joint_waves = parse_positive_int_values(
-            args.joint_waves, "--joint-waves", parser
-        )
     return args
-
-
-def parse_positive_int_values(
-    raw_values: Iterable[str], option: str, parser: argparse.ArgumentParser
-) -> list[int]:
-    pieces = [
-        piece.strip()
-        for raw_value in raw_values
-        for piece in raw_value.split(",")
-        if piece.strip()
-    ]
-    if not pieces:
-        parser.error(f"{option} requires at least one positive integer")
-    values: list[int] = []
-    for piece in pieces:
-        try:
-            value = int(piece)
-        except ValueError:
-            parser.error(f"{option} values must be positive integers; got {piece!r}")
-        if value <= 0:
-            parser.error(f"{option} values must be positive integers; got {piece!r}")
-        if value not in values:
-            values.append(value)
-    return values
 
 
 def load_workload() -> dict[str, Any]:
@@ -198,8 +135,6 @@ def validate_workload(workload: dict[str, Any], profile_name: str) -> dict[str, 
 def resolve_modes(
     raw_modes: Iterable[str],
     workload: dict[str, Any],
-    joint_groups: Iterable[int] | None = None,
-    joint_waves: Iterable[int] | None = None,
 ) -> list[dict[str, Any]]:
     available = {mode["name"]: mode for mode in workload["comparison_modes"]}
     tokens = [piece for item in raw_modes for piece in item.split(",") if piece]
@@ -214,18 +149,6 @@ def resolve_modes(
             if name not in names:
                 names.append(name)
     modes = [available[name] for name in names]
-    if joint_groups is not None and joint_waves is not None:
-        modes.extend(
-            {
-                "name": f"joint_g{group_size}_wave{wave_chunks}",
-                "batching_policy": "joint",
-                "prefill_layer_group_size": group_size,
-                "prefill_wave_max_chunks": wave_chunks,
-                "primary": False,
-            }
-            for group_size in joint_groups
-            for wave_chunks in joint_waves
-        )
 
     unique_modes: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
@@ -888,25 +811,6 @@ class PublicServer:
             for match in LAYERED_PIPELINE_WAVE_RE.finditer(text)
         ]
 
-    def joint_waves(self) -> list[dict[str, int]]:
-        if self.measurement_log_offset is None:
-            return []
-        self.log.flush()
-        self.log.seek(self.measurement_log_offset)
-        text = self.log.read().decode("utf-8", errors="replace")
-        fields = (
-            "chunks",
-            "wave_reqs",
-            "frontier_batches",
-            "groups",
-            "effective_group_size",
-            "prefill_layer_prepares",
-        )
-        return [
-            dict(zip(fields, (int(value) for value in match.groups())))
-            for match in JOINT_WAVE_RE.finditer(text)
-        ]
-
     def moe_cache_stats_snapshots(self) -> list[dict[str, int]]:
         """Parse every cumulative idle snapshot, including readiness before measurement."""
         self.log.flush()
@@ -1098,12 +1002,7 @@ def main() -> int:
     if args.max_prefill_length is not None:
         workload["public_server_config"]["max_prefill_length"] = args.max_prefill_length
     profile = validate_workload(workload, args.profile)
-    modes = resolve_modes(
-        args.modes,
-        workload,
-        joint_groups=args.joint_groups,
-        joint_waves=args.joint_waves,
-    )
+    modes = resolve_modes(args.modes, workload)
     if args.dry_run:
         print(json.dumps(dry_run_plan(args, workload, profile, modes), indent=2))
         return 0
@@ -1170,7 +1069,6 @@ def main() -> int:
                 "repetitions": [],
                 "requests": [],
                 "server_log_tail": None,
-                "joint_waves": [],
                 "layered_pipeline_waves": [],
                 "layered_pipeline_structure": None,
                 "error": None,
@@ -1238,8 +1136,6 @@ def main() -> int:
                         field: sum(wave[field] for wave in waves)
                         for field in fields
                     }
-                elif mode["batching_policy"] == "joint":
-                    mode_result["joint_waves"] = server.joint_waves()
                 mode_result["server_log_tail"] = server.log_tail()
                 server.close()
                 write_json(output, result)
