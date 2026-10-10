@@ -139,8 +139,9 @@ def test_existing_self_sd_controls(control):
 def test_layered_sd_phases(kind, phase, backend):
     gpu = need_gpu()
     reference = offload_reference()
+    # SD CUDA Graph needs FlashInfer attention; with triton,fi the public rule is eager SD
     options = ["--batching-policy", "layered-pipeline", "--attention-backend", "triton,fi",
-               "--speculative-num-steps", 4, "--speculative-phase", phase]
+               "--speculative-num-steps", 4, "--speculative-phase", phase, "--cuda-graph-max-bs", 0]
     if kind == "dflash":
         options += ["--speculative-draft-model-path", need_path(DFLASH_DRAFT, "Qwen3.6 DFlash"),
                     "--page-size", 1, "--enable-gdn-replayssm", "--gdn-state-budget-bytes", 3000000000]
@@ -150,6 +151,15 @@ def test_layered_sd_phases(kind, phase, backend):
         mixed_load(server)
         check_sd_observed(server, before)
         assert get(server.url, "/v1/stats")["body"]["execution"]["effective"]["batching_policy"] == "layered-pipeline"
+
+
+def test_layered_sd_with_graph_and_triton_attention_rejected():
+    """Existing SD restriction (contract §3): SD CUDA Graph requires FlashInfer attention, so
+    triton,fi with graphs left on is refused before ready."""
+    gpu = need_gpu()
+    expect_rejected("layered_sd_graph_triton", qwen(
+        "--batching-policy", "layered-pipeline", "--attention-backend", "triton,fi",
+        "--speculative-num-steps", 4, "--speculative-phase", "outwave"), gpu)
 
 
 @pytest.mark.parametrize("graph", [0, 16])
