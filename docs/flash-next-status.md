@@ -1,6 +1,6 @@
 # Flash-Next 第一期状态
 
-当前：独立验收进行中，**第一阶段尚未交付**。PR #10 头含 I5 修复（`2133e7e`、`c3799b1`）并跟上 main `ea3b9df`；配置矩阵在 `8be9796` 上跑完，M1、M3、M4 在 `874ba00` 复验通过。FTW 按用户决定暂缓，本期直接加载现有 RadixArk safetensors。入口：[交接说明](flash-next-handoff.md) · [主设计](flash-next-design.md) · [公开契约](flash-next-public-contract.md)。
+当前：独立验收进行中，**第一阶段尚未交付**。PR #10 头 `e14e288`：含 I5 修复（`2133e7e`、`c3799b1`）与严格审计修复，跟上 main `375e332`；配置矩阵在 `8be9796` 上跑完，M1、M3、M4 在 `874ba00` 复验通过。FTW 按用户决定暂缓，本期直接加载现有 RadixArk safetensors。入口：[交接说明](flash-next-handoff.md) · [主设计](flash-next-design.md) · [公开契约](flash-next-public-contract.md)。
 
 ## 已实现与已有证据
 
@@ -27,12 +27,16 @@
 
 共同参数：runtime 2 GiB、2048专家槽、radix 缓存（M5/M7 为 naive）。M1 首轮因测试机主机内存被其他进程占满导致后端退出，结果作废并保留证据，同代码重跑通过。仍未覆盖：暂停副本复制途中取消、恢复途中取消、Replay 下记录环绕后的暂停恢复。报告在 `/data2/servebig-envs/flash_next_i3_acceptance/`。
 
-## 已定位：服务端 `temperature=0` 并非贪心
+## 严格审计修复（`e14e288`）
 
-- 现象：同一 prompt 只传 `temperature=0` 时，输出会在请求间翻转。
-- 原因：服务端用 checkpoint 的 generation_config 补齐未传字段（Flash-Next 为 `top_k=20, top_p=0.95`），而 `SamplingParams.is_greedy` 要求 `top_p == 1.0`，于是请求按 `T=1e-6` 随机采样，分数并列时随机选取。main 同样如此，凡默认 `top_p<1` 的模型都受影响。
-- 证据：同一服务上显式 `top_p=1.0` 时，同一 prompt 在连续重复与不同历史之后共7次输出逐字相同；只传 `temperature=0` 时出现2–4种输出（`/data2/servebig-envs/flash_next_phase2/ar-greedy-check.json`）。模型计算本身不随历史变化。
-- 修复方式待用户决定；在此之前，需要确定性对照的测试显式传 `top_p=1.0`。
+| 项 | 提交 | 内容 | 验证 |
+| --- | --- | --- | --- |
+| F1 | `9348a76` | 前缀捕获在 extend 起点时，GDN、PLE、QSA pending 各自在所属层执行时保存，embedding 不再替各层复制 | 独立黑盒：修复前 5 组命中对未命中全部不同；修复后 group 1/2 均 10/10（确认两块波次） |
+| F2/F3 | `9c64b1b` | 共享主机副本只计一次；tiered 冷页的 GPU 载荷计入 `evictable_bytes`（仅状态） | 独立黑盒已写，待 GPU |
+| F6 | `be023d8` | PLE n-gram 按真实行取 token，不再展开成请求数×最长输入 | 新旧实现随机不等长批次逐元素一致；独立黑盒待 GPU |
+| F4 | `f93a8c1` | 执行状态报告实际 K/V 存储格式（int8 或模型 dtype） | 独立黑盒待 GPU（含 FP16 服务） |
+
+`temperature=0` 只传温度时被默认 top_p 改成采样的问题已由 main [#13](https://github.com/ServeBig-project/FreeToken/pull/13) 修复并跟进。`tests/moe/test_offload.py` 两项旧用例按“每次 prefill 整层流式加载”断言，与短 prefill 按需加载不符；按用户决定保留优化，由独立作者重建覆盖（短输入按需与后续请求、长输入整层预取）。
 
 ## 157K原失败已关闭
 
@@ -40,7 +44,7 @@
 
 ## 接下来
 
-1. 按用户决定修复 `temperature=0` 的贪心判定。
+1. 在 GPU 上跑 F2/F3、F4、F6 黑盒与重建的 offload prefill 用例。
 2. 与上游参考同权重质量对照（贪心请求）；增槽与性能报告；已有模型回归（Qwen3 MoE、Qwen3.5/3.6 AR、SD/DFlash、冷前缀、共享池）。
 
 ## 代码量
