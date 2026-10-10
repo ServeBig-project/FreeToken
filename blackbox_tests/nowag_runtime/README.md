@@ -128,7 +128,7 @@ NOWAG_STALE_CPU_SOURCE=/data2/servebig-envs/nowag_runtime_acceptance_20261009/st
 NOWAG_STALE_CPU_PYTHON=$P $P -m pytest -rs "$T/test_cpu_extension_compat.py"
 ```
 
-Latest collection: 309 rows (116 independent CPU/reference, 193 GPU-gated); no candidate
+Frozen matrix: 309 rows (116 independent CPU/reference, 193 GPU-gated); no candidate
 pass is implied by collection. Forced SD zero-acceptance has no public control, and GPT-OSS
 TP bias plus long-running allocation/rebuild stress remain unverified.
 
@@ -171,6 +171,29 @@ $P -m pytest -rs "$T/test_ftw.py::test_conversion_leaves_sources_untouched[gptos
 
 Use a separate scratch directory when trained GPT-OSS weights arrive: the existing synthetic
 sidecar cache path is intentionally tied to this input geometry by its containing directory.
+
+## One combined runtime/expert rebuild
+
+`test_rebuild_shared_exchange.py` adds one GPU row to the frozen matrix. It uses the real Qwen
+NoWAG input, an exclusively assigned 24 GiB GPU, and `nvidia-smi` for public total/free memory.
+It starts two services sequentially: a 4 GiB runtime calibration, then a near-budget service
+with the same minimum `2E` expert slots. Graph is off, concurrency is 1, context is 4096 and
+prefill is capped at 256 tokens; the capacity calculation leaves about 3 GiB of device headroom.
+
+From the public status and actual free memory, it chooses an expert increase at least 2 GiB
+larger than available device memory, reduces runtime by that increase plus 0.5 GiB, and keeps
+at least 4 GiB runtime. One `mode=if_idle` request must apply both changes, report the exact
+new capacities and continue generating. A subsequent target above the published cache budget
+must be rejected while the accepted configuration keeps serving. It does not search by OOM.
+
+If the observed resources cannot realize these conditions within the model's legal expert
+count, the row is recorded as skipped, not passed. The selected capacities, public snapshots
+and responses are saved to `NOWAG_LOG_DIR/rebuild-shared-exchange.json`. No GPU run was made
+while preparing this row; its collection succeeded.
+
+```sh
+$P -m pytest -rs "$T/test_rebuild_shared_exchange.py"
+```
 
 ## Environment
 
