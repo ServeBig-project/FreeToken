@@ -71,12 +71,20 @@ def gpu_pids():
     return [line.split(",")[1].strip() for line in out.splitlines() if GPU in line]
 
 
-def wait_gpu_free(timeout=120):
+def other_acceptance():
+    """Containers of the NoWAG acceptance session, which shares this GPU."""
+    out = subprocess.run(["docker", "ps", "--format", "{{.Names}}"], capture_output=True, text=True).stdout
+    return [n for n in out.split() if n.startswith("nowag-acceptance-")]
+
+
+def wait_gpu_free(timeout=float(os.environ.get("RP_GPU_WAIT", "14400"))):
+    """GPU1 is time-shared: wait (never preempt) until it has no compute process and no
+    NoWAG acceptance container is running."""
     end = time.monotonic() + timeout
-    while gpu_pids():
+    while gpu_pids() or other_acceptance():
         if time.monotonic() > end:
-            raise RuntimeError(f"GPU {GPU} still has compute processes {gpu_pids()}; it must be free")
-        time.sleep(3)
+            raise RuntimeError(f"GPU {GPU} busy: {gpu_pids()} {other_acceptance()}")
+        time.sleep(15)
 
 
 def _free(port):
@@ -405,8 +413,9 @@ class Watch:
         self.samples += 1
         self.last = rt
         self.max_total = max(self.max_total, rt["held_bytes"])
-        if rt["held_bytes"] > rt["budget_bytes"] or not 0 <= rt["evictable_bytes"] <= rt["held_bytes"]:
-            self.violations.append({k: rt[k] for k in ("held_bytes", "budget_bytes", "evictable_bytes")})
+        if not (rt["used_bytes"] <= rt["held_bytes"] <= rt["budget_bytes"]
+                and 0 <= rt["evictable_bytes"] <= rt["held_bytes"]):
+            self.violations.append({k: rt[k] for k in ("used_bytes", "held_bytes", "budget_bytes", "evictable_bytes")})
         self.series.append({name: c.get("held_bytes") or 0 for name, c in components(rt).items()})
         for name, c in components(rt).items():
             m = self.max_component.setdefault(name, {"held_bytes": 0, "used_bytes": 0})

@@ -9,7 +9,8 @@ import os
 
 import pytest
 
-from service_common import COMMON, GIB, MODEL_CONTEXT, assert_length, components, enum_prompt, record, service
+from service_common import (COMMON, GIB, MODEL_CONTEXT, Watch, assert_length, cached_tokens, components,
+                            enum_prompt, overlap, record, run_streams, service, tok)
 from service_scenarios import cancel_round, early_stop_round, over_context, pause_round, short_long_short
 
 NAME = "c_pressure"
@@ -73,3 +74,36 @@ def test_runtime_budget_rebuild_with_explicit_concurrency(svc):
         assert g["runtime_cache_bytes"] == int(gib * GIB) == rt["budget_bytes"], (g, rt)
         assert g["moe_cache_size"] == 2048 and rt["max_running_requests"] == mrr, (g, rt)
         assert_length(svc.c.complete(enum_prompt(60000, 12), 48), 48)
+
+
+def test_two_long_prompts_that_fit_run_together(svc):
+    """Admission: two long requests whose combined need fits the budget run at the same time
+    instead of one after the other (contract section 4)."""
+    t = tok()
+    streams = [svc.c.stream(t.filler(3000, seed=70000 + i) + "\nSummary:", 64, ignore_eos=True) for i in range(2)]
+    with Watch(svc.c) as w:
+        run_streams(streams, 900)
+    record(f"{NAME}:long_pair", overlap=overlap(streams), streams=[s.summary() for s in streams], watch=w.report())
+    assert not w.violations, w.report()
+    for s in streams:
+        assert s.done and s.finish == "length" and s.usage["completion_tokens"] == 64, s.summary()
+    assert overlap(streams) == 2, [s.summary() for s in streams]
+
+
+def test_pressure_keeps_cold_prefixes(svc):
+    """Eviction frees only what a request needs: after a long request squeezes the budget,
+    cold prefixes remain evictable and an earlier prompt still hits (sections 4, 5)."""
+    t = tok()
+    warm = t.filler(1000, seed=71000) + "\nQuestion:"
+    svc.c.complete(warm, 1, cache_group="keep")
+    svc.c.wait_idle()
+    host0 = svc.c.status()["prefix_cache"].get("host_reused_tokens", 0)
+    assert_length(svc.c.complete(t.filler(7000, seed=71001) + "\nSummary:", 16, cache_group="squeeze"), 16)
+    svc.c.wait_idle()
+    rt = svc.rt()
+    again = svc.c.complete(warm, 1, cache_group="keep")
+    host1 = svc.c.status()["prefix_cache"].get("host_reused_tokens", 0)
+    record(f"{NAME}:keep_cold", evictable=rt["evictable_bytes"], held=rt["held_bytes"],
+           cached=cached_tokens(again["usage"]), host_reused=host1 - host0)
+    assert rt["evictable_bytes"] > 0, rt
+    assert cached_tokens(again["usage"]) > 0, again["usage"]
