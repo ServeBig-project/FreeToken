@@ -27,6 +27,9 @@ class EngineConfig:
     # Where layered batching may run SD: outside prefill waves, in both, or only inside.
     speculative_phase: str = "outwave"
     speculative_draft_model_path: str | None = None
+    # Draft source by name: "mtp" drafts with the checkpoint's native MTP layers. None keeps the
+    # draft path's DFlash, or self drafting.
+    speculative_method: str | None = None
     speculative_draft_experts: int = 3
     speculative_draft_residency: str = "off"
     speculative_adaptive_cost: bool = False
@@ -146,6 +149,12 @@ class EngineConfig:
             raise ValueError("--gdn-replay-buffer-len must be a power of two >= 4")
         if self.gdn_state_budget_bytes is not None and self.gdn_state_budget_bytes <= 0:
             raise ValueError("--gdn-state-budget-bytes must be positive")
+        if self.speculative_method not in (None, "mtp"):
+            raise ValueError(f"--speculative-method must be mtp, got {self.speculative_method!r}")
+        if (self.speculative_method and self.speculative_draft_model_path is not None
+                and self.speculative_num_steps != 0):
+            raise ValueError("--speculative-method mtp drafts with the model's own MTP layers; "
+                             "drop --speculative-draft-model-path (a DFlash drafter)")
         if self.speculative_num_steps is None:
             return  # the engine resolves it against the model's components, then validates
         # An explicit 0 turns SD off even beside a draft path, which is then ignored.
@@ -199,7 +208,7 @@ class EngineConfig:
         if not self.speculative_num_steps:
             return
         if self.tp_info.size != 1:
-            raise ValueError("self-speculative decoding requires a single GPU (tp_size=1)")
+            raise ValueError("speculative decoding requires a single GPU (tp_size=1)")
         policy = getattr(self, "batching_policy", "legacy")
         if policy not in ("auto", "legacy", "layered-pipeline"):
             raise ValueError("speculative decoding requires --batching-policy legacy or layered-pipeline")
@@ -211,14 +220,15 @@ class EngineConfig:
         from freetoken.moe.routing import ROUTERS
 
         model = self.model_config
-        if not external_draft and (not model.num_experts or model.moe_router not in ROUTERS):
+        self_draft = self.speculative_drafter == "self"
+        if self_draft and (not model.num_experts or model.moe_router not in ROUTERS):
             raise ValueError("self-speculative decoding requires a shared MoE router component")
         unsupported = {model.attn_type_for_layer(i) for i in range(model.num_layers)} - {
             AttnType.FULL, AttnType.LINEAR,
         }
         if unsupported:
-            raise ValueError(f"self-speculative state handling is unavailable for {unsupported}")
-        if not external_draft and self.speculative_draft_experts > self.model_config.num_experts_per_tok:
+            raise ValueError(f"the target cannot verify drafts over {unsupported} attention yet")
+        if self_draft and self.speculative_draft_experts > self.model_config.num_experts_per_tok:
             raise ValueError(
                 "speculative_draft_experts must not exceed the target's experts per token "
                 f"({self.model_config.num_experts_per_tok})"
@@ -238,6 +248,13 @@ class EngineConfig:
         spec = get_model_spec(self.hf_config.architectures[0])
         parse_config = _load_attr(spec.module, spec.parse_config)
         return parse_config(self.hf_config)
+
+    @property
+    def speculative_drafter(self) -> str | None:
+        """What drafts when SD is on: mtp, dflash (a draft checkpoint) or self; None for AR."""
+        if not self.speculative_num_steps:
+            return None
+        return self.speculative_method or ("dflash" if self.speculative_draft_model_path else "self")
 
     @property
     def legacy_sd_controls(self) -> bool:

@@ -316,6 +316,8 @@ class ModelConfig:
     qwen4_args: Any | None = None
     # Extra per-request tensors riding the LinearStatePool slots; () for models without any.
     slot_states: Tuple[SlotStateSpec, ...] = ()
+    # Native MTP draft layers the model's code serves (--speculative-method mtp); 0 for none.
+    mtp_layers: int = 0
     # Resolved public dense-projection plan ("source" | "bf16" | "fp8", freetoken.quant.dense);
     # injected from EngineConfig.dense_quantization. Under "source" every operator keeps the
     # scheme its checkpoint declares; an explicit value overrides it in the quant_linear

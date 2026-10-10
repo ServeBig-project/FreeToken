@@ -96,11 +96,12 @@ def _rename(raw_name: str) -> str | None:
     return raw_name
 
 
-def _try_fuse(name: str, tensor: torch.Tensor, buf: dict) -> tuple[str, torch.Tensor] | tuple[()] | None:
+def _try_fuse(name: str, tensor: torch.Tensor, buf: dict,
+              fusions: dict[str, tuple[str, ...]] = _FUSIONS) -> tuple[str, torch.Tensor] | tuple[()] | None:
     """Buffer a fusion part; the merged ``(name, tensor)`` once every part arrived, ``()``
     while incomplete, ``None`` if ``name`` is not a part. The hyper-connection merge pads to a
     multiple of 16 rows with zeros (vLLM's skinny-GEMM alignment)."""
-    for fused_suffix, parts in _FUSIONS.items():
+    for fused_suffix, parts in fusions.items():
         for idx, part in enumerate(parts):
             if not name.endswith(part):
                 continue
@@ -171,6 +172,41 @@ def iter_weights(
                 elif fused != ():
                     yield from _emit(*fused, dense_precision)
     assert not fuse_buf, f"Incomplete projection fusions: {sorted(fuse_buf)}"
+
+
+# The MTP layer keeps q, k and v as separate projections (its history update runs k and v alone).
+_MTP_FUSIONS = {k: v for k, v in _FUSIONS.items() if k != ".self_attn.qkv_proj.weight"}
+
+
+def iter_mtp_weights(model_path: str, config, device: torch.device) -> Iterator[tuple[str, torch.Tensor]]:
+    """The ``mtp.*`` tensors as ``Qwen4ExpMTP`` buffers, BF16 as stored: ``layers.0`` is the
+    module's ``layer``, and the indexer's merged ``index_qk_proj`` splits into its q and k
+    projections."""
+    args = config.qwen4_args
+    folder, weight_map = _weight_map(model_path)
+    files = sorted({shard for name, shard in weight_map.items() if name.startswith("mtp.")})
+    if not files:
+        raise ValueError(f"{model_path} has no mtp.* tensors for native MTP drafting")
+    index_split = [args.index_n_heads * args.index_head_dim, args.index_head_dim]
+    fuse_buf: dict = {}
+    for file in files:
+        with safetensors.safe_open(os.path.join(folder, file), framework="pt", device=str(device)) as f:
+            for raw_name in f.keys():
+                if not raw_name.startswith("mtp."):
+                    continue
+                name = raw_name[len("mtp."):].replace("layers.0.", "layer.", 1)
+                tensor = f.get_tensor(raw_name)
+                if name.endswith(".indexer.index_qk_proj.weight"):
+                    q, k = tensor.split(index_split, dim=0)
+                    yield name.replace("index_qk_proj", "index_q_proj"), q
+                    yield name.replace("index_qk_proj", "index_k_proj"), k
+                    continue
+                fused = _try_fuse(name, tensor, fuse_buf, _MTP_FUSIONS)
+                if fused is None:
+                    yield name, tensor
+                elif fused != ():
+                    yield fused
+    assert not fuse_buf, f"Incomplete MTP fusions: {sorted(fuse_buf)}"
 
 
 # ======================================================================================

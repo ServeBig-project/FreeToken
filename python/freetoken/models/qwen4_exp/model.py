@@ -73,9 +73,14 @@ class Qwen4ExpDecoderLayer(BaseOP):
     def forward(self, R: torch.Tensor, batch: Batch) -> torch.Tensor:
         if self.ple is not None:
             R = R + self.ple.forward(R, batch)
+        if self._is_linear:
+            return self.residual(R, self.linear_attn.forward)
+        return self.residual(R, lambda x: self.self_attn.forward(x, batch))
+
+    def residual(self, R: torch.Tensor, attention) -> torch.Tensor:
+        """The attention and MLP blocks around their hyper-connections (the MTP layer's too)."""
         x, s = self.attn_hyper_connection.mix(R)
-        y = self.linear_attn.forward(x) if self._is_linear else self.self_attn.forward(x, batch)
-        R = self.attn_hyper_connection.combine(R, y, s)
+        R = self.attn_hyper_connection.combine(R, attention(x), s)
         x, s = self.mlp_hyper_connection.mix(R)
         return self.mlp_hyper_connection.combine(R, self.mlp.forward(x), s)
 

@@ -55,7 +55,7 @@ class SpeculativeDecoder:
         # A separate seed keeps subsequent Torch draws from reusing that random stream.
         self.generator = torch.Generator(device=engine.device)
         self.generator.manual_seed((torch.cuda.initial_seed() + 1) % (1 << 64))
-        if engine.config.speculative_draft_model_path:
+        if engine.config.speculative_drafter == "dflash":
             from freetoken.speculative.dflash import DFlashDrafter
 
             self.drafter = DFlashDrafter(engine, table, self.generator)
@@ -79,7 +79,7 @@ class SpeculativeDecoder:
 
     def snapshot(self) -> dict:
         result = {
-            "drafter": "dflash" if self.engine.config.speculative_draft_model_path else "self",
+            "drafter": self.engine.config.speculative_drafter,
             "phase": self.phase,
             "draft_tokens": self.draft_tokens,
             "accepted_draft_tokens": self.accepted_draft_tokens,

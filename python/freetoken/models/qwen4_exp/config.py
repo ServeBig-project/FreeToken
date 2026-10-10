@@ -229,6 +229,7 @@ def parse_config(hf_config: Any) -> ModelConfig:
         expert_quant=expert_quant,
         qwen4_args=qwen4_args,
         slot_states=slot_states(qwen4_args, full_ids),
+        mtp_layers=int(getattr(text, "mtp_num_hidden_layers", 0) or 0),
     )
 
 

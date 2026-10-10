@@ -75,11 +75,11 @@ class Qwen3_5MoE(BaseOP):
     Router softmaxes over all experts, takes top-k, and renormalizes (HF semantics).
     """
 
-    def __init__(self, config: ModelConfig, layer_id: int | None = None):
+    def __init__(self, config: ModelConfig, layer_id: int | None = None, experts=None):
         weight_format = (
             "fp8_block" if getattr(config, "expert_quant", "none") == "fp8_block" else "bf16"
         )
-        self.experts = make_moe_layer(
+        self.experts = experts or make_moe_layer(
             config, layer_id=layer_id, renormalize=True, weight_format=weight_format
         )
         self.gate = LinearReplicated(config.hidden_size, config.num_experts, has_bias=False)
@@ -97,8 +97,11 @@ class Qwen3_5MoE(BaseOP):
         router_logits = self.gate.forward(hidden_states)
         shared = self.shared_expert.forward(hidden_states)
         shared = shared * torch.sigmoid(self.shared_expert_gate.forward(hidden_states))
-        routed = self.experts.forward(hidden_states=hidden_states, router_logits=router_logits)
+        routed = self.routed(hidden_states, router_logits)
         return (routed + shared).view(num_tokens, hidden_dim)
+
+    def routed(self, hidden_states: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:
+        return self.experts.forward(hidden_states=hidden_states, router_logits=router_logits)
 
 
 __all__ = ["Qwen3_5MoE", "Qwen3_5DenseMLP"]
