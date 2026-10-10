@@ -101,12 +101,10 @@ class Server:
         return get(self.url, "/v1/cache/status")["body"]
 
     def complete(self, prompt, max_tokens=32, **extra):
-        body = {"model": "m", "prompt": prompt, "max_tokens": max_tokens, "temperature": 0, **extra}
-        return post(self.url, "/v1/completions", body)
+        return post(self.url, "/v1/completions", completion_body(prompt, max_tokens, extra))
 
     def stream(self, prompt, max_tokens=32, cancel_after=None, **extra):
-        body = {"model": "m", "prompt": prompt, "max_tokens": max_tokens, "temperature": 0,
-                "stream": True, **extra}
+        body = completion_body(prompt, max_tokens, dict(extra, stream=True))
         return stream(self.url, "/v1/completions", body, cancel_after)
 
     def greedy(self, prompts, max_tokens=32):
@@ -115,6 +113,16 @@ class Server:
     def parallel(self, calls):
         with ThreadPoolExecutor(max_workers=len(calls)) as pool:
             return [f.result() for f in [pool.submit(c) for c in calls]]
+
+
+def completion_body(prompt, max_tokens, extra):
+    """Greedy unless the caller asks for a temperature: temperature 0 alone still inherits the
+    server's default top_p (0.95), which is not the public greedy path, so greedy requests also
+    send top_p=1. A caller's explicit top_p, and any sampling request, are left as given."""
+    body = {"model": "m", "prompt": prompt, "max_tokens": max_tokens, **extra}
+    if body.setdefault("temperature", 0) == 0:
+        body.setdefault("top_p", 1)
+    return body
 
 
 def expect_rejected(label, args, gpu, timeout=1800):

@@ -45,3 +45,13 @@ def test_performance_uses_reported_tokens_not_event_count():
     result = measure(Service())
     assert result["timings"]["decode_tps"] == pytest.approx(4.0)
     assert [r["completion_tokens"] for r in result["requests"]] == [9] * len(H.PROMPTS)
+
+
+def test_greedy_requests_pin_top_p_and_leave_sampling_alone():
+    body = H.completion_body("p", 4, {})
+    assert body["temperature"] == 0 and body["top_p"] == 1
+    assert H.completion_body("p", 4, {"top_p": 0.5})["top_p"] == 0.5
+    sampled = H.completion_body("p", 4, {"temperature": 0.8})
+    assert sampled["temperature"] == 0.8 and "top_p" not in sampled
+    streamed = H.completion_body("p", 4, {"stream": True, "cache_group": "g"})
+    assert streamed["top_p"] == 1 and streamed["stream"] and streamed["cache_group"] == "g"
