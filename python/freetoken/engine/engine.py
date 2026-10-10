@@ -717,8 +717,6 @@ class Engine:
         """Swap the physical blocks under idle pools, which re-create their views on them."""
         from freetoken.kvcache.runtime_pool import PhysicalBlocks
 
-        self.page_units = None
-        self.runtime.close()
         self.runtime = PhysicalBlocks(budget, self.device, self.stream)
         self.runtime.limits = self.runtime_limits = limits
         object.__setattr__(config, "runtime_cache_gib", budget / (1 << 30))
@@ -1294,6 +1292,10 @@ class Engine:
         prior_replays = self.graph_runner.replay_counts
         prior_eager = self.graph_runner.eager_counts
         self.graph_runner.destroy_cuda_graphs()
+        if runtime_cache_gib is not None:
+            # A smaller runtime may fund larger expert banks below.
+            self.page_units = None
+            self.runtime.close()
         # 2. Resize caches in place (each frees its old GPU tensors before allocating).
         # Pin the new window first (validated above) so any KV-pool rebuild below sizes the window
         # to it (_dsv4_pool_sizes / _swa_paged_num_tokens read config.swa_num_pages_override).
