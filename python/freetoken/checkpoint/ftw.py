@@ -447,12 +447,13 @@ def load_ftw_banks(
     reader = FTWReader(path)
     format_state = reader.meta("expert_format_state")
     transform = None
-    if prepare is not None:
-        format_state, transform = prepare(format_state)
     bank_entries = reader.entries("experts_bank")
     if not bank_entries:
         reader.close()
         return None
+    if prepare is not None:
+        bank_names = {_LAYER_ENTRY_RE.sub(r"\g<base>", e["name"]) for e in bank_entries}
+        format_state, transform = prepare(format_state, bank_names=bank_names)
 
     alpha_entries = [e for e in bank_entries if e["name"] in _ALPHA_NAMES]
     row_entries = [e for e in bank_entries if e["name"] not in _ALPHA_NAMES]

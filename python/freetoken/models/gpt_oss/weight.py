@@ -658,3 +658,6 @@ def load_expert_biases(model_path: str, model_config, *, dtype: torch.dtype) -> 
         raise ValueError(f"Missing GPT-OSS expert biases: {sorted(missing)[:8]}")
     pin_banks(banks)
     return {name: [bank.tensor for bank in per_layer] for name, per_layer in banks.items()}
+
+
+load_expert_biases.bank_names = ("gate_bias", "up_bias", "down_bias")
