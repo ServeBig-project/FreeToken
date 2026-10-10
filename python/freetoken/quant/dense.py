@@ -62,9 +62,11 @@ def effective_dense_precision(model_config) -> str:
     plan = getattr(model_config, "dense_precision", "source")
     if plan != "source":
         return plan
-    schemes = (getattr(model_config, name, "none") for name in ("attn_quant", "dense_quant", "lm_head_quant"))
+    schemes = tuple(getattr(model_config, name, "none") for name in ("attn_quant", "dense_quant", "lm_head_quant"))
     if any("fp8" in s for s in schemes) or getattr(model_config, "expert_quant", "none") == "fp8_block":
         return "fp8"
+    if "nvfp4" in schemes:
+        return "nvfp4"
     return "bf16"
 
 
