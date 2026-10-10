@@ -9,8 +9,8 @@ import os
 
 import pytest
 
-from service_common import (COMMON, DFLASH_ARGS, assert_length, components, enum_prompt, record,
-                            sd_enabled, sd_num, service)
+from service_common import (COMMON, DFLASH_ARGS, Watch, assert_enum, assert_length, components, counter_delta,
+                            dump, enum_prompt, record, run_streams, sd_enabled, sd_num, service)
 from service_scenarios import cancel_round, pause_round
 
 
@@ -56,3 +56,43 @@ def test_paused_sd_requests_restore_and_complete(svc):
 
 def test_cancel_during_pause_others_continue(svc):
     cancel_round(svc, salt=20000, out=3000, items=600, preamble="")
+
+
+def _first_diff(a, b):
+    return next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+
+
+def test_shared_prefix_outputs_match_solo_runs(svc):
+    """Four requests share a ~3000-token prefix with different suffixes; two at a time cannot
+    stay resident, so the round pauses, restores or recomputes. Each output must equal the same
+    prompt run alone without pressure (both runs reuse the same warmed prefix), and continue its
+    suffix's enumeration without gaps or prompt text."""
+    prefix = enum_prompt(1000, 600)
+    suffixes = [" " + enum_prompt(5000 + 1000 * i, 40) for i in range(4)]
+    out = 2500
+    solo = []
+    svc.c.complete(prefix, 1, cache_group="solo")
+    for sfx in suffixes:
+        solo.append(svc.c.complete(prefix + sfx, out, cache_group="solo"))
+    svc.c.wait_idle()
+    svc.c.complete(prefix, 1, cache_group="press")
+    streams = [svc.c.stream(prefix + sfx, out, ignore_eos=True, cache_group="press") for sfx in suffixes]
+    rt0 = svc.rt()
+    with Watch(svc.c) as w:
+        run_streams(streams, 1800)
+    d = counter_delta(rt0, svc.rt())
+    diffs = [_first_diff(s.text, r["text"]) for s, r in zip(streams, solo)]
+    dump(f"{NAME}_shared_prefix_texts", {"solo": [r["text"] for r in solo], "pressure": [s.text for s in streams],
+                                        "first_diff": diffs})
+    record(f"{NAME}:shared_prefix", delta=d, first_diff=diffs, watch=w.report(),
+           solo_usage=[r["usage"] for r in solo], streams=[s.summary() for s in streams])
+    assert not w.violations, w.report()
+    assert d["paused"] >= 1, f"the shared-prefix round paused nothing: {d}"
+    if d["recompute"]:
+        assert d["recomputed_tokens"] > 0, d
+    for i, (s, r) in enumerate(zip(streams, solo)):
+        assert s.done and s.finish == "length" and s.usage["completion_tokens"] == out, s.summary()
+        assert s.usage["prompt_tokens"] == r["usage"]["prompt_tokens"], (s.usage, r["usage"])
+        assert_enum(r["text"], 5040 + 1000 * i, out)
+        assert_enum(s.text, 5040 + 1000 * i, out)
+        assert s.text == r["text"], f"request {i} diverges from its solo run at character {diffs[i]}"
