@@ -611,7 +611,7 @@ class Engine:
                         prior: dict) -> dict:
         """The longest request a runtime of ``budget`` bytes holds alone, and how many it holds
         at their minimum (a page, a GDN state and record row, a drafter window each): the
-        context and concurrency limits. Each request's tables, drafter index lists and SD
+        context and concurrency limits. Each request's tables, drafter index lists and sampling
         logits/probabilities (``execution_bytes``) must fit ``execution``. A context the user
         fixed, or (``prior`` limits, on a rebuild) the running concurrency, must fit."""
         from freetoken.utils import div_ceil as up
@@ -642,12 +642,12 @@ class Engine:
         if context < 1 or (asked is not None and context < asked):
             raise ValueError(f"{mem_GB(budget)} of runtime holds one request of {context} "
                              f"tokens; {asked or 1} are required")
-        # Page table and token pool rows, the drafter's index lists, and one SD round's
-        # verify logits and probabilities.
+        # Page table and token pool rows, the drafter's index lists, and sampling logits and
+        # probabilities (an SD round's verify rows).
         width = _page_table_width(context, ps)
         vocab = config.model_config.vocab_size
         row_bytes = (8 * width + (draft.index_bytes(width) if draft is not None else 0)
-                     + 2 * 4 * (steps + 1) * vocab * (steps > 0))
+                     + 2 * 4 * (steps + 1) * vocab)
         # Each graph-captured batch row: fp32 logits and the attention backend's page-table row.
         executing = lambda c: ((c + 1) * row_bytes
                                + _graph_rows(config, c) * (4 * vocab + 4 * width))
@@ -678,11 +678,14 @@ class Engine:
 
     def _map_capture_scratch(self, config: EngineConfig, mapped: bool) -> None:
         """SD graph capture writes scratch K/V at the first positions; map them while it runs."""
-        if self.page_units is None:
+        from .speculative_graph import MAX_BATCH
+
+        steps = config.speculative_num_steps or 0
+        if self.page_units is None or not steps or not config.speculative_graphs:
             return
-        scratch = range(div_ceil(min(
-            config.max_running_req * ((config.speculative_num_steps or 0) + 1),
-            self.num_pages * config.page_size), config.page_size))
+        rows = min(_graph_rows(config, config.max_running_req), MAX_BATCH)
+        scratch = range(div_ceil(min(rows * (steps + 1), self.num_pages * config.page_size),
+                                 config.page_size))
         if mapped:
             if not self.page_units.acquire(scratch):
                 raise RuntimeError("shared runtime cannot map graph capture scratch blocks")
@@ -1747,26 +1750,35 @@ class Engine:
 
     def _fit_prefill_tile(self, config) -> None:
         """Shared runtime: the largest prefill tile, up to --max-extend-tokens, whose activation
-        peak fits the memory left beside the runtime, weights, experts and an SD round's verify
-        logits and probabilities. Two small probes give the peak's per-token growth; only the
-        tile they predict to fit is run, to confirm it. A third, of one-token requests, gives
+        peak fits the memory left beside the runtime, weights, experts, the scheduler's token
+        pool and a full batch's sampling logits and probabilities (an SD round's verify rows).
+        Two small probes give the peak's per-token growth; only the tile they predict to fit is
+        run, to confirm it. One-token requests, against one sequence of as many tokens, give
         what each request in a batch adds (its logits row, its rounded-up GDN chunk); room for
         the most requests a batch can hold is set aside. A layered pipeline also keeps each
         token's hidden state, residual and drafter features across its layer groups, counted
         per token. Every TP rank probes the same shapes. The scheduler never starts a larger
         tile."""
         steps = config.speculative_num_steps or 0
-        reserve = (2 * 4 * config.max_running_req * (steps + 1) * config.model_config.vocab_size
-                   if steps else 0)
+        reserve = 2 * 4 * config.max_running_req * (steps + 1) * config.model_config.vocab_size
+        # The scheduler's token pool, shaped like the page table, replaces the current one
+        # after this fit.
+        table = 4 * (self.page_table.numel() - getattr(self, "_token_pool_numel", 0))
+        self._token_pool_numel = self.page_table.numel()
         # memory_ratio limits the caches; its remainder is for graphs and activations.
-        budget = self._baseline_free - reserve
+        budget = self._baseline_free - reserve - max(table, 0)
         # The user's --max-extend-tokens bounds every refit; earlier fits only narrowed it.
         self._asked_extend = getattr(self, "_asked_extend", config.max_extend_tokens)
         ps, high = config.page_size, min(self._asked_extend, self.max_seq_len)
-        small = max(ps, min(256, high // 4) // ps * ps)
+        if high < ps:  # a window model resumes chunks on page boundaries
+            raise ValueError(f"a {high}-token prefill cap (--max-extend-tokens or the context) "
+                             f"is below one {ps}-token page")
+        small = max(1, min(256, high // 4))  # probes stay within the cap and the context
         retained = self._prefill_retained_bytes(config)
         peak_a, peak_b = self._probe_prefill(small), self._probe_prefill(2 * small)
-        per_request = max(self._probe_prefill(1, small) - peak_a, 0) / small
+        # No more requests than run at once: a batch the server really runs, before the fit.
+        n = min(small, config.max_running_req)
+        per_request = max(self._probe_prefill(1, n) - self._probe_prefill(n), 0) / n
         budget -= int(min(config.max_running_req, high) * per_request)
         per_token = max(peak_b - peak_a, 0) / small + retained
         room = budget - self._synced_used_bytes() - (peak_a - (per_token - retained) * small)
