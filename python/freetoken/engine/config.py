@@ -273,15 +273,17 @@ class EngineConfig:
         from freetoken.attention import attention_backend_info
 
         backend = self.attention_backend
-        graph_attention = (backend != "auto" and "," not in backend
-                           and attention_backend_info(backend).speculative_graphs)
+        info = attention_backend_info(backend) if backend != "auto" and "," not in backend else None
+        # A backend with its own fixed page size captures at it; the others need single tokens.
+        graph_attention = (info is not None and info.speculative_graphs
+                           and (self.page_size == 1 or info.page_sizes is not None))
         return bool(
             0 < self.speculative_num_steps <= 8
             and self.dtype == torch.bfloat16
             and self.model_config.expert_quant in ("none", "nvfp4") and not self.nowag_expert_path
             and self.model_config.moe_weight_format in (None, "bf16")
             and graph_attention and self.moe_backend in ("offload", "hybrid")
-            and self.page_size == 1 and self.tp_info.size == 1
+            and self.tp_info.size == 1
             and getattr(self, "batching_policy", "legacy") in ("legacy", "layered-pipeline")
             and self.cuda_graph_max_bs != 0 and self.cuda_graph_bs != []
         )

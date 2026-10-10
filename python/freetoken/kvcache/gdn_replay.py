@@ -20,11 +20,12 @@ def replay_shapes(n_layers, conv_dim, v_heads, k_heads, key_dim, value_dim, kern
         # Raw conv inputs by absolute position: the target's kernel-1 inputs before a round
         # plus the round's draft/verify inputs.
         shapes["window"] = ((n_layers, rows, kernel - 1 + draft_steps + 1, conv_dim), dtype)
-        # The target's declared slot states after every verify input; the committed one becomes
-        # the live state (the records above only stand in for the GDN state).
+        # The target's declared slot states after every verify input, plus a sink input for a
+        # captured graph's padding rows; the committed one becomes the live state (the records
+        # above only stand in for the GDN state).
         for spec in (spec for spec in slot_states if not spec.draft):
             shapes[f"verify_{spec.name}"] = (
-                (max(1, len(spec.layer_ids)), rows, draft_steps + 1, *spec.shape),
+                (max(1, len(spec.layer_ids)), rows, draft_steps + 2, *spec.shape),
                 spec.dtype if spec.dtype is not None else dtype)
     if graph_batch:
         # Fixed per-sequence rows, slots and offsets that captured graphs read; decode, draft

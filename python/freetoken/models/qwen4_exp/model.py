@@ -182,6 +182,11 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
         return state.next_layer
 
     @staticmethod
+    def layer_group_features(state: StreamState) -> torch.Tensor:
+        """The final streams of a state that ran every layer: a native MTP drafter's input."""
+        return state.streams
+
+    @staticmethod
     def layer_group_merge_states(decode: StreamState, prefill: StreamState) -> StreamState:
         if decode.next_layer != prefill.next_layer:
             raise RuntimeError("decode and prefill states are at different layers")

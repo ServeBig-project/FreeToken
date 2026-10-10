@@ -37,7 +37,11 @@ class MTPRuntime:
     def __init__(self, engine, mtp) -> None:
         self.engine, self.mtp = engine, mtp
         self.history_rows = 0
-        self.weight_bytes = sum(t.numel() * t.element_size() for t in mtp.state_dict().values())
+        weights = mtp.state_dict().values()
+        self.weight_bytes = sum(t.numel() * t.element_size() for t in weights)
+        # What the weights actually are, reported apart from the target's formats.
+        self.weight_dtype = ",".join(sorted({str(t.dtype).removeprefix("torch.") for t in weights}))
+        self.weight_residency = ",".join(sorted({t.device.type for t in weights}))
 
     def _tail(self) -> torch.Tensor:
         return get_global_ctx().linear_state_pool.slot_state(self.mtp.tail_state)
@@ -64,15 +68,16 @@ class MTPRuntime:
         backend.plan_writes(md, out_loc, positions, _upload([_slot(r) for r in reqs], device).int())
         return md, positions, out_loc
 
-    def advance(self, batch: Batch) -> None:
-        """After a target prefill or AR forward: the rows it made history. A prefill's state
-        captures inside the forward (page-aligned prefix snapshots) get the MTP state there too."""
+    def advance(self, batch: Batch, features: torch.Tensor) -> None:
+        """After a target prefill or AR forward of ``batch`` (its final streams ``features``):
+        the rows it made history. A prefill's state captures inside the forward (page-aligned
+        prefix snapshots) get the MTP state there too."""
         reqs = batch.reqs
         captures = [[(c.pos, c.slot) for c in r.state_captures if c.slot is not None
                      and c.pos is not None and r.cached_len < c.pos < r.device_len]
                     for r in reqs]
         self.extend(reqs, [r.cached_len for r in reqs], [r.extend_len for r in reqs],
-                    batch.draft_features, batch.input_ids, captures)
+                    features, batch.input_ids, captures)
         batch.draft_features = None
 
     def extend(self, reqs, starts, counts, streams, input_ids, captures=None) -> None:
@@ -177,6 +182,8 @@ class MTPDrafter:
         return dict(mtp_draft_positions=self.positions,
                     mtp_history_rows=self.runtime.history_rows,
                     mtp_weight_bytes=self.runtime.weight_bytes,
+                    mtp_weight_dtype=self.runtime.weight_dtype,
+                    mtp_weight_residency=self.runtime.weight_residency,
                     mtp_history_bytes_per_token=self.engine.kv_cache.unit_bytes()[0] // len(layers))
 
     def propose(self, batch, views, starts, lengths) -> DraftResult:

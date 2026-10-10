@@ -724,6 +724,9 @@ class LayeredExecutionAdapter:
                 decode_state,
                 self.num_stages,
             )
+        if self._engine.mtp is not None:
+            self._engine.mtp.advance(decode_input.batch,
+                                     self._engine.model.layer_group_features(decode_state))
         return self._engine.finish_layer_group_prefill(
             decode_input.batch,
             decode_state,
@@ -770,6 +773,17 @@ class LayeredExecutionAdapter:
             output_indices=output_indices,
             request_indices=request_indices,
         )
+
+    def advance_draft(self, prefill_input: ForwardInput, state: object) -> None:
+        """A native MTP drafter writes the finished wave's rows into its history, tile by
+        tile in row order, before any request's lengths move on."""
+        mtp = self._engine.mtp
+        if mtp is None:
+            return
+        tiles = (zip((tile.forward_input.batch for tile in state.tiles), state.tile_states)
+                 if isinstance(state, _TiledPrefillState) else [(prefill_input.batch, state)])
+        for batch, tile_state in tiles:
+            mtp.advance(batch, self._engine.model.layer_group_features(tile_state))
 
     def finish_prefill_wave(
         self,

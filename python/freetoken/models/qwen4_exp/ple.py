@@ -285,7 +285,8 @@ class NGramEmbedding(BaseOP):
         flat_pos = torch.arange(ids.numel(), device=ids.device)
         req = (torch.searchsorted(cu, flat_pos, right=True) - 1).clamp_(max=num_reqs - 1)
         col = flat_pos - cu[req] + ctx_len
-        packed = ids.new_full((num_reqs, ctx_len + max(meta.seq_lens)), self.eos_token_id)
+        # As wide as every row: a captured verify graph's padding rows join the last request.
+        packed = ids.new_full((num_reqs, ctx_len + ids.numel()), self.eos_token_id)
         packed[:, :ctx_len] = meta.ngram_context
         packed[req, col] = ids
         return packed, lambda t: t[req, col]
@@ -388,10 +389,16 @@ class PLELayer(BaseOP):
         if meta.verify is None:
             commit_ngram_context(meta, context_pool, track)
         else:
-            rows = torch.arange(x.shape[0], device=x.device)
-            req = torch.searchsorted(meta.cu_seqlens, rows, right=True) - 1
+            rows, req = self._verify_rows(meta, x.shape[0])
             pool.write_verify(PLE_NGRAM_STATE, None, meta.verify, ngram_context_after(meta, rows, req))
         return out
+
+    @staticmethod
+    def _verify_rows(meta: PLEMetadata, total: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Every row and its request; a captured graph's padding rows join the last request."""
+        rows = torch.arange(total, device=meta.cu_seqlens.device)
+        req = torch.searchsorted(meta.cu_seqlens, rows, right=True) - 1
+        return rows, req.clamp_(max=len(meta.seq_lens) - 1)
 
     def _write_track_snapshot(self, states: torch.Tensor, x: torch.Tensor, rows: torch.Tensor,
                               dst: torch.Tensor) -> None:
@@ -411,6 +418,8 @@ class PLELayer(BaseOP):
         """silu of the dilated depthwise conv over [state | x]; rolls the per-request state."""
         if meta.is_decode:
             return self._decode_conv(x, meta, states)
+        if meta.verify is not None:
+            return self._verify_conv(x, meta, states)
         return self._prefill_conv(x, meta, states)
 
     def _decode_conv(self, x: torch.Tensor, meta: PLEMetadata, states: torch.Tensor) -> torch.Tensor:
@@ -420,6 +429,23 @@ class PLELayer(BaseOP):
         window = torch.cat([state[..., :: self.dilation], column], dim=-1).float()
         out = (window * self.conv1d.weight.squeeze(1).float()).sum(-1)
         states.index_copy_(0, meta.state_slots, torch.cat([state[..., 1:], column], dim=-1).to(states.dtype))
+        return F.silu(out.to(x.dtype))
+
+    def _verify_conv(self, x: torch.Tensor, meta: PLEMetadata, states: torch.Tensor) -> torch.Tensor:
+        """Verify rows: each row's window comes from its request's earlier rows or live history,
+        gathered on the device (the row layout changes per round, so a captured graph cannot
+        bake host-built indices). The history after each row goes to its verify record."""
+        rows, req = self._verify_rows(meta, x.shape[0])
+        first = meta.cu_seqlens[req].unsqueeze(1)
+        source = rows.unsqueeze(1) + torch.arange(-self.state_len, 1, device=x.device)
+        state = states.index_select(0, meta.state_slots.index_select(0, req)).to(x.dtype)
+        column = (source - first + self.state_len).clamp_(0, self.state_len - 1)
+        window = torch.where((source >= first).unsqueeze(1),
+                             x[source.clamp_min(0)].transpose(1, 2),
+                             state.gather(2, column.unsqueeze(1).expand(-1, x.shape[1], -1)))
+        get_global_ctx().linear_state_pool.write_verify(
+            PLE_CONV_STATE, self.layer_id, meta.verify, window[..., 1:])
+        out = (window[..., :: self.dilation].float() * self.conv1d.weight.squeeze(1).float()).sum(-1)
         return F.silu(out.to(x.dtype))
 
     def _prefill_conv(self, x: torch.Tensor, meta: PLEMetadata, states: torch.Tensor) -> torch.Tensor:
@@ -433,14 +459,8 @@ class PLELayer(BaseOP):
         history.index_copy_(1, state_index, state.permute(1, 0, 2).reshape(width, -1))
         history.index_copy_(1, out_index + self.state_len, x.transpose(0, 1).contiguous())
         out = F.conv1d(history.unsqueeze(0), self.conv1d.weight, groups=width, dilation=self.dilation).squeeze(0)
-        if meta.verify is None:
-            new_state = history.index_select(1, next_state_index).view(width, num_reqs, self.state_len)
-            states.index_copy_(0, meta.state_slots, new_state.permute(1, 0, 2).to(states.dtype).contiguous())
-        else:
-            # The history after each row: the state_len columns ending at its own input.
-            columns = out_index.unsqueeze(1) + 1 + torch.arange(self.state_len, device=x.device)
-            get_global_ctx().linear_state_pool.write_verify(
-                PLE_CONV_STATE, self.layer_id, meta.verify, history[:, columns].permute(1, 0, 2))
+        new_state = history.index_select(1, next_state_index).view(width, num_reqs, self.state_len)
+        states.index_copy_(0, meta.state_slots, new_state.permute(1, 0, 2).to(states.dtype).contiguous())
         return F.silu(out.index_select(1, out_index).transpose(0, 1))
 
     def _prefill_indices(self, lens: List[int], device: torch.device):

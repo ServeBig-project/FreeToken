@@ -563,5 +563,52 @@ class QSASparseAttnBackend(BaseAttnBackend):
         super().reset_capture()
         self._graph = {}
 
+    def create_speculative_graphs(self, max_seq_len: int, max_batch_size: int):
+        return QSASpeculativeGraphs(self)
+
+
+class QSASpeculativeGraphs:
+    """Verify graphs: the rows' request map, lengths, page rows and write plan sit in static
+    buffers restaged before each replay (a layer-range graph may replay alone, as for decode).
+    A capture reads and writes only the dummy page; padding rows join the last request and
+    write the scratch rows."""
+
+    _NAMES = ("token_to_req", "cu_seqlens", "seq_lens", "table_idx", "block_table")
+
+    def __init__(self, backend: QSASparseAttnBackend) -> None:
+        self.backend = backend
+        self.static: dict[str, torch.Tensor] | None = None
+
+    def _stage(self, md: QSASparseMetadata, batch: Batch) -> None:
+        if self.static is None:  # the first capture is the largest
+            width = -(-get_global_ctx().page_table.shape[1] // self.backend.page_size)
+            self.static = {name: torch.zeros_like(getattr(md, name)) for name in self._NAMES}
+            self.static["block_table"] = md.block_table.new_zeros(md.block_table.shape[0], width)
+            self.static["cmp_rows"], self.static["ring_rows"] = (
+                torch.zeros_like(md.token_to_req) for _ in range(2))
+        bs, rows = md.seq_lens.numel(), md.token_to_req.numel()
+        static = self.static
+        static["token_to_req"][rows:].fill_(bs - 1)
+        static["cmp_rows"][rows:].fill_(self.backend.kvcache.cmp_scratch_base)
+        static["ring_rows"][rows:].fill_(-1)
+        for name in self._NAMES:
+            source = getattr(md, name)
+            target = static[name][tuple(slice(0, n) for n in source.shape)]
+            target.copy_(source)
+            setattr(md, name, target)
+        self.backend._plan_index_writes(md, batch)
+        for name in ("cmp_rows", "ring_rows"):
+            target = static[name][:rows]
+            target.copy_(getattr(md, name))
+            setattr(md, name, target)
+
+    def prepare_capture(self, batch: Batch, table: torch.Tensor) -> None:
+        self.backend.prepare_metadata(batch)
+        batch.attn_metadata.block_table[:] = table[:, :1] // self.backend.page_size
+        self._stage(batch.attn_metadata, batch)
+
+    def prepare_replay(self, batch: Batch) -> None:
+        self._stage(batch.attn_metadata, batch)
+
 
 __all__ = ["QSASparseAttnBackend", "QSASparseMetadata"]

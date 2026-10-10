@@ -1428,7 +1428,7 @@ class Engine:
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         logits = self.compute_logits(batch)
         if self.mtp is not None:
-            self.mtp.advance(batch)
+            self.mtp.advance(batch, batch.draft_features)
         for req in batch.reqs:
             req.complete_one()
 
@@ -2085,8 +2085,6 @@ def _layered_pipeline_unsupported(config: EngineConfig, is_moe: bool) -> str | N
         return "layered-pipeline batching requires MoE prefill overlap"
     if config.speculative_num_steps != 0 and config.legacy_sd_controls:
         return _LEGACY_SD_CONTROLS
-    if config.speculative_method == "mtp" and config.speculative_num_steps != 0:
-        return "native MTP drafting does not run with layered-pipeline batching yet"
     if not config.moe_cache_auto and (reason := _layered_cache_shortfall(config)):
         return reason
     spec = get_model_spec(config.hf_config.architectures[0])

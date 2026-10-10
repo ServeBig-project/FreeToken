@@ -193,6 +193,7 @@ class GraphRunner:
         # graphs-disabled early return so that config gets the phase too.
         emit_progress("Capturing CUDA graphs / warming up", 0, 0)
         self.graph_map: Dict[int, torch.cuda.CUDAGraph] = {}
+        self.features: Dict[int, torch.Tensor | None] = {}
         if self.max_graph_bs == 0:
             return logger.info_rank0("CUDA graph is disabled.")
 
@@ -243,6 +244,7 @@ class GraphRunner:
             if pool is None:
                 pool = graph.pool()  # reuse cuda graph handle to reduce memory
             self.graph_map[bs] = graph
+            self.features[bs] = batch.draft_features  # rewritten by each replay (native MTP)
 
         assert pool is not None
         self.pool = pool
@@ -405,6 +407,7 @@ class GraphRunner:
         g = self.graph_map[batch.padded_size]
         self.attn_backend.prepare_for_replay(batch)
         g.replay()
+        batch.draft_features = self.features[batch.padded_size]
         shape = ("target_decode", batch.size, batch.size, batch.padded_size)
         self.replay_counts[shape] = self.replay_counts.get(shape, 0) + 1
         return self.buffer.logits[: batch.size]
@@ -514,6 +517,7 @@ class GraphRunner:
         # free-before-alloc cannot reclaim this GPU memory. empty_cache() is left to the
         # caller / next capture (GraphRunner._capture_graphs already runs it).
         self.graph_map = {}
+        self.features = {}
         self.speculative = None
         self.pool = None
         self.layer_range_graph_map = {}
