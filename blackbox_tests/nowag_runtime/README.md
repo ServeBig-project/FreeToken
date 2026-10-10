@@ -15,6 +15,9 @@ The test worktree's old design documents are not a contract source.
 | `test_ftw.py` | FTW round trip, isolation, rename, missing data, bias, TP2 | GPU + `NOWAG_SCRATCH` |
 | `test_cache_status.py` | `/v1/cache/status` `geometry.experts` | GPU (TP2 row: two GPUs) |
 | `test_service.py` | modes, cache sizes, batching, concurrency/cancel, HTTP, SD, TP2, DSV4, non-NoWAG regression, paired perf | GPU; baseline rows need `NOWAG_BASELINE_SOURCE` |
+| `test_service_paths.py` | minimum capacities, transfer paths, rebuilds, cache groups, SD controls and replay counters | GPU |
+| `test_tp_numeric.py` | independent per-rank bind math plus actual NCCL reduction | two approved GPUs |
+| `test_cpu_extension_compat.py` | standalone old CPU-extension startup error, before weight loading | GPU; isolated old-extension installation |
 
 `tolerances.py` holds the numeric bounds (frozen before any candidate result; basis in its
 docstring, reproduce with `python calibrate.py`); `harness.py` holds the frozen output
@@ -115,6 +118,19 @@ export NOWAG_LOG_DIR=/data2/servebig-envs/nowag_runtime_acceptance_20261009
 
 No broad suite run should hide skips: missing GPT-OSS currently affects 12 GPU rows;
 source-isolated FTW has its own container row. DSV4/Qwen/DFlash inputs are available.
+
+The separate old-extension contract adds 3 startup rows. It copies public model metadata
+to a temporary directory, omits its weight shards, and requires the extension rebuild error
+to precede any missing-shard error. It never changes an installation:
+
+```sh
+NOWAG_STALE_CPU_SOURCE=/data2/servebig-envs/nowag_runtime_acceptance_20261009/stale-python \
+NOWAG_STALE_CPU_PYTHON=$P $P -m pytest -rs "$T/test_cpu_extension_compat.py"
+```
+
+Latest collection: 309 rows (116 independent CPU/reference, 193 GPU-gated); no candidate
+pass is implied by collection. Forced SD zero-acceptance has no public control, and GPT-OSS
+TP bias plus long-running allocation/rebuild stress remain unverified.
 
 ## Environment
 
