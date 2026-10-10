@@ -66,7 +66,7 @@ BASE也可为本项目已有FTW。显式SIDE决定路由专家投影来源，不
 | batching | 对该模型公开支持的 legacy／mixed／layered／layered-pipeline（joint 已废弃，不在本契约内）；对应合法配置与拒绝行为 |
 | Graph | eager、普通 decode 图、已有层段图；反复回放时换 token、路由、前缀长度和自然尾批 |
 | SD | self-SD 和匹配 DFlash；fixed与已有 adaptive／缓存起草／补缺／预取控制；N=1/2/4/8及真实尾部裁剪 |
-| TP | TP1、真实 TP2；合法分片及 D6 边界组，原生与 FTW，各 rank 使用同一 checkpoint |
+| TP | TP1、真实 TP2；合法分片及 D6 边界组，原生 checkpoint 各 rank 使用同一份；FTW 只支持 TP1，TP>1 在 ready 前报公开错误 |
 
 不是所有行都能笛卡尔组合。主线 SD 的 TP=1、全 CPU 专家 SD 的拒绝、attention／状态／drafter限制、legacy-only 控制项、并行 prefill 的公共限制继续适用。格式本身不能再排除一个已具备所需组件能力的合法组合。
 
@@ -130,7 +130,7 @@ Graph与SD的实际执行继续由既有配置、Graph／speculative统计和独
 | GPU 算子 | 真实 H/I/top-k、B=1/4/16与非整批尾部、输出缓冲、压缩权重数值、图回放 |
 | 缓存／调度 | 冷热、容量边界、预取重叠、不同层／请求的路由、驻留组、长短混合与取消 |
 | SD | 正常／零接受、不同草稿长度、拒绝后状态、范围图、尾批、合法控制项与错误组合 |
-| TP／FTW | 双卡边界组、bias与归约；转换后隔离原目录、不同合法TP加载、重建与复用 |
+| TP／FTW | 双卡边界组、bias与归约；转换后隔离原目录、FTW 配 TP>1 被拒绝、重建与复用 |
 | 真实服务 | 现有Qwen3.6和DSV4权重各覆盖其合法执行模式；新模型仅在匹配产物／基座齐备后计为通过 |
 | 非NoWAG回归 | 受公共边界修改影响的BF16、NVFP4等已有配置，尤其默认后端、精度和缓存行为 |
 

@@ -346,7 +346,7 @@ def load_nowag_expert_sources(
 
 
 def prepare_ftw_banks(stored_state, model_config, *, bank_names):
-    """Select this rank's encoding before FTW locks each loaded bank in host memory."""
+    """Check the FTW carries the model's expert biases and return its encoding state."""
     from freetoken.moe.expert_banks import _model_hook
 
     biases = _model_hook(model_config, "load_expert_biases")
@@ -354,18 +354,7 @@ def prepare_ftw_banks(stored_state, model_config, *, bank_names):
         missing = set(biases.bank_names) - bank_names
         if missing:
             raise ValueError(f"FTW is missing required expert bias banks: {sorted(missing)}")
-    stored = NowagState(**stored_state)
-    shard = _Shard.of(model_config, stored.d)
-    state = shard.state(stored.d, stored.assignment_bits)
-    if state.intermediate_size == stored.intermediate_size:
-        return state, None
-
-    def transform(name, tensor):
-        if name == "down_bias" and shard.rank != 0:
-            return None
-        return shard.apply(name, tensor)
-
-    return state, transform
+    return NowagState(**stored_state)
 
 
 def load_banks(model_path, model_config, device, dtype, dummy, *, layer_sink=None):

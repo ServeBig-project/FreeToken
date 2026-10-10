@@ -15,6 +15,7 @@ from freetoken.gpu_select import gpu_identity
 from freetoken.layers import set_rope_device
 from freetoken.models import create_model, load_weight
 from freetoken.moe import create_moe_backend, is_offload_moe_backend
+from freetoken.checkpoint.ftw import is_ftw_checkpoint
 from freetoken.moe.expert_format import ExpertLayout, ExpertMethod, bind_expert_method, expert_math
 from freetoken.moe.expert_banks import has_expert_weight_override, load_expert_banks
 from freetoken.moe.offload_cache import (
@@ -331,6 +332,10 @@ class Engine:
             speculative_draft_model_path=config.speculative_draft_model_path,
             speculative_phase=config.speculative_phase,
         )
+        if config.tp_info.size > 1 and is_ftw_checkpoint(config.model_path):
+            # FTW stores dense weights whole, as TP1 loads them; only the model readers shard.
+            raise ValueError("FTW checkpoints serve with tensor parallel size 1; "
+                             "use the original checkpoint for tensor parallelism")
         self.execution_fallbacks = _adjust_config(config)
         torch.manual_seed(42)
         self.stream = torch.cuda.Stream()

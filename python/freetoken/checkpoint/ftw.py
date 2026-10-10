@@ -448,14 +448,13 @@ def load_ftw_banks(
 
     reader = FTWReader(path)
     format_state = reader.meta("expert_format_state")
-    transform = None
     bank_entries = reader.entries("experts_bank")
     if not bank_entries:
         reader.close()
         return None
     if prepare is not None:
         bank_names = {_LAYER_ENTRY_RE.sub(r"\g<base>", e["name"]) for e in bank_entries}
-        format_state, transform = prepare(format_state, bank_names=bank_names)
+        format_state = prepare(format_state, bank_names=bank_names)
 
     alpha_entries = [e for e in bank_entries if e["name"] in _ALPHA_NAMES]
     row_entries = [e for e in bank_entries if e["name"] not in _ALPHA_NAMES]
@@ -536,10 +535,8 @@ def load_ftw_banks(
     # Jobs are per (bank, layer) -- many small reads, so a wider pool; each bank pins
     # as its read completes, overlapping cudaHostRegister with the remaining reads.
     n_jobs = len(alpha_entries) + len(row_jobs) + len(layer_jobs)
-    completion = (LayerCompletionTracker(
-        len(row_hb), row_hb,
-        lambda layer, banks: layer_sink(layer, {n: b for n, b in banks.items() if b is not None}),
-    ) if layer_sink is not None else None)
+    completion = (LayerCompletionTracker(len(row_hb), row_hb, layer_sink)
+                  if layer_sink is not None else None)
     try:
         with PinPipeline() as pins:
 
@@ -552,22 +549,6 @@ def load_ftw_banks(
                     view = bank.tensor[head_pad:head_pad + nbytes].view(dtype).view(experts, *shape)
                 bank.tensor = view
                 row_view_args[name][layer] = None
-                if transform is not None:
-                    local = transform(name, view)
-                    if local is None:
-                        row_hb[name][layer] = None
-                        del local, view
-                        bank.close()
-                        if completion is not None:
-                            completion.note(layer)
-                        return
-                    if local is not view:
-                        target = HostBank(tuple(local.shape), local.dtype)
-                        target.tensor.copy_(local)
-                        row_hb[name][layer] = target
-                        del local, view
-                        bank.close()
-                        bank = target
                 if completion is None:
                     pins.submit(bank)
                 else:
@@ -611,8 +592,6 @@ def load_ftw_banks(
 
     sources: dict[str, list] = {}
     for name, banks in row_hb.items():
-        if banks[0] is None:
-            continue
         views = []
         for bank, view_args in zip(banks, row_view_args[name]):
             if view_args is None:  # per-layer entry: already shaped [num_experts, ...]

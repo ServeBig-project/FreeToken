@@ -175,8 +175,8 @@ def convert_checkpoint(
 ) -> dict:
     """Write ``model_path`` as an FTW checkpoint at ``out_dir``. Returns the index dict.
 
-    The FTW format is TP-agnostic and conversion runs single-process, so the resulting
-    checkpoint records no TP layout and loads independently of the runtime TP setting."""
+    Conversion runs single-process and stores the TP1 weights, so the checkpoint serves
+    with tensor parallel size 1."""
     from freetoken.distributed import DistributedInfo, set_tp_info, try_get_tp_info
     from freetoken.engine.config import EngineConfig
     from freetoken.models.weight import load_weight
