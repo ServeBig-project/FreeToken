@@ -87,7 +87,7 @@ method.workspace_spec(rows, top_k, bank_rows=...)  # dict: name -> (shape_tuple,
 method.run(x, expert_rows, route_weights, banks, shared, workspace=..., out=...)
 ```
 
-`math`是原组件数学记录 `freetoken.moe.expert_format.ExpertMath`：activation、activation_alpha／activation_limit、router_weight_on_input（乘在 gate/up 输入）、router_weight_on_down_input（乘在 down 输入）以及gate/up与down输入舍入（`None` 或 `E4M3_GROUP128_UE8M0`）。`layout`含公共几何、bank形状／dtype、MoE层编号及TP逻辑分区；`format_state`由权重加载入口返回，具体格式负责解释。独立作者通过合法模型和上文权重文件取得这些公开输出，不读取实现私有对象字段；参考数学直接来自本契约的权重定义。
+`math`是原组件数学记录 `freetoken.moe.expert_format.ExpertMath`：activation、activation_alpha／activation_limit、router_weight_on_input（乘在 gate/up 输入）、router_weight_on_down_input（乘在 down 输入）以及gate/up与down输入舍入（`None` 或 `E4M3_GROUP128_UE8M0`）。`layout`含格式名和全局H/I/E；bank张量提供实际形状／dtype，MoE层映射及TP分片由公开加载入口完成。`format_state`由该入口返回，具体格式负责解释。独立作者通过合法模型和上文权重文件取得这些公开输出，不读取实现私有对象字段；参考数学直接来自本契约的权重定义。
 
 `rows`包含Graph padding；`bank_rows`是本次kernel实际可寻址的专家行数，缓存模式取实际槽数，全驻／整层通常取逻辑专家数。空间查询没有分配、编译和文件读取副作用；改变缓存容量后必须使用与新几何对应的workspace及图。
 
@@ -157,7 +157,7 @@ Graph与SD的实际执行继续由既有配置、Graph／speculative统计和独
 - **状态**：NoWAG 的 `format` 为 `"nowag"`，`format_parameters` 为 `{"d", "assignment_bits"}`；其他格式报实际绑定格式名（如 `bf16`、`fp8_block`、`nvfp4_marlin`、`ds_fp4`），`format_parameters` 为 `{}`。`workspace_device_bytes` 是 decode 流（decode、SD 起草与 verify）预留的专家临时空间，按 `max(并发上限, 图最大批) × (草稿步数 + 1)` 行和 `workspace_spec` 计算，计入共享 runtime 的执行额度或分池模式的固定成本；prefill tile 的临时空间按次分配，计入实测的 prefill 峰值。非 NoWAG 格式为 0。
 - **容量**：沿用现有 CLI 语义（`ft serve --help`）；`--moe-cache-size` 以专家槽计（一槽 = 一层的一个专家的全部 bank）。非法容量以 ready 前的公开错误为准。
 - **不支持的组合**：NoWAG 不支持路由权重乘在 gate/up 输入、上述以外的激活或舍入。gpt-oss 全驻 GPU 和 CPU／hybrid TP 均纳入本轮要求；实现完成不代替各路径的独立验收结果。
-- **数学族与模型**：SwiGLU-OAI（MiniMax-M3 `swigluoai`、gpt-oss）为 `clamp(gate, max=L) * sigmoid(α·gate) * (clamp(up, ±L) + 1)`；tanh-GELU 对应 Gemma4；erf-GELU 目前无已注册模型，不要求覆盖。
+- **数学族与模型**：SwiGLU-OAI（MiniMax-M3 `swigluoai`、gpt-oss）先令 `g=clamp(gate, max=L)`、`u=clamp(up, ±L)`，结果为 `g * sigmoid(α·g) * (u + 1)`；tanh-GELU 对应 Gemma4；erf-GELU 目前无已注册模型，不要求覆盖。
 - **padding**：CUDA Graph 补齐行的路由 id 为 `-1`，`run` 对其贡献为零；这是公共调度实际产生的输入。
 - **合成 gpt-oss sidecar**：沿用通用 v1 键（`format="nowag_expert_sidecar_v1"`、`model_type="gpt_oss"`、`hidden_size`、`moe_intermediate_size`、`num_experts`、`num_moe_layers`）；sidecar 不含 bias，bias 取自基座。
 - **无公开手段**：强制 SD 零接受、观测 collective 执行均无公开入口；不能构造时如实记为未覆盖。

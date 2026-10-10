@@ -1,6 +1,6 @@
 # NoWAG 在线独立接入设计
 
-状态：设计交付，未实施、未通过运行验收。基线：`main@732f1ee`，2026-10-09。
+状态：P0–P4及审计修复已实现，正在独立验收，尚不可交付。功能开始前基线：`main@732f1ee`；性能配对基线为已含共享runtime的 `e6f6d90`。
 
 本文供实现者和协调者使用。测试作者只接收[独立公开契约](nowag-runtime-public-contract.md)，不得读取本文、源码、diff 或内部测试。
 
@@ -14,21 +14,21 @@
 - 组合范围取各组件已有能力的交集。例如主线 SD 仅 TP=1、全 CPU 专家 SD 不受支持、部分 attention 尚无 SD；本轮消除 **NoWAG 新增的障碍**，不顺带实现这些公共组件本来没有的能力。
 - 保留公开选项及既有非 NoWAG 默认行为。不新增“启用新架构”开关，不另建专家调度器、CPU 线程池、显存分配策略或在线训练流程。
 
-本 PR 只有设计。后续实现单独分支，按 phase 提交；设计合入不表示功能合入。
+设计单独保留在 [PR #8](https://github.com/ServeBig-project/FreeToken/pull/8)，实现位于 [PR #11](https://github.com/ServeBig-project/FreeToken/pull/11)，按 phase 提交；设计或代码提交不表示运行验收通过。
 
-## 2. 现状与可复用边界
+## 2. 功能开始前的边界与迁移
 
 | 当前组件 | 判断 | 本轮处理 |
 | --- | --- | --- |
 | [ExpertBanks](../python/freetoken/moe/expert_banks.py)、公共 host banks | 已有权重来源到缓存的边界 | 演进现有记录和加载入口，复用分配／并行读取 |
 | [专家缓存](../python/freetoken/moe/offload_cache.py) | 按 bank 的实际行字节搬运；不是 BF16 专用 | 保留 slot 归属、淘汰、预取、事件及重建策略 |
 | [MoE 执行](../python/freetoken/layers/moe.py) | 路由、搬运、计算已经部分分离 | 把格式布局和计算分支收至格式模块，公共执行只调用绑定的方法 |
-| [NoWAG 读取](../python/freetoken/moe/nowag.py) | 有持久化格式，但数学规则按两个模型名字选择 | 读取只验证权重契约；计算语义由专家组件提供 |
-| [NoWAG 算子桥接](../python/freetoken/moe/fused_nowag.py) | 依赖 `nowag_vllm`；已有 out／workspace 参数 | 将在线依赖闭包纳入 FreeToken，并接公共缓冲管理 |
+| 原 `moe/nowag.py` | 有持久化格式，但数学规则按两个模型名字选择 | 已迁入 [格式读取](../python/freetoken/moe/nowag/weights.py)，只验证权重契约；计算语义由专家组件提供 |
+| 原 `moe/fused_nowag.py` | 依赖 `nowag_vllm`；已有 out／workspace 参数 | 已迁入 [格式方法](../python/freetoken/moe/nowag/method.py) 与在线kernel，接公共缓冲管理 |
 | [SD 配置](../python/freetoken/engine/config.py) | Graph 与部分控制项按格式字符串排除 NoWAG | 完成实现后改为组件能力判定，不能只删除检查 |
 | [FTW](../python/freetoken/checkpoint/ftw.py) | 有格式化 bank，但没有 NoWAG codebook 的完整往返 | 纳入共享权重及格式元数据，原生／FTW 使用同一运行描述 |
 
-当前 NoWAG GPU 支持 D4/B12 和 D6/B12；CPU 路径仅支持 D6/B12。全驻 GPU、FreeToken 内的 NoWAG TP 切片、完整 FTW 和 SD Graph 均需本轮补齐。插件在 vLLM 中有 TP 经验，不构成 FreeToken 的 TP 验收。
+功能开始前，NoWAG GPU 支持 D4/B12 和 D6/B12，CPU 仅支持 D6/B12。当前实现已补齐CPU D4、全驻GPU、FreeToken TP切片、FTW与SD Graph接入，仍需本轮独立验收。插件在vLLM中的TP经验不构成FreeToken的TP验收。
 
 ## 3. 目标边界
 
@@ -49,7 +49,7 @@ checkpoint → 格式读取 ───┘              │
 
 ### 3.1 三个数据边界
 
-以下名称是计划中的小型数据记录，不是动态插件框架；复用现有 `ExpertBanks`，不保留两套同义对象。
+以下边界使用小型数据记录；复用现有 `ExpertBanks`，不保留两套同义对象，实际字段见接口约定。
 
 | 记录 | 必需内容 | 所有者 |
 | --- | --- | --- |
@@ -158,7 +158,7 @@ SD 的 TP=1、attention／状态支持范围、legacy-only 控制项等公共限
 | `moe/expert_format.py` | 现有专家格式的布局与执行绑定；集中现有分散注册，不建立自动插件发现框架 |
 | `moe/expert_banks.py` | 公共加载协调与权重记录；不存放 NoWAG 解码数学 |
 | `moe/nowag/weights.py` | v1 读取、bank 准备、共享参数与 TP 切片 |
-| `moe/nowag/method.py` | 数学能力、GPU／CPU 绑定、workspace 与执行适配 |
+| `moe/nowag/method.py`、`cpu.py` | 数学能力、GPU绑定、workspace与执行适配；CPU主机bank描述 |
 | `kernel/nowag/` 及现有 CPU kernel 目录 | grouped 压缩投影、融合快速路径、CUDA／Triton 与 CPU 计算 |
 | 原模型组件 | 权重名称映射、专家数学、router、非专家权重与 TP 语义 |
 
@@ -185,7 +185,7 @@ SD 的 TP=1、attention／状态支持范围、legacy-only 控制项等公共限
 
 计算与搬运采用实际字节、有效／物理 token 行数和既有公开统计；新增状态固定为 `/v1/cache/status` 的 `geometry.experts`，字段见公开契约，不逐 token 打日志。不增加摘要文件或无消费者的校验码。
 
-每个实现 commit 报生产增加／删除／净增，测试另计；最终相对功能开始前基线计量，不累计重复搬动。已有项目自有 kernel 移入 FreeToken 的增加行仍须报告，真正第三方原样代码另列。**本设计 PR：生产0、测试0。**
+每个实现 commit 报生产增加／删除／净增，测试另计；最终相对功能开始前基线计量，不累计重复搬动。已有项目自有 kernel 移入 FreeToken 的增加行仍须报告，真正第三方原样代码另列。原设计PR #8生产0、测试0；实现PR #11另行计量，不能沿用设计的零行数。
 
 ## 11. 并行工作与未决依赖
 

@@ -1,14 +1,14 @@
 # NoWAG 接口与集成约定
 
-状态：设计接口，尚未实现。配套[主设计](nowag-runtime-design.md)。本文供实现者／协调者，黑盒作者只读[公开契约](nowag-runtime-public-contract.md)。
+状态：实现接口，正在独立验收，尚不可交付。配套[主设计](nowag-runtime-design.md)。本文供实现者／协调者，黑盒作者只读[公开契约](nowag-runtime-public-contract.md)。
 
 ## 1. 模型提供数学，格式提供权重与执行
 
 在 `moe/expert_format.py` 定义小型数据记录，不建立类继承树或自动发现系统：
 
-- `ExpertMath`：`activation`、`activation_alpha`、`activation_limit`、`router_weight_on_input`、`gate_up_input_rounding`、`down_input_rounding`。只表达原模型计算语义；NoWAG normalizer的放置与融合方式不由模型声明。
-- `ExpertLayout`：`format`、全局H/I/E、`moe_layer_ids`、模型提供的TP逻辑分片范围，以及各bank的逻辑／物理shape、dtype、stride和每专家字节。公共代码据此分配和搬运，不解释编码。
-- 继续使用 `ExpertBanks` 表达 `sources`，增加 `layout`、`shared` 和 `format_state`。`shared`是具名只读张量，所有者和设备副本由公共初始化负责；`format_state`由具体格式定义，公共代码只传递，不读取字段。NoWAG的D／B、assignment布局、首组有效lane和normalizer执行位置都放在这里。
+- `ExpertMath`：`activation`、`activation_alpha`、`activation_limit`、`router_weight_on_input`、`router_weight_on_down_input`、`gate_up_input_rounding`、`down_input_rounding`。只表达原模型计算语义；NoWAG normalizer的放置与融合方式不由模型声明。
+- `ExpertLayout`：`format`、全局H/I/E。模型提供真实MoE层映射及TP分区；加载后的bank张量直接提供shape、dtype、stride和每行字节，不另存一套相同元数据。
+- 继续使用 `ExpertBanks` 表达 `sources`、`quant_format`及原有NVFP4参数，增加 `shared`、`format_state` 和逐层传递完成标记 `streamed`。`shared`是具名只读张量，所有者和设备副本由公共初始化负责；`format_state`由具体格式定义，公共代码只传递，不读取字段。NoWAG的D／B、分片中间维和首组有效lane放在这里，normalizer执行位置由格式方法结合数学描述决定。
 
 NoWAG方法根据自己的权重数学和 `ExpertMath` 的舍入要求确定normalizer顺序：存在down输入舍入时必须先舍入再乘down input normalizer；不存在时可以使用保持既定数值契约的融合实现。其他格式不需要认识这些概念。现有NVFP4 alpha仍明确保留其逐专家索引语义，不能因使用共同记录就变成每模型一个标量。
 
@@ -26,7 +26,7 @@ method.workspace_spec(rows, top_k, *, bank_rows) -> dict[str, tuple[tuple[int, .
 method.run(x, expert_rows, route_weights, banks, shared, *, workspace, out) -> out
 ```
 
-这里的 `method` 是三个操作的已绑定实现，不要求每个格式写一个类。`backend` 使用FreeToken原有后端选择结果；NoWAG GPU具体kernel由设备／layout／math和batch形状决定，CPU走既有C++ executor。
+这里的 `method` 保存执行函数、空间查询和实际消费者需要的能力，不要求每个格式写一个类。`backend` 使用FreeToken原有后端选择结果；NoWAG GPU具体kernel由设备／layout／math和batch形状决定，CPU走既有C++ executor；格式方法的 `prepare_cpu` 提供其主机bank描述，不接管线程池。
 
 `rows`是本次执行的物理token行数（含Graph padding），`bank_rows`是kernel可寻址的实际专家bank行数，不是模型逻辑专家数。全驻／整层执行通常为E，slot-cache执行为实际槽数；两者都须用于路由元数据与临时空间计价。该查询是无分配、无编译、无文件读取的纯几何计算。
 
@@ -44,7 +44,7 @@ method.run(x, expert_rows, route_weights, banks, shared, *, workspace, out) -> o
 
 此接口是实际engine调用面，不为测试另做kernel包装。CPU异步提交仍由公共executor负责；`run`定义的是计算与输出契约，不把Python函数放入CUDA Graph的主机回调。
 
-TP时 `run`返回本rank的局部贡献；仅rank0贡献down bias，公共调用者进行既有all-reduce。中间维边界mask来自layout，不由kernel重新推测分组。
+TP时 `run`返回本rank的局部贡献；仅rank0贡献down bias，公共调用者进行既有all-reduce。中间维边界来自格式加载时按模型分区生成的私有状态，不由kernel重新推测分组。
 
 ## 3. 初始化与资源顺序
 
@@ -82,7 +82,7 @@ TP时 `run`返回本rank的局部贡献；仅rank0贡献down bias，公共调用
 
 ## 6. FTW与对外状态
 
-FTW新增的NoWAG数据使用现有tensor存储和metadata机制：`quant_format="nowag"`、`expert_layout`记录通用几何／层映射，`expert_shared`列出具名共享tensor条目，`expert_format_state`由格式模块编码／解析；通用writer只写出这些记录和tensor。bank继续逐层保存，codebook只写一次，必要bias不遗漏。旧非NoWAG FTW的字段语义不改变。
+FTW新增的NoWAG数据使用现有tensor存储和metadata机制：`quant_format="nowag"`、原有模型配置与bank条目提供几何／层映射，`experts_shared`类别保存具名共享tensor，`expert_format_state`由格式模块编码／解析；通用writer只写出这些记录和tensor。bank继续逐层保存，codebook只写一次，必要bias不遗漏。旧非NoWAG FTW的字段语义不改变。
 
 NoWAG FTW存全局编码，不存转换时的TP局部切片；运行时按目标TP生成layout。`BASE`配置／tokenizer／非专家权重一并保留，源NoWAG绝对路径只可作来源说明，不能成为加载依赖。
 
