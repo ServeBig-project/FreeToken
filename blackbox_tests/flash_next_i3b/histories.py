@@ -3,6 +3,11 @@
 
 def distributed_history(tokenizer, size, label, value_base, count):
     records = [f"{label}_{i:03d}={value_base + i * 23}" for i in range(count)]
+    return positioned_records(tokenizer, size, records)
+
+
+def positioned_records(tokenizer, size, records):
+    count = len(records)
     cuts = (0, count // 3, count * 2 // 3, count)
     groups = ["\n".join(records[cuts[i]:cuts[i + 1]]) for i in range(3)]
     content = (
