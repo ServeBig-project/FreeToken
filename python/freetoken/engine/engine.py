@@ -966,7 +966,12 @@ class Engine:
         method = getattr(self, "expert_method", None)
         if method is None:
             return {}
-        rows = max(running, _graph_rows(config, running), 1) * ((config.speculative_num_steps or 0) + 1)
+        # Without a shared runtime an explicit graph cap is captured as given, even above the
+        # concurrency; with one, the cap is clamped to the concurrency it resolves.
+        graph_running = running if config.runtime_cache_gib is not None else max(
+            running, config.cuda_graph_max_bs or 0)
+        rows = (max(running, _graph_rows(config, graph_running), 1)
+                * ((config.speculative_num_steps or 0) + 1))
         bank_rows = config.model_config.num_experts
         if is_offload_moe_backend(config.moe_backend):
             slots = config.moe_cache_size if cache_size is None else cache_size
@@ -1570,8 +1575,7 @@ class Engine:
             if self.graph_runner.can_use_cuda_graph(batch):
                 logits = self.graph_runner.replay(batch)
             else:
-                if self.graph_runner.speculative is not None and (
-                        batch.draft_experts is not None or batch.is_speculative_verify):
+                if batch.draft_experts is not None or batch.is_speculative_verify:
                     self.graph_runner.eager_counts[
                         "verify" if batch.is_speculative_verify else "draft"] += 1
                 logits = forward_model(self.model)
@@ -1793,7 +1797,7 @@ class Engine:
     def finish_layer_group_logits(self, batch: Batch, state) -> torch.Tensor:
         """Logits for every row of a state that ran all layers (SD verification)."""
         runner = self.graph_runner
-        if runner.speculative is not None and not runner.speculative.has_ranges(batch):
+        if runner.speculative is None or not runner.speculative.has_ranges(batch):
             runner.eager_counts["verify_range"] += 1
         self._observe_replay(batch)
         with self.ctx.forward_batch(batch):
