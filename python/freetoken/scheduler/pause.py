@@ -135,7 +135,7 @@ class PauseManager:
     def _drop_chunk(self, pending: PendingReq) -> None:
         """A queued prompt drops its partial prefill; it restarts from the reusable prefix."""
         req, pending.chunked_req, pending.layered_cached_len = pending.chunked_req, None, None
-        pending.paused_since = time.monotonic()
+        pending.readmitted, pending.paused_since = True, time.monotonic()
         self.cache.release_paused(req)
         self.table.free(req.table_idx)
         req.table_idx = -1  # released: the scheduler's free paths are no-ops now

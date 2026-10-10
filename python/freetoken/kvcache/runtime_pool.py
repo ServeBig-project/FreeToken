@@ -83,7 +83,7 @@ class PhysicalBlocks:
                 np.add.at(region.refs, chunks, 1)
                 region.idle[chunks] = -1
                 region.idle_event[chunks] = None
-            units.held += len(ids)
+            units.held += units.distinct(ids)
         return True
 
     def reclaim(self, count: int, keep: dict) -> bool:
@@ -196,10 +196,6 @@ class Region:
         return _vmm().view(self.base + offset, list(shape), list(strides), dtype,
                            self.blocks.device.index)
 
-    @property
-    def mapped(self) -> int:
-        return int((self.block >= 0).sum())
-
     def map_run(self, first: int, count: int) -> None:
         """Map ``count`` consecutive chunks from ``first``: one access grant and one zeroing
         for the run (fresh memory, not a former owner's bytes: padding rows read whatever a
@@ -266,10 +262,8 @@ class Units:
         self.banks = banks
         self.blocks = banks[0][0].blocks
         self.blocks.units.append(self)
-        self.held = 0  # unit holds, for the status's used bytes
-        g = self.blocks.granularity
-        # The most chunks one unit can touch (a range may straddle one more chunk boundary).
-        self.per_unit = sum((length + g - 1) // g + 1 for *_, length in banks)
+        self.held = 0  # units held, for the status's used bytes
+        self.pinned = np.empty(0, dtype=np.int64)  # held for good; a request may hold them too
 
     def _chunks(self, units: np.ndarray):
         """Per bank: (region, the chunk of every (unit, chunk) hold, the unit's position)."""
@@ -285,6 +279,12 @@ class Units:
         """Acquire what must exist for the pools to work at all (sentinels, capture scratch)."""
         if not self.acquire(units):
             raise RuntimeError("shared runtime cannot map its fixed sentinel/scratch blocks")
+        self.pinned = np.union1d(self.pinned, np.asarray(units, dtype=np.int64))
+
+    def distinct(self, units) -> int:
+        """Units not already counted as held: a pinned unit is counted once."""
+        units = np.asarray(units, dtype=np.int64)
+        return len(units) - int(np.isin(units, self.pinned).sum())
 
     def acquire(self, units) -> bool:
         """Map every chunk the units touch and hold it; all or nothing."""
@@ -294,7 +294,7 @@ class Units:
         """Drop the units' holds. A chunk nobody holds stays mapped; another component may
         take it once the work already queued on the engine stream is done."""
         units = np.asarray(units, dtype=np.int64)
-        self.held -= len(units)
+        self.held -= self.distinct(units)
         release = None
         for region, chunks, _ in self._chunks(units):
             np.subtract.at(region.refs, chunks, 1)

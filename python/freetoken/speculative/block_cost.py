@@ -121,7 +121,7 @@ class BlockController:
     def mark(self, index):
         self.timer.mark(index)
 
-    def plan(self, batch, caps):
+    def plan(self, batch, caps, *, reserve=None):
         started = time.perf_counter()
         if self.engine.graph_runner is not self.runner:
             self._reset()
@@ -129,11 +129,12 @@ class BlockController:
         reqs = batch.reqs
         # Requests alike in sampling, length cap and history bucket clip and score alike, so the
         # options are priced per group: [requests, history, drafter attention work].
-        alike = {}
+        alike, members = {}, []
         for req, cap in zip(reqs, caps, strict=True):
             h = req.cached_len
-            group = alike.setdefault((req.sampling_params.is_greedy, cap, h.bit_length()),
-                                      [0, 0, 0])
+            member = (req.sampling_params.is_greedy, cap, h.bit_length())
+            members.append(member)
+            group = alike.setdefault(member, [0, 0, 0])
             group[0] += 1
             group[1] += h
             work = self.full_layers * h
@@ -152,12 +153,19 @@ class BlockController:
         if self.observe_only and kind != "init":
             self.suggested[nominal] += 1
             kind, nominal = "fixed", self.limit
-        lengths = clipped[nominal]
+        vector = [min(nominal, cap) for cap in caps]
+        if reserve is not None:
+            reserve_started = time.perf_counter()
+            vector = reserve(vector)
+            started += time.perf_counter() - reserve_started
+        actual = dict(zip(members, vector))
+        lengths = tuple(actual[member] for member, _ in groups)
+        if not any(vector):
+            nominal = 0
         self.executed[nominal] += 1
         self.stats[f"{kind}_rounds"] += 1
-        self.stats["clipped_requests"] += sum(cap < nominal for cap in caps)
-        key = keys[lengths]
-        vector = [min(nominal, cap) for cap in caps]
+        self.stats["clipped_requests"] += sum(length < nominal for length in vector)
+        key = keys[lengths] if lengths in keys else self._cost_key(lengths, groups)
         accept = [(n, r.cached_len.bit_length(), r.sampling_params.is_greedy)
                   for n, r in zip(vector, reqs)]
         self.round_info = (kind, key, accept)

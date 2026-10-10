@@ -1313,12 +1313,12 @@ class CacheManager:
             out.update(tokens=tokens, slots=state, row=row)
             return claim
 
-        batch = 1  # cached data evicted per retry doubles: a large claim retries log-many times
+        # Cached data goes one entry at a time, and only while the claim really lacks ids or
+        # blocks: never more than the operation needs.
         while (claim := build()) is None or not self.page_units.blocks.acquire(claim.plan):
-            if not self._evict_any(max(pages, 1) * ps * batch, states=batch):
+            if not self._evict_any(ps):
                 claim = None
                 break
-            batch *= 2
         if not self._agree(claim is not None):
             if claim is not None:  # another TP rank could not: release, record nothing
                 claim.release()
@@ -1338,11 +1338,11 @@ class CacheManager:
         torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MIN, group=self.tp_group)
         return bool(flag.item())
 
-    def _evict_any(self, tokens: int, states: int = 1) -> bool:
+    def _evict_any(self, tokens: int) -> bool:
         """Release one batch of unlocked cached prefix data; False when nothing is left."""
         if self.tree is None:
             return False
-        kinds = [(self.tree.evict_kv, tokens), (self.tree.evict_states, states)]
+        kinds = [(self.tree.evict_kv, tokens), (self.tree.evict_states, 1)]
         if self.swa_paged:
             kinds.append((self.tree.evict_window, tokens))
         for evict, amount in kinds:

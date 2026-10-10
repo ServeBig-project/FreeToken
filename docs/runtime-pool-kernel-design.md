@@ -1,6 +1,6 @@
 # 共享 runtime 的布局与内核实施协议
 
-范围：共享 runtime feature 的必要组成部分，不单独作为交付终点。2026-10-09最终复核对齐`main@c320fbb`及DFlash合流版`32646f6`；下面两处FLA、状态／Replay布局与VMM修改仍未由前置功能完成。KV数学、GDN更新、Replay和SD接受规则保持不变。用户已确认采用VMM及状态布局调整，完成全部内核适配；QSA／DSA及逐轮CPU KV streaming不属于本协议。
+范围：共享 runtime feature 的必要组成部分，不单独作为交付终点。PR #9 基于 `main@732f1ee` 实现两处 FLA 寻址、状态／Replay 布局与 VMM 修改，独立验收仍按下文要求进行。KV数学、GDN更新、Replay和SD接受规则保持不变。用户已确认采用VMM及状态布局调整，完成全部内核适配；QSA／DSA及逐轮CPU KV streaming不属于本协议。
 
 ## 1. 已核对的环境和结论
 

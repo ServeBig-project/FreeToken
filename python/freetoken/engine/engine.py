@@ -703,7 +703,11 @@ class Engine:
         scratch = range(div_ceil(min(
             config.max_running_req * ((config.speculative_num_steps or 0) + 1),
             self.num_pages * config.page_size), config.page_size))
-        (self.page_units.pin if mapped else self.page_units.release)(scratch)
+        if mapped:
+            if not self.page_units.acquire(scratch):
+                raise RuntimeError("shared runtime cannot map graph capture scratch blocks")
+        else:
+            self.page_units.release(scratch)
 
     def _fit_runtime_rebuild(self, config: EngineConfig, gib: float, expert_bytes: int,
                              cache_size: int):
@@ -1944,7 +1948,8 @@ class Engine:
         steps = config.speculative_num_steps or 0
         reserve = (2 * 4 * config.max_running_req * (steps + 1) * config.model_config.vocab_size
                    if steps else 0)
-        budget = int(config.memory_ratio * self._baseline_free) - reserve
+        # memory_ratio limits the caches; its remainder is for graphs and activations.
+        budget = self._baseline_free - reserve
         # The user's --max-extend-tokens bounds every refit; earlier fits only narrowed it.
         self._asked_extend = getattr(self, "_asked_extend", config.max_extend_tokens)
         ps, high = config.page_size, min(self._asked_extend, self.max_seq_len)
@@ -1959,9 +1964,11 @@ class Engine:
             if tile > ps:
                 tile = max(ps, tile // 2 // ps * ps)
                 continue
+            remaining = max(0, budget - self._synced_used_bytes())
             raise ValueError(
-                f"a {tile}-token prefill does not fit the {mem_GB(budget)} left beside the "
-                "runtime, weights and experts; lower --runtime-cache-gib or the expert cache")
+                f"a {tile}-token prefill does not fit the {mem_GB(remaining)} of execution "
+                "memory left after runtime, weights, experts, graphs and SD workspace; "
+                "lower --runtime-cache-gib or the expert cache")
         object.__setattr__(config, "max_extend_tokens", tile)
         self.runtime.limits["prefill_tile_tokens"] = tile
 
