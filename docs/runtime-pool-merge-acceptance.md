@@ -9,11 +9,23 @@ review was read. The result reviewer does not start services or GPU work.
 | Stage | Source | Result | Evidence to review |
 |---|---|---|---|
 | J1–J6 | `f4647b2` | 14 passed in 2217.84 s; no skipped cases | [pytest log](/tmp/claude-1003/-home-nengneng-AIPrometheus-servebig-servebig-project/16c14e97-5fd3-4de1-a41f-67f277900f86/scratchpad/blackbox_j.log); [public artifacts](/home/nengneng/AIPrometheus/servebig/servebig-project/.worktrees/runtime-pool-blackbox/blackbox_tests/runtime_pool/_results) |
-| Original 58-request trace | `17bbe02` | Pending | [trace artifacts](/data2/servebig-envs/runtime_pool_closeout_20261009/merge-final-trace) |
+| Original 58-request trace | `17bbe02` | Pending isolated run | [isolated trace artifacts](/data2/servebig-envs/runtime_pool_closeout_20261009/merge-final-trace-isolated); [GPU process observations](/data2/servebig-envs/runtime_pool_closeout_20261009/merge-final-isolated-gpu-processes.jsonl) |
 | Joint idle maintenance | `17bbe02` | Pending | [maintenance artifacts](/data2/servebig-envs/runtime_pool_closeout_20261009/joint-rebuild-final); [driver](../blackbox_tests/runtime_pool/test_service_joint_rebuild.py) |
 
 Results from different source revisions remain attributed separately. Pending
 stages do not establish acceptance of the final revision.
+
+## Excluded startup attempt
+
+The first `17bbe02` attempt did not reach serving readiness. Its
+[startup output](/data2/servebig-envs/runtime_pool_closeout_20261009/merge-final-trace-server.log)
+refuses runtime 8.626953125 GiB because only 5.98 GiB remains after weights and
+experts. [GPU observations](/data2/servebig-envs/runtime_pool_closeout_20261009/merge-final-gpu-processes.jsonl)
+show the acceptance worker and PID 710528 simultaneously on GPU1; the latter
+reaches 3192 MiB. The coordinator identified it as another session's NoWAG
+service and confirmed that no trace request was sent. This attempt is excluded
+for GPU contention, not counted as a pass or a new product failure. The isolated
+rerun retains the [same public launch configuration](/data2/servebig-envs/runtime_pool_closeout_20261009/merge-final-trace-server.json).
 
 ## Completed J1–J6 evidence
 
