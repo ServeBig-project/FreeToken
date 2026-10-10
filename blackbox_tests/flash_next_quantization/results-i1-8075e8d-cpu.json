@@ -1,0 +1,28 @@
+{
+  "phase": "I1 dense FP8",
+  "device": "cpu",
+  "results": [
+    {
+      "name": "fp32/row-scales-zero-floor-rounding",
+      "status": "passed",
+      "shape": [
+        6,
+        256
+      ],
+      "encoding_and_scale": "exact",
+      "input_bytes": 6144,
+      "stored_bytes": 1560
+    },
+    {
+      "name": "bf16/row-scales-zero-floor-rounding",
+      "status": "passed",
+      "shape": [
+        6,
+        256
+      ],
+      "encoding_and_scale": "exact",
+      "input_bytes": 3072,
+      "stored_bytes": 1560
+    }
+  ]
+}
