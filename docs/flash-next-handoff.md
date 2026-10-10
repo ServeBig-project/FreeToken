@@ -45,6 +45,8 @@
 
 长记录值含等差规律，因此45项结果用于长输出、状态隔离和交错证据，**不单独证明中／尾位置不可推导事实的检索能力**。补充事实已冻结，但未发送。
 
+M1结束时host在途复制为0，但即时末次快照仍有364,904,448字节的protected容量；按用户要求未追加排空检查，不能据此判作泄漏，也不能宣称最终回收已验收。[M1完整汇总](/data2/servebig-envs/flash_next_i3_acceptance/i3b_blackbox/0abb433-m1-h8-summary.json)。
+
 ## 当前运行环境
 
 - 保留空闲服务供接手：容器 `ft-flash-next-m1-gpu2`，`http://127.0.0.1:18230`，GPU2 `GPU-847e9c75-56a9-1090-4f4f-7d70a71792dd`，CPU `0-7,16-23`（8物理核）。没有运行中的测试客户端。
@@ -57,7 +59,7 @@
 ## 下一步，从这里继续
 
 1. 先用保留的M1服务跑已冻结的三位置独立事实短答案，再跑I5已有质量任务；不要重跑已通过的45项长负载。事实文件：`i3b_blackbox/m1-independent-positions.fixtures.json`。
-2. 跑余下M2–M8，按覆盖差集选择用例。还需实际tiered暂停／CPU恢复，含非4／64对齐位置，以及Replay环满后的历史复用。M1零暂停不能替代这些项。
+2. 跑余下M2–M8，按覆盖差集选择用例。还需长请求期间插入短请求、不同等待阶段取消、实际tiered非4／64对齐暂停／CPU恢复、Replay环满后的复用，以及最终回收／共享副本唯一性。M1零暂停不能替代这些项。Replay允许缺完整历史时真实miss；现有测试的warm-hit强断言须先由独立作者按该公开契约调整，不能把合法miss判成生产错误。
 3. 质量与量化对照、实际容量／性能报告、已有模型AR／self-SD／DFlash回归都未完成。冻结上游参考树 `.worktrees/flash-next-upstream-reference` / `research/flash-next-upstream-reference@9b585b7` 已准备；参考容器 `ft-flash-next-reference-gpu2`仅创建、未启动。只用同权重短任务比较质量，不冒充同资源性能对照。
 4. 若新测试发现问题，修复后只补相关复验；生产与新增测试继续由不同agent负责。第一阶段完整验收通过后才开始SD；FTW保持暂缓。
 
@@ -76,7 +78,7 @@
 
 ## 独立测试与代码量
 
-测试源码与生产分开，均留在已登记工作树：I3a `test/flash-next-i3a@8caae70`；I3b／事实 `test/flash-next-i3b@50fb256`（已跑 `716a1a8`，未跑事实 `4cb06db`）；数值 `test/flash-next-tiered-kernels@98662c2`；未跑I5入口 `test/flash-next-i5@e913c16`。对应目录在根 `RESEARCH_PLAN.md`。服务测试的[公开交接说明](../../flash-next-i3b-blackbox/blackbox_tests/FLASH_NEXT_HANDOFF.md)包含准确续跑命令，数值运行说明在其 `blackbox_tests` README中；实现者不要阅读测试源码。
+测试源码与生产分开，均留在已登记工作树且已推送：I3a `test/flash-next-i3a@8caae70`；I3b／事实 `test/flash-next-i3b@50fb256`（已跑 `716a1a8`，未跑事实 `4cb06db`）；数值 `test/flash-next-tiered-kernels@98662c2`；未跑I5入口 `test/flash-next-i5@e913c16`。对应目录在根 `RESEARCH_PLAN.md`。服务测试的[公开交接说明](https://github.com/ServeBig-project/FreeToken/blob/test/flash-next-i3b/blackbox_tests/FLASH_NEXT_HANDOFF.md)汇总证据，各自README提供续跑命令；实现者不要阅读测试源码。
 
 本轮独立测试代码累计 **+1485／−5，净+1480**：服务／事实／I5作者+883／−5，数值作者+602／−0。此口径排除README、结果JSON和此前已存在的旧质量任务；两位作者均未改生产。
 
