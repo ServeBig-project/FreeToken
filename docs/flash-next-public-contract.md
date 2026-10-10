@@ -108,7 +108,7 @@ I3不能只在64对齐位置暂停。I4不能只跑预知长度的固定C1/C4/C1
 
 复用 `/v1/cache/status`、`/v1/stats` 和现有日志：requested／effective精度与驻留、实际dense字节、GPU K/V载荷／索引、活跃主机K/V／冷副本／暂停副本、稀疏读取字节、实际专家槽数、runtime物理容量、暂停／恢复／重算和Graph执行可区分。词表作为固定主机权重报告一次；不能把虚拟容量当实际占用或把同一副本重复计价。
 
-`/v1/cache/status` 的 `prefix_cache.kv_host_read_bytes` 累计服务启动以来读取的选中主机K/V及scale逻辑字节，不含PCIe协议开销。统计异步更新，允许落后一次采样。`kv_host_payload_pages`／`kv_gpu_payload_pages` 是保留的逻辑页数，可能含冷缓存，不能仅凭它们证明活跃attention读取了主机历史。
+`/v1/cache/status` 的 `prefix_cache.runtime.kv_host_read_bytes` 累计服务启动以来读取的选中主机K/V及scale逻辑字节，不含PCIe协议开销。统计异步更新，允许落后一次采样。同一 `runtime` 对象内的 `kv_host_payload_pages`／`kv_gpu_payload_pages` 是保留的逻辑页数，可能含冷缓存，不能仅凭它们证明活跃attention读取了主机历史。
 
 复制仍在途时允许资源继续受保护；完成后必须能回收。仅槽号释放而实际容量永远不能重新使用不算通过。通过持续负载验证进度；没有新请求到达时也必须完成已有恢复和取消。
 
