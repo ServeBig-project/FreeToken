@@ -161,9 +161,11 @@ def test_self_speculative(steps):
     gpu = need_gpu()
     ref = offload_reference()
     graph = 0 if steps == 2 else 16
+    # 8 draft steps do not fit the default GDN state budget (public startup error)
+    budget = ["--enable-gdn-replayssm", "--gdn-state-budget-bytes", 3000000000] if steps == 8 else []
     with Server(f"svc_selfsd_{steps}", qwen("--batching-policy", "legacy",
                                             "--cuda-graph-max-bs", graph,
-                                            "--speculative-num-steps", steps), gpu) as s:
+                                            "--speculative-num-steps", steps, *budget), gpu) as s:
         before = get(s.url, "/v1/stats")["body"]
         cross_path(ref, run_prompts(s), f"self-SD N={steps}")
         mixed_load(s)
