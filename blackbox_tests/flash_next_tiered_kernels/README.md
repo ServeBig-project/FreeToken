@@ -16,10 +16,10 @@ python /absolute/path/to/test-worktree/blackbox_tests/flash_next_tiered_kernels/
 record per case and exits nonzero on failure. It records exception type and
 message, without a traceback or production source inspection.
 
-Before counter coverage was added, candidate `7139b31` passed all 11 numerical
-cases on physical GPU 2 in
-`ft-flash-next-i3a-gpu2`, using the unchanged tolerances below.
-See [the numerical acceptance report](results-7139b31.json).
+Candidate `0abb433` passed all 11 cases, including counter acceptance, on physical
+GPU 2 in `ft-flash-next-tiered-kernel-0abb433`, using test commit `2ca86f0` and the
+unchanged tolerances below. The container exited with code 0.
+See [the numerical and counter acceptance report](results-0abb433.json).
 
 ## Fixed acceptance rules
 
