@@ -32,6 +32,18 @@ class SpeculativeRound:
     starts: list[int]
     ends: list[int]
     state: object | None
+    history: object | None = None  # the drafter's own history (DraftResult.history)
+
+
+class _Commit:
+    """The target's states and the drafter's history, committed at the same retained length."""
+
+    def __init__(self, *parts) -> None:
+        self.parts = [part for part in parts if part is not None]
+
+    def commit(self, retained) -> None:
+        for part in self.parts:
+            part.commit(retained)
 
 
 class SpeculativeDecoder:
@@ -59,6 +71,10 @@ class SpeculativeDecoder:
             from freetoken.speculative.dflash import DFlashDrafter
 
             self.drafter = DFlashDrafter(engine, table, self.generator)
+        elif engine.config.speculative_drafter == "mtp":
+            from freetoken.speculative.mtp import MTPDrafter
+
+            self.drafter = MTPDrafter(engine, table, self.generator)
         else:
             self.drafter = SelfDrafter(engine, table, self._logits, self.generator)
         self.control = getattr(self.drafter, "control", None)
@@ -301,8 +317,10 @@ class SpeculativeDecoder:
         verify.padded_reqs = verify.reqs
         verify_input = self.prepare(verify)
         verify.input_ids = self.table.token_pool[verify_input.input_tuple]
+        if draft.history is not None:
+            draft.history.verify = verify  # its real streams are the history's inputs
         return SpeculativeRound(batch, verify, draft.tokens, draft.probabilities,
-                                lengths, starts, ends, state)
+                                lengths, starts, ends, state, draft.history)
 
     def finish(self, round_: SpeculativeRound, logits: torch.Tensor, phase: str) -> ForwardOutput:
         """Accept a prefix from complete target logits; the scheduler commits it."""
@@ -348,5 +366,6 @@ class SpeculativeDecoder:
         host = output.to("cpu", non_blocking=True)
         ready = torch.cuda.Event()
         ready.record(engine.stream)
+        state = round_.state if round_.history is None else _Commit(round_.state, round_.history)
         return ForwardOutput(output, host, ready, speculative_ends=round_.ends,
-                             speculative_state=round_.state)
+                             speculative_state=state)

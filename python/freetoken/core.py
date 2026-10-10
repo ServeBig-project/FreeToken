@@ -138,6 +138,9 @@ class Batch:
     # Speculative verify: per verified position, the record of the model's declared slot states
     # (index tensors for LinearStatePool.write_verify). Set by the state component.
     verify_records: "tuple[torch.Tensor, ...] | None" = None
+    # The target's features of every row this forward ran, for a drafter that keeps its own
+    # history from them (native MTP: the final streams). Set by the model.
+    draft_features: torch.Tensor | None = None
     num_token_non_padded: torch.Tensor | None = None
     # these fields should be set by scheduler
     input_ids: torch.Tensor = field(init=False)

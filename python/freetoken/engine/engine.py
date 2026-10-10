@@ -385,6 +385,11 @@ class Engine:
         self.model.load_state_dict(self._load_weight_state_dict(config))
         # The drafter's own weights count as resident weights in every budget.
         self._load_dflash(config)
+        self.mtp = None
+        if config.speculative_drafter == "mtp":
+            from freetoken.speculative.mtp import MTPRuntime
+
+            self.mtp = MTPRuntime(self, self.model.load_mtp(config.model_path, self.device))
         post_weights_free = self._sync_get_memory()[0]
         self._weights_bytes = self._baseline_free - post_weights_free
         # Pool-budget baseline for the desktop cache sliders: free VRAM after the weights are
@@ -1422,6 +1427,8 @@ class Engine:
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         logits = self.compute_logits(batch)
+        if self.mtp is not None:
+            self.mtp.advance(batch)
         for req in batch.reqs:
             req.complete_one()
 
@@ -2078,6 +2085,8 @@ def _layered_pipeline_unsupported(config: EngineConfig, is_moe: bool) -> str | N
         return "layered-pipeline batching requires MoE prefill overlap"
     if config.speculative_num_steps != 0 and config.legacy_sd_controls:
         return _LEGACY_SD_CONTROLS
+    if config.speculative_method == "mtp" and config.speculative_num_steps != 0:
+        return "native MTP drafting does not run with layered-pipeline batching yet"
     if not config.moe_cache_auto and (reason := _layered_cache_shortfall(config)):
         return reason
     spec = get_model_spec(config.hf_config.architectures[0])
@@ -2511,19 +2520,18 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
                  or config.legacy_sd_controls or config.dflash_attention_window
                  or config.dflash_adaptive_observe_only)
         override("speculative_num_steps", 4 if asked else 0)
-    if config.speculative_num_steps and config.speculative_method == "mtp" and not model_config.mtp_layers:
-        raise ValueError(f"--speculative-method mtp: {model_config.model_type} has no native MTP "
-                         "layers this server can draft with")
+    if config.speculative_num_steps and config.speculative_method == "mtp":
+        if not model_config.mtp_layers:
+            raise ValueError(f"--speculative-method mtp: {model_config.model_type} has no native "
+                             "MTP layers this server can draft with")
+        # The MTP layers keep their attention history in the target's pages.
+        model_config = model_config.with_mtp_history()
+        override("model_config", model_config)
     if config.speculative_num_steps:
         config.__post_init__()  # re-check the SD constraints against the resolved components
         # A shared runtime has no GDN partition: SD rounds are sized from the joint budget.
         if config.runtime_cache_gib is None and (shortfall := _sd_state_shortfall(config)):
             raise ValueError(shortfall)
-        if AttnType.QSA in required_attn_types:
-            raise ValueError(
-                "speculative decoding is not implemented for QSA sparse attention "
-                f"({model_config.model_type}); pass --speculative-num-steps 0"
-            )
 
     if config.speculative_num_steps and config.cuda_graph_max_bs != 0 and config.cuda_graph_bs != []:
         # Never fall back silently: eager SD is far slower and would mislead comparisons.

@@ -176,6 +176,11 @@ class EngineConfig:
                 raise ValueError("DFlash does not use target-expert residency, missing loads or route prefetch")
             if self.dtype != torch.bfloat16 or self.page_size != 1:
                 raise ValueError("DFlash requires BF16 and page size 1")
+        if self.speculative_drafter == "mtp" and (
+                self.speculative_draft_residency != "off" or self.speculative_draft_load_missing
+                or self.speculative_verify_prefetch or self.speculative_adaptive_cost):
+            raise ValueError("native MTP drafting does not use target-expert residency, missing "
+                             "loads, route prefetch or the self-drafting cost model")
         if self.speculative_draft_residency not in ("off", "router"):
             raise ValueError("speculative_draft_residency must be off or router")
         if self.speculative_draft_residency != "off" and self.speculative_num_steps <= 0:

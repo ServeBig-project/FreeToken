@@ -554,6 +554,8 @@ class LinearSpeculativeState:
             for layer in range(self.pool.num_linear_layers):
                 for tensor in (self.pool.recurrent_states[layer], self.pool.conv_states[layer]):
                     tensor.index_copy_(0, live, tensor.index_select(0, src))
-            for tensor in self.pool.slot_states.values():
-                tensor[:, live] = tensor[:, src]
+            for spec in self.pool._slot_specs:
+                if not spec.draft:
+                    tensor = self.pool.slot_states[spec.name]
+                    tensor[:, live] = tensor[:, src]
         self.pool.free(self.claimed if self.claimed is not None else self.slots)

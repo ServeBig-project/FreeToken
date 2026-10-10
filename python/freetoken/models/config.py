@@ -1,6 +1,6 @@
 from __future__ import annotations
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar, Dict, List, Literal, Tuple, TypeAlias
 
 from freetoken.attention.base import AttnType
@@ -211,6 +211,8 @@ class SlotStateSpec:
     layer_ids: Tuple[int, ...] = ()
     dtype: Any | None = None  # torch dtype; None -> the pool's compute dtype
     fill_value: float = 0.0
+    # A drafter's own state: the target's verify neither records nor commits it.
+    draft: bool = False
 
 
 @dataclass(frozen=True)
@@ -367,6 +369,17 @@ class ModelConfig:
             head_dim=self.head_dim,
             rotary_config=self.rotary_config,
         )
+
+    def with_mtp_history(self) -> "ModelConfig":
+        """This config with the MTP layers' attention history kept beside the target's: their
+        ids follow the target's layers in its full-attention group, whose geometry they share."""
+        mtp = tuple(range(self.num_layers, self.num_layers + self.mtp_layers))
+        groups = tuple(
+            replace(group, layer_ids=group.layer_ids + mtp,
+                    num_index_layers=group.num_index_layers + len(mtp) * bool(group.num_index_layers))
+            if isinstance(group, FullAttentionGroupConfig) else group
+            for group in self.attention_groups)
+        return replace(self, attention_groups=groups)
 
     def attention_group_for_layer(self, layer_id: int) -> AttentionGroupConfig:
         groups = self.attention_groups or (self.default_full_attention_group(),)

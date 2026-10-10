@@ -28,6 +28,7 @@ from freetoken.moe.fused import fused_topk
 from freetoken.utils import torch_dtype
 
 from .attention import Qwen4ExpAttention
+from .config import MTP_TAIL_STATE
 from .hc import GatedResidual, GroupedPlusOneRMSNorm
 from .model import Qwen4ExpDecoderLayer
 
@@ -69,7 +70,10 @@ class MTPLayer(Qwen4ExpDecoderLayer):
 
 class Qwen4ExpMTP(BaseOP):
     """The draft layer. ``config`` is the target's; the layer's dense projections are BF16
-    whatever the target's dense plan, since its checkpoint weights are."""
+    whatever the target's dense plan, since its checkpoint weights are. Its history is the
+    attention layer ``layer_id``; the target's last streams wait in slot state ``tail_state``."""
+
+    tail_state = MTP_TAIL_STATE
 
     def __init__(self, config: ModelConfig) -> None:
         args = config.qwen4_args
@@ -82,7 +86,8 @@ class Qwen4ExpMTP(BaseOP):
         self.pre_fc_norm_embedding = GemmaPlusOneRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.pre_fc_norm_hidden = GroupedPlusOneRMSNorm(args.stream_width, config.rms_norm_eps, 1)
         # logical layer id past the target's layers: the attention history's key
-        self.layer = MTPLayer(config, config.num_layers)
+        self.layer_id = config.num_layers
+        self.layer = MTPLayer(config, self.layer_id)
         self.hyper_connection_mixer = GatedResidual(config, use_combine=False)
 
     def forward(self, streams: torch.Tensor, embeddings: torch.Tensor, positions: torch.Tensor,
@@ -90,12 +95,23 @@ class Qwen4ExpMTP(BaseOP):
         """One draft step over ``T`` rows: ``streams [T, hc_count*hidden]`` (the target's, or the
         previous step's), ``embeddings [T, hidden]`` of each row's next token, logical
         ``positions [T]``. Returns the head input ``[T, hidden]`` and the next step's streams."""
+        streams = self.layer.forward(self._fuse(streams, embeddings), positions, attend)
+        return self.hyper_connection_mixer.mix(streams)[0], streams
+
+    def write_history(self, streams: torch.Tensor, embeddings: torch.Tensor,
+                      positions: torch.Tensor, write: Callable[..., None]) -> None:
+        """The attention history of rows built from the target's real streams: only the input
+        fusion, the attention's stream mix and its K/V and index keys (``write(k, v, index)``)
+        run; the attention itself, the experts and the head produce nothing to keep."""
+        x, _ = self.layer.attn_hyper_connection.mix(self._fuse(streams, embeddings))
+        self.layer.self_attn.write_history(x, positions, write)
+
+    def _fuse(self, streams: torch.Tensor, embeddings: torch.Tensor) -> torch.Tensor:
         rows = streams.shape[0]
         e = self.fc_embedding.forward(self.pre_fc_norm_embedding.forward(embeddings))
         r = self.pre_fc_norm_hidden.forward(streams).view(rows * self.hc_count, self.hidden_size)
         r = self.fc_hidden.forward(r).view(rows, self.hc_count, self.hidden_size) + e.unsqueeze(1)
-        streams = self.layer.forward(r.view(rows, -1), positions, attend)
-        return self.hyper_connection_mixer.mix(streams)[0], streams
+        return r.view(rows, -1)
 
 
 def load_mtp(model_path: str, config: ModelConfig, device: torch.device) -> Qwen4ExpMTP:

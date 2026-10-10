@@ -76,6 +76,11 @@ class Qwen4ExpIndexer(BaseOP):
             eps=self.eps,
         )
 
+    def keys(self, x: torch.Tensor) -> QSAIndexerInputs:
+        """The raw index keys alone (``split`` only): a history update scores nothing."""
+        return QSAIndexerInputs(None, self.index_k_proj.forward(x).contiguous(),
+                                self.q_layernorm.weight, self.k_layernorm.weight, self.eps)
+
 
 class Qwen4ExpAttention(BaseOP):
     """Gated GQA with a QSA indexer::
@@ -143,6 +148,17 @@ class Qwen4ExpAttention(BaseOP):
         )
         o = attend(q.view(-1, self.num_q, self.head_dim), k, v, self.indexer.forward(x))
         return self.o_proj.forward(o.reshape(-1, self.qo_attn_dim) * torch.sigmoid(gate))
+
+    def write_history(self, x: torch.Tensor, positions: torch.Tensor,
+                      write: Callable[..., None]) -> None:
+        """What later queries read of ``x``'s rows: K (normed, roped at ``positions``), V and
+        the raw index keys, handed to ``write(k, v, index)`` (``split`` only; no query)."""
+        k = self.k_proj.forward(x).view(-1, self.num_kv, self.head_dim)
+        self.k_norm.forward_inplace(k)
+        # The rope kernel rotates a query too; this one is a throwaway single head.
+        _, k = self.rotary.forward(positions, k.new_empty(k.shape[0], self.head_dim),
+                                   k.view(-1, self.kv_attn_dim))
+        write(k, self.v_proj.forward(x).contiguous(), self.indexer.keys(x))
 
 
 __all__ = ["QSAIndexerInputs", "Qwen4ExpAttention", "Qwen4ExpIndexer"]

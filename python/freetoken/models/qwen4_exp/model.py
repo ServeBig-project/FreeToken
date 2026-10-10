@@ -112,11 +112,21 @@ class Qwen4ExpModel(BaseOP):
 
 
 class Qwen4ExpForCausalLM(BaseLLMModel):
+    # With a native MTP drafter every forward leaves its rows' final streams on its batch.
+    keeps_streams = False
+
     def __init__(self, config: ModelConfig) -> None:
         self._config = config
         self.model = Qwen4ExpModel(config)
         self.lm_head = make_lm_head(config, self.model.embed_tokens)
         super().__init__()
+
+    def load_mtp(self, model_path: str, device: torch.device):
+        """The checkpoint's MTP draft layer; from now on forwards keep their final streams."""
+        from .mtp import load_mtp
+
+        self.keeps_streams = True
+        return load_mtp(model_path, self._config, device)
 
     def load_host_tables(self, engine_config) -> None:
         """Attach the PLE n-gram table: the pinned checkpoint bank, or zeros for dummy weights."""
@@ -221,6 +231,8 @@ class Qwen4ExpForCausalLM(BaseLLMModel):
     ) -> torch.Tensor:
         if state.next_layer != self.layer_group_num_layers:
             raise ValueError("cannot finish layer-group prefill before every decoder layer ran")
+        if self.keeps_streams:
+            get_global_ctx().batch.draft_features = state.streams
         if output_indices is None:
             hidden = self.model.hyper_connection_mixer.mix(state.streams)[0]
             return self.lm_head.forward(hidden)
