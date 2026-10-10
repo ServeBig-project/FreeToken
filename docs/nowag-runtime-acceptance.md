@@ -1,6 +1,6 @@
 # NoWAG 在线接入验收
 
-状态：单卡验收全部通过；TP2 待最后一次复跑。2026-10-10，生产 `570808b`（已合入 main `ea3b9df`），独立黑盒 `test/nowag-runtime@12fb760`；[PR #11](https://github.com/ServeBig-project/FreeToken/pull/11)。证据目录 `/data2/servebig-envs/nowag_runtime_acceptance_20261009/`，下表的批次目录都相对于它。
+状态：单卡与 TP2 验收全部通过。2026-10-10，生产 `570808b`（已合入 main `ea3b9df`），独立黑盒 `test/nowag-runtime@d009efe`；[PR #11](https://github.com/ServeBig-project/FreeToken/pull/11)。证据目录 `/data2/servebig-envs/nowag_runtime_acceptance_20261009/`，下表的批次目录都相对于它。
 
 ## 结果
 
@@ -16,7 +16,7 @@
 | 配对性能（与 `d912bbe`＋原外部插件对比） | DSV4 通过。Qwen 首次 TTFT 中位数 0.705 对 0.657 s，超过 5% 门限；当时主机内存近乎耗尽。复跑两次通过，比值 0.97–1.04 | `b10/`、`b11/` |
 | 清洁安装 | 最终 wheel 装进全新 venv：kernel 源码和 profile 齐全，`ft serve`/`ft checkpoint` 都有 `--nowag-expert-path` | `wheel-final/` |
 | TP2 组件（rank 求和、bind 数值，含 DSV4、gpt-oss） | 10 通过 | `b12/` |
-| TP2 服务与 FTW | 原生 TP2 3 过 3 败，都是小模型逐字比较过严（见下）；FTW TP2 按用户决定改为拒绝，待复跑 | `b12/`；复跑 `b14/` |
+| TP2 服务与 FTW | 原生 TP2 6 项通过（offload/cpu/hybrid × D4/D6，48 个提示一致率 0.65–0.85）；FTW 配 TP2 在 ready 前被拒绝，同一 FTW 在 TP1 下正常服务 | `b14/`、`b16/` |
 | CPU 内部测试 | 1230 通过、0 失败 | — |
 
 ## 本轮修复
@@ -40,7 +40,7 @@
 - harness 改为等上一个服务的整个进程组退出；
 - FTW 测试结束后删除自己产出的目录。
 
-`cf2ef2e` 把 TP2 原生服务的比较改为“前 8 个词一致”。这条规则是看到失败后才改的：小随机模型上，TP1 与 TP2 在第 13–18 个 token 后才分叉，TP1 只换 backend 也在相近位置分叉；数值正确性由组件级 TP2 测试保证。
+TP2 原生服务的比较规则在看到 GPU 结果后修订过三次：`cf2ef2e` 改为前 8 词一致，`9a27e88` 改为以换 backend 为噪声参照，`d009efe` 改为一致率不低于 0.35。最终依据是用公开 bind 接口测得的数值：NoWAG 两个 rank 之和对 TP1 的相对误差为 0.0034，BF16 专家同样对半切分为 0.0033，可见 TP2 只多一次跨卡 bf16 舍入。测试用的随机 sidecar 与基座无关，专家输出约为 BF16 的 32 倍，greedy 输出对舍入格外敏感：同一模型换回 BF16 专家时，TP2 与 TP1 24/24 一致。错误分片估计会让一致率接近 0.06。
 
 ## 代码量
 
