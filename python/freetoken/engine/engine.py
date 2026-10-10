@@ -707,6 +707,12 @@ class Engine:
             and executing(c) <= execution, _MAX_AUTO_RUNNING)
         requested = prior.get("requested_running_requests", config.max_running_req)
         effective = resource if requested is None else min(requested, resource)
+        if effective < 1 and not prior and executing(1) > execution:
+            # A larger runtime would leave even less of this memory.
+            raise ValueError(
+                f"{mem_GB(max(execution, 0))} of GPU memory beside the weights, the expert cache "
+                f"and the {mem_GB(budget)} runtime cannot hold one request's execution buffers "
+                f"({mem_GB(executing(1))}); free GPU memory, e.g. with a smaller --moe-cache-size")
         if effective < 1 or (prior and effective < prior["max_running_requests"]):
             raise ValueError(
                 f"{mem_GB(budget)} of runtime holds {resource} requests at their minimum; "
