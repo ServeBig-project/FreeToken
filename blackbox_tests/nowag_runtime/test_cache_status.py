@@ -105,10 +105,11 @@ def test_non_nowag_model_reports_a_different_format():
 
 
 def test_tp2_one_codebook_per_rank():
+    import tiny_model as tiny
     gpus = need_tp2()
-    side = need_path(QWEN36_SIDE, "Qwen3.6 sidecar")
+    base, side = tiny.paths(6)
     size = sizes(side)
-    with Server("status_tp2", qwen(side, SMALL, "--tensor-parallel-size", "2"), gpus) as s:
+    with Server("status_tp2", tiny.serve_args(base, side, tp=2), gpus) as s:
         ranks = check_block(experts(s.status()), size["d"], n_ranks=2)
     assert len({str(r["device"]) for r in ranks}) == 2
     for r in ranks:

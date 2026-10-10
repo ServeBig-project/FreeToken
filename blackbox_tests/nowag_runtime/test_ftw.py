@@ -1,8 +1,8 @@
 """FTW conversion (`ft checkpoint --nowag-expert-path`): round trip, source isolation, rename,
 missing data, bias carried, TP2. Needs GPU approval and NOWAG_SCRATCH (multi-GB outputs).
 
-Isolation is shown by converting from symlink copies of BASE and SIDE and deleting those
-copies before serving the FTW directory.
+Round trips delete their input symlink copies. Complete source isolation is checked by
+test_ftw_with_original_sources_absent inside the coordinator's separate container.
 """
 
 import json
@@ -20,7 +20,7 @@ import access as A  # noqa: E402
 import sidecar as S  # noqa: E402
 from cases import (QWEN36_BASE, QWEN36_SIDE, DSV4_BASE, DSV4_SIDE, GPTOSS_BASE,  # noqa: E402
                    need_gpu, need_path, need_scratch, need_tp2)
-from harness import (Server, expect_rejected, experts, ft, run_prompts, same_execution,  # noqa: E402
+from harness import (LOG_DIR, Server, expect_rejected, experts, ft, run_prompts, same_execution,  # noqa: E402
                      cross_path)
 
 CACHE = {"qwen36": os.environ.get("NOWAG_QWEN36_CACHE", "1536"),
@@ -39,6 +39,9 @@ def inventory(root):
 
 
 def sources(which):
+    if which.startswith("tiny-qwen3-"):
+        import tiny_model as tiny
+        return tiny.paths(int(which[-1]))
     if which == "qwen36":
         return need_path(QWEN36_BASE, "Qwen3.6 base"), need_path(QWEN36_SIDE, "Qwen3.6 sidecar")
     if which == "dsv4":
@@ -49,6 +52,10 @@ def sources(which):
 
 
 def serve_args(model, which, side=None, *extra):
+    if which.startswith("tiny-qwen3-"):
+        import tiny_model as tiny
+        args = tiny.serve_args(model, side)
+        return args + list(extra)
     cache = CACHE[which.split("-")[0]]
     args = ["--model", model, "--moe-backend", "offload", "--moe-cache-size", cache, *extra]
     return args + (["--nowag-expert-path", side] if side else [])
@@ -86,7 +93,7 @@ def test_conversion_leaves_sources_untouched(which):
 
 
 @pytest.mark.parametrize("which", VARIANTS)
-def test_ftw_runs_alone_and_matches_native(which):
+def test_ftw_roundtrip_matches_native(which):
     """Native and FTW carry the same compressed weights; for GPT-OSS the native run reads the
     expert biases from BASE, so a FTW that dropped them diverges from it."""
     gpu = need_gpu()
@@ -94,11 +101,30 @@ def test_ftw_runs_alone_and_matches_native(which):
     task = which in ("qwen36", "dsv4")                        # only calibrated real weights
     with Server(f"ftw_native_{which}", serve_args(info["base"], which, info["side"]), gpu) as s:
         native, native_status = run_prompts(s), experts(s.status())
+    (LOG_DIR / f"ftw-native-reference-{which}.json").write_text(json.dumps(
+        {"which": which, "outputs": native, "status": native_status, "task": task,
+         "source_paths": [str(info["base"]), str(info["side"])]}, indent=2))
     with Server(f"ftw_{which}", serve_args(info["dest"], which), gpu) as s:
         ftw, ftw_status = run_prompts(s), experts(s.status())
     assert ftw_status["format"] == native_status["format"]
     assert ftw_status["format_parameters"] == native_status["format_parameters"]
     cross_path(native, ftw, f"{which} native vs FTW", task=task)
+
+
+def test_ftw_with_original_sources_absent():
+    """The coordinator runs this inside a container mounting only DEST, code and environment.
+    The small reference JSON comes from the native/FTW round-trip run on the host."""
+    gpu = need_gpu()
+    dest = need_path(os.environ.get("NOWAG_ISOLATED_FTW"), "isolated FTW directory")
+    reference_path = need_path(os.environ.get("NOWAG_ISOLATED_REFERENCE"), "native reference JSON")
+    reference = json.loads(reference_path.read_text())
+    assert all(not Path(path).exists() for path in reference["source_paths"]), \
+        "BASE and SIDE must be absent from the serving process's filesystem"
+    with Server("ftw_isolated", serve_args(dest, reference["which"]), gpu) as server:
+        outputs, block = run_prompts(server), experts(server.status())
+    assert block["format"] == reference["status"]["format"]
+    assert block["format_parameters"] == reference["status"]["format_parameters"]
+    cross_path(reference["outputs"], outputs, "source-isolated FTW", task=reference["task"])
 
 
 def test_ftw_renamed_gives_identical_output():
@@ -126,7 +152,7 @@ def test_ftw_missing_data_rejected(tmp_path):
     expect_rejected("ftw_missing_shard", serve_args(broken, "qwen36"), gpu)
 
 
-@pytest.mark.parametrize("which", ["qwen36", "qwen36-d4-random", "dsv4"])
+@pytest.mark.parametrize("which", ["tiny-qwen3-d4", "tiny-qwen3-d6"])
 def test_ftw_tp2_matches_tp1(which):
     gpus = need_tp2()
     gpu = need_gpu()

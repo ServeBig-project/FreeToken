@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from cases import (QWEN36_BASE, QWEN36_BF16, QWEN36_SIDE, DSV4_BASE, DSV4_SIDE,  # noqa: E402
                    DFLASH_DRAFT, need_gpu, need_path, need_tp2)
 from harness import (BASELINE_SOURCE, LOG_DIR, PROMPTS, Server, StartupFailed, cross_path,  # noqa: E402
-                     experts, loops, run_prompts, same_execution, task_ok, text)
+                     experts, get, loops, run_prompts, same_execution, task_ok, text)
 from test_cache_status import sizes  # noqa: E402
 
 QWEN_CACHE = os.environ.get("NOWAG_QWEN36_CACHE", "1536")
@@ -42,7 +42,7 @@ _REF = {}
 
 
 def offload_reference():
-    """Greedy outputs of the default NoWAG configuration (offload, eager defaults)."""
+    """Greedy outputs of the default NoWAG configuration (offload, automatic Graph policy)."""
     if "qwen" not in _REF:
         with Server("svc_ref_offload", qwen(), need_gpu()) as s:
             _REF["qwen"] = run_prompts(s)
@@ -86,16 +86,14 @@ def test_cache_capacity(cache):
 
 @pytest.mark.parametrize("policy", ["legacy", "mixed", "layered", "joint", "layered-pipeline"])
 def test_batching_policy(policy):
-    """Each policy either works with the same weights or is refused before ready."""
+    """All five policies support Qwen3.6 AR/offload with these legal public options."""
     gpu = need_gpu()
     ref = offload_reference()
-    try:
-        server = Server(f"svc_policy_{policy}", qwen("--batching-policy", policy), gpu)
-    except StartupFailed as refused:
-        pytest.skip(f"{policy} refused before ready (exit {refused.code}); record as rejection")
-    with server as s:
+    extra = ["--attention-backend", "triton,fi"] if policy in ("joint", "layered-pipeline") else []
+    with Server(f"svc_policy_{policy}", qwen("--batching-policy", policy, *extra), gpu) as s:
         cross_path(ref, run_prompts(s), f"policy {policy}")
         mixed_load(s)
+        assert get(s.url, "/v1/stats")["body"]["execution"]["effective"]["batching_policy"] == policy
 
 
 def mixed_load(s):
@@ -104,10 +102,12 @@ def mixed_load(s):
     full-length rows must equal their solo text and none may loop; short rows must stop at
     their own max_tokens."""
     prompts = [p for p, _ in PROMPTS]
+    prompts[1] = ("Background notes: the garden has trees, flowers, birds, and a pond. " * 96
+                  + "\nContinue this sequence: " + prompts[1])
     solo = s.greedy(prompts, 24)
     for width in (2, 3, 5):
         lengths = [24 if i < 4 else 7 for i in range(width)]
-        outs = s.parallel([lambda i=i, n=n: s.complete(prompts[i % 4], n)
+        outs = s.parallel([lambda i=i, n=n: s.complete(prompts[i % 4], n, cache_group=f"tail-{width}")
                            for i, n in enumerate(lengths)])
         full = [(text(r), solo[i % 4]) for i, r in enumerate(outs) if lengths[i] == 24]
         assert sum(a == b for a, b in full) * 2 >= len(full), (width, full)
@@ -146,31 +146,84 @@ def test_http_semantics():
 def test_self_speculative(steps):
     gpu = need_gpu()
     ref = offload_reference()
-    with Server(f"svc_selfsd_{steps}", qwen("--speculative-num-steps", steps), gpu) as s:
+    graph = 0 if steps == 2 else 16
+    with Server(f"svc_selfsd_{steps}", qwen("--batching-policy", "legacy",
+                                            "--cuda-graph-max-bs", graph,
+                                            "--speculative-num-steps", steps), gpu) as s:
+        before = get(s.url, "/v1/stats")["body"]
         cross_path(ref, run_prompts(s), f"self-SD N={steps}")
         mixed_load(s)
+        check_sd_observed(s, before, graph=bool(graph))
 
 
-@pytest.mark.parametrize("steps", [2, 8])
+@pytest.mark.parametrize("steps", [1, 2, 4, 8])
 def test_dflash_speculative(steps):
     gpu = need_gpu()
     ref = offload_reference()
     draft = need_path(DFLASH_DRAFT, "DFlash draft for Qwen3.6 (NOWAG_DFLASH_DRAFT)")
-    args = qwen("--speculative-num-steps", steps, "--speculative-draft-model-path", draft,
+    graph = 0 if steps == 2 else 16
+    args = qwen("--batching-policy", "legacy", "--attention-backend", "fi", "--page-size", 1,
+                "--cuda-graph-max-bs", graph,
+                "--speculative-num-steps", steps,
+                "--speculative-draft-model-path", draft,
                 *DFLASH_ARGS)
     with Server(f"svc_dflash_{steps}", args, gpu) as s:
+        before = get(s.url, "/v1/stats")["body"]
         cross_path(ref, run_prompts(s), f"DFlash N={steps}")
         mixed_load(s)
+        check_sd_observed(s, before, graph=bool(graph))
 
 
-def test_tp2_native():
+def check_sd_observed(server, before, graph=None):
+    stats = get(server.url, "/v1/stats")["body"]
+    sd = {key: stats["speculative"][key] - before["speculative"][key]
+          for key in ("draft_tokens", "accepted_draft_tokens", "verify_steps")}
+    assert sd["draft_tokens"] > 0 and sd["verify_steps"] > 0, sd
+    assert 0 <= sd["accepted_draft_tokens"] <= sd["draft_tokens"], sd
+    if graph is not None:
+        now, old = stats["cuda_graph"], before["cuda_graph"]
+        assert now["enabled"] == graph
+        if not graph:
+            now, old = now["speculative_eager"], old["speculative_eager"]
+        assert now["draft"] > old["draft"], (old, now)
+        assert (now["verify"] + now["verify_range"]) > (old["verify"] + old["verify_range"]), (old, now)
+    (LOG_DIR / f"{server.label}-stats.json").write_text(json.dumps(stats, indent=2))
+
+
+@pytest.mark.parametrize("d", [4, 6])
+@pytest.mark.parametrize("backend", ["offload", "cpu", "hybrid"])
+def test_tp2_native(d, backend):
+    import tiny_model as tiny
     gpus = need_tp2()
-    with Server("svc_tp2", qwen("--tensor-parallel-size", 2), gpus) as s:
+    gpu = need_gpu()
+    base, side = tiny.paths(d)
+    with Server(f"svc_tiny_tp1_{backend}_d{d}", tiny.serve_args(base, side, backend=backend), gpu) as s:
+        reference = run_prompts(s)
+    with Server(f"svc_tiny_tp2_{backend}_d{d}", tiny.serve_args(base, side, tp=2, backend=backend), gpus) as s:
         out, ranks = run_prompts(s), experts(s.status())["ranks"]
-        mixed_load(s)
     assert sorted(r["rank"] for r in ranks) == [0, 1]
     assert len({str(r["device"]) for r in ranks}) == 2
-    cross_path(offload_reference(), out, "TP1 vs TP2")
+    cross_path(reference, out, "tiny Qwen3MoE TP1 vs TP2", task=False)
+
+
+@pytest.mark.parametrize("backend", ["offload", "cpu", "hybrid", "fused"])
+def test_gptoss_bias_service_modes(backend):
+    """The coordinator confirmed all four GPT-OSS backends as required supported paths."""
+    import access as A
+    from cases import GPTOSS_BASE
+    gpu = need_gpu()
+    base = need_path(GPTOSS_BASE, "GPT-OSS BASE with expert bias")
+    side = A.sidecar_dir("gptoss-d6-random")
+    common = ["--model", base, "--nowag-expert-path", side, "--batching-policy", "legacy"]
+    cache = os.environ.get("NOWAG_GPTOSS_CACHE", "256")
+    if "gptoss" not in _REF:
+        with Server("gptoss_reference", common + ["--moe-backend", "offload", "--moe-cache-size", cache], gpu) as s:
+            _REF["gptoss"] = run_prompts(s)
+    options = ["--moe-backend", backend]
+    if backend in ("offload", "hybrid"):
+        options += ["--moe-cache-size", cache]
+    with Server(f"gptoss_{backend}", common + options, gpu) as s:
+        cross_path(_REF["gptoss"], run_prompts(s), f"synthetic GPT-OSS {backend}", task=False)
 
 
 @pytest.mark.parametrize("backend", ["offload", "cpu", "hybrid"])
@@ -180,13 +233,7 @@ def test_dsv4_service(backend):
             "--nowag-expert-path", need_path(DSV4_SIDE, "DSV4 sidecar"), "--moe-backend", backend]
     if backend != "cpu":
         args += ["--moe-cache-size", DSV4_CACHE]
-    try:
-        server = Server(f"svc_dsv4_{backend}", args, gpu)
-    except StartupFailed as refused:
-        if backend == "offload":
-            raise
-        pytest.skip(f"DSV4 {backend} refused before ready (exit {refused.code})")
-    with server as s:
+    with Server(f"svc_dsv4_{backend}", args, gpu) as s:
         out = run_prompts(s)
         assert task_ok(out), out
         mixed_load(s)
