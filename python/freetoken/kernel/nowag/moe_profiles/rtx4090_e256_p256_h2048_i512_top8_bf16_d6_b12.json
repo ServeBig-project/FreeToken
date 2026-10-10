@@ -1,0 +1,123 @@
+{
+  "schema_version": 5,
+  "name": "rtx4090-e256-p256-h2048-i512-top8-bf16-d6-b12",
+  "hardware": {
+    "backend": "cuda",
+    "device_name": "NVIDIA GeForce RTX 4090",
+    "compute_capability": [8, 9]
+  },
+  "shape": {
+    "num_experts": 256,
+    "physical_expert_rows": 256,
+    "hidden_size": 2048,
+    "intermediate_size": 512,
+    "physical_intermediate_size": 512,
+    "pad_down_to_k48": false,
+    "down_input_group_start_lane": 0,
+    "assignment_layout": "word_major",
+    "structural_down": true,
+    "top_k": 8,
+    "codebook_size": 4096,
+    "dtype": "bfloat16",
+    "group_size": 6,
+    "assignment_bits": 12,
+    "activation_kind": "silu_mul",
+    "gate_up_input_rounding": "none",
+    "swiglu_limit": null,
+    "down_input_rounding": "none",
+    "down_norm_placement": "gate_up_epilogue"
+  },
+  "token_buckets": [
+    {
+      "min_tokens": 4,
+      "max_tokens": 4,
+      "gate_up": {"block_m": 64, "block_n": 128, "num_warps": 8, "num_stages": 2},
+      "down": {"block_m": 64, "block_n": 128, "num_warps": 8, "num_stages": 2}
+    },
+    {
+      "min_tokens": 8,
+      "max_tokens": 8,
+      "gate_up": {"block_m": 32, "block_n": 128, "num_warps": 8, "num_stages": 2},
+      "down": {"block_m": 64, "block_n": 128, "num_warps": 8, "num_stages": 2}
+    },
+    {
+      "min_tokens": 32,
+      "max_tokens": 32,
+      "adaptive_m_tiles": false,
+      "gate_up": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2},
+      "down": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2}
+    },
+    {
+      "min_tokens": 64,
+      "max_tokens": 64,
+      "adaptive_m_tiles": false,
+      "gate_up": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2},
+      "down": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2}
+    },
+    {
+      "min_tokens": 128,
+      "max_tokens": 128,
+      "adaptive_m_tiles": false,
+      "gate_up": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2},
+      "down": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2}
+    },
+    {
+      "min_tokens": 256,
+      "max_tokens": 256,
+      "adaptive_m_tiles": true,
+      "gate_up": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2},
+      "down": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2}
+    },
+    {
+      "min_tokens": 512,
+      "max_tokens": 512,
+      "adaptive_m_tiles": true,
+      "gate_up": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2},
+      "down": {"block_m": 16, "block_n": 128, "num_warps": 8, "num_stages": 2}
+    },
+    {
+      "min_tokens": 1024,
+      "max_tokens": 1024,
+      "gate_up": {"block_m": 64, "block_n": 128, "num_warps": 8, "num_stages": 2},
+      "down": {"block_m": 64, "block_n": 128, "num_warps": 8, "num_stages": 2}
+    }
+  ],
+  "provenance": {
+    "source": [
+      "/data1/lmcache_kv/nowag_kernel_tuning/freetoken_integration_20260824/qwen_p256_m1_m4_m8_finalsource_fullscan3_dispatch_v1.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/freetoken_integration_20260824/qwen_p256_m1_m4_m8_finalprofile_dispatch_v4.json",
+      "/data1/lmcache_kv/nowag_kernel_tuning/freetoken_integration_20260824/qwen_modelE256_bankrows256_prefill_fullscan3_capacityfix.json"
+    ],
+    "adaptive_prefill": {
+      "summary": "/data1/lmcache_kv/nowag_kernel_tuning/phase3_adaptive_prefill_blackbox/v4_final_strategy_30case_summary.json",
+      "raw_artifacts": [
+        "/data1/lmcache_kv/nowag_kernel_tuning/phase3_adaptive_prefill_blackbox/v4_final_policy_30case_fresh2.json",
+        "/data1/lmcache_kv/nowag_kernel_tuning/phase3_adaptive_prefill_blackbox/v4_m256_adaptive_6case_fresh.json",
+        "/data1/lmcache_kv/nowag_kernel_tuning/phase3_adaptive_prefill_blackbox/v4_m512_adaptive_6case_fresh.json"
+      ],
+      "strategy": "M=32/64/128 use fixed BM16/BN128; M=256/512 use adaptive V4.",
+      "validation": {
+        "correctness_cases": "30/30 bitwise and coverage passed",
+        "balanced_geomean_speedup_vs_previous_auto": 1.97783,
+        "balanced_minimum_speedup_vs_previous_auto": 1.60765,
+        "hotspot_worst_final_over_best_fixed": 1.005376
+      }
+    },
+    "real_router_replay": {
+      "artifact": "/data1/lmcache_kv/nowag_kernel_tuning/phase3_qwen_real_router_blackbox/qwen_real_router_matrix_25case.json",
+      "coverage": "5 token counts x 5 Qwen layers; 25/25 passed",
+      "validation": {
+        "old_plan_to_current_auto_geomean_speedup": 1.44215,
+        "old_plan_to_current_auto_speedup_range": [1.00501, 1.96053],
+        "correctness": "bitwise",
+        "steady_state_allocations": 0
+      },
+      "scope": "Operator replay starts after layer tensors are resident on GPU; model loading and expert transfer are excluded."
+    },
+    "measured_tokens": [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
+    "enabled_tokens": [4, 8, 32, 64, 128, 256, 512, 1024],
+    "seeds": [7, 19, 31],
+    "routing": ["balanced", "hotspot"],
+    "rule": "M=1, M=2, and M=16 remain on Triton; M=32/64/128 use measured fixed BM16, M=256/512 use measured adaptive V4, and other enabled points retain their measured plans. No neighboring range is inferred."
+  }
+}

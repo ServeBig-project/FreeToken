@@ -65,6 +65,7 @@ def _reply(request_id, status, **over):
         gdn_replayssm=None,
         dflash=None,
         execution=None,
+        experts=None,
         prefix_cache={},
     )
     base.update(over)

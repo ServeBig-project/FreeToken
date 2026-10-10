@@ -1,7 +1,8 @@
 """CLI: convert an HF safetensors checkpoint to a FreeToken Weight (FTW) checkpoint.
 
     ft checkpoint --model <hf_dir> --out <ftw_dir> \
-        [--dtype bfloat16] [--moe-backend offload] [--shard-gib 8] [--gpu <uuid-or-index>]
+        [--dtype bfloat16] [--moe-backend offload] [--shard-gib 8] [--gpu <uuid-or-index>] \
+        [--nowag-expert-path <nowag_dir>]
 
 The output dir is self-contained: point the server's ``--model`` at it to load via the FTW
 fast path (auto-detected).
@@ -29,6 +30,9 @@ def main(argv: list[str] | None = None, prog: str = "freetoken.checkpoint") -> i
     p.add_argument("--moe-backend", default="offload",
                    help="offload (experts -> banks) or e.g. triton (experts stay dense)")
     p.add_argument("--shard-gib", type=float, default=8.0, help="max shard size in GiB")
+    p.add_argument("--nowag-expert-path", default=None,
+                   help="expert-only NoWAG output to store as the routed experts; the FTW then "
+                        "serves without this directory")
     p.add_argument("--gpu", type=single_gpu_arg, default=None,
                    help="GPU for the repack: a GPU UUID (GPU-xxxx..., as nvidia-smi -L prints) or "
                         "an nvidia-smi index (default: the first visible GPU)")
@@ -47,6 +51,7 @@ def main(argv: list[str] | None = None, prog: str = "freetoken.checkpoint") -> i
     index = convert_checkpoint(
         ns.model, ns.out, dtype=_DTYPES[ns.dtype],
         moe_backend=ns.moe_backend, shard_limit=shard_limit, device=device,
+        nowag_expert_path=ns.nowag_expert_path,
     )
     dt = time.perf_counter() - t
     c = index["counts"]

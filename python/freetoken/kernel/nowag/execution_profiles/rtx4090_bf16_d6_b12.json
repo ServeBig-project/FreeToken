@@ -1,0 +1,237 @@
+{
+  "schema_version": 3,
+  "name": "rtx4090-bf16-d6-b12-fastest-backend-20260810",
+  "hardware": {
+    "backend": "cuda",
+    "device_name": "NVIDIA GeForce RTX 4090",
+    "compute_capability": [8, 9]
+  },
+  "format": {
+    "dtype": "bfloat16",
+    "group_size": 6,
+    "assignment_bits": 12,
+    "codebook_size": 4096
+  },
+  "dense": [
+    {
+      "shape": {"out_features": 4096, "in_features": 4096, "input_group_start_lane": 0},
+      "exact_token_ranges": [{"min_tokens": 1024, "max_tokens": 2147483647}]
+    },
+    {
+      "shape": {"out_features": 11008, "in_features": 4096, "input_group_start_lane": 0},
+      "exact_token_ranges": [{"min_tokens": 512, "max_tokens": 2147483647}]
+    },
+    {
+      "shape": {"out_features": 4096, "in_features": 11008, "input_group_start_lane": 0},
+      "exact_token_ranges": [{"min_tokens": 512, "max_tokens": 2147483647}]
+    },
+    {
+      "shape": {"out_features": 5632, "in_features": 2048, "input_group_start_lane": 0},
+      "exact_token_ranges": [{"min_tokens": 256, "max_tokens": 2147483647}]
+    },
+    {
+      "shape": {"out_features": 81920, "in_features": 2048, "input_group_start_lane": 0},
+      "exact_token_ranges": [
+        {"min_tokens": 1, "max_tokens": 8},
+        {"min_tokens": 32, "max_tokens": 2147483647}
+      ]
+    },
+    {
+      "shape": {"out_features": 1536, "in_features": 2048, "input_group_start_lane": 0},
+      "exact_token_ranges": [{"min_tokens": 1024, "max_tokens": 2147483647}]
+    },
+    {
+      "shape": {"out_features": 576, "in_features": 2048, "input_group_start_lane": 0},
+      "exact_token_ranges": [{"min_tokens": 2048, "max_tokens": 2147483647}]
+    },
+    {
+      "shape": {"out_features": 1408, "in_features": 2048, "input_group_start_lane": 0},
+      "exact_token_ranges": [{"min_tokens": 1024, "max_tokens": 2147483647}]
+    },
+    {
+      "shape": {"out_features": 2048, "in_features": 1024, "input_group_start_lane": 0},
+      "exact_token_ranges": [{"min_tokens": 1024, "max_tokens": 2147483647}]
+    },
+    {
+      "shape": {"out_features": 2048, "in_features": 1024, "input_group_start_lane": 4},
+      "exact_token_ranges": [
+        {"min_tokens": 320, "max_tokens": 639, "block_m": 32, "block_n": 128},
+        {"min_tokens": 640, "max_tokens": 2147483647, "block_m": 64, "block_n": 128}
+      ]
+    },
+    {
+      "shape": {"out_features": 2048, "in_features": 5632, "input_group_start_lane": 0},
+      "exact_token_ranges": [{"min_tokens": 1024, "max_tokens": 2147483647}]
+    },
+    {
+      "shape": {"out_features": 2048, "in_features": 5632, "input_group_start_lane": 4},
+      "exact_token_ranges": [
+        {"min_tokens": 320, "max_tokens": 575, "block_m": 32, "block_n": 128},
+        {"min_tokens": 576, "max_tokens": 2147483647, "block_m": 64, "block_n": 128}
+      ]
+    },
+    {
+      "shape": {"out_features": 2048, "in_features": 1408, "input_group_start_lane": 0},
+      "exact_token_ranges": [{"min_tokens": 1024, "max_tokens": 2147483647}]
+    },
+    {
+      "shape": {"out_features": 2048, "in_features": 1408, "input_group_start_lane": 4},
+      "exact_token_ranges": [
+        {"min_tokens": 320, "max_tokens": 575, "block_m": 32, "block_n": 128},
+        {"min_tokens": 576, "max_tokens": 2147483647, "block_m": 64, "block_n": 128}
+      ]
+    },
+    {
+      "shape": {"out_features": 2048, "in_features": 4096, "input_group_start_lane": 0},
+      "exact_token_ranges": [
+        {"min_tokens": 384, "max_tokens": 768, "block_m": 32, "block_n": 128},
+        {"min_tokens": 769, "max_tokens": 2147483647, "block_m": 64, "block_n": 128}
+      ]
+    },
+    {
+      "shape": {"out_features": 5504, "in_features": 4096, "input_group_start_lane": 0},
+      "exact_token_ranges": [
+        {"min_tokens": 96, "max_tokens": 383, "block_m": 32, "block_n": 128},
+        {"min_tokens": 384, "max_tokens": 2147483647, "block_m": 64, "block_n": 128}
+      ]
+    },
+    {
+      "shape": {"out_features": 4096, "in_features": 2048, "input_group_start_lane": 0},
+      "exact_token_ranges": [
+        {"min_tokens": 192, "max_tokens": 511, "block_m": 32, "block_n": 128},
+        {"min_tokens": 512, "max_tokens": 2147483647, "block_m": 64, "block_n": 128}
+      ]
+    },
+    {
+      "shape": {"out_features": 4096, "in_features": 2048, "input_group_start_lane": 2},
+      "exact_token_ranges": [
+        {"min_tokens": 192, "max_tokens": 383, "block_m": 32, "block_n": 128},
+        {"min_tokens": 384, "max_tokens": 2147483647, "block_m": 64, "block_n": 128}
+      ]
+    },
+    {
+      "shape": {"out_features": 4096, "in_features": 5504, "input_group_start_lane": 0},
+      "exact_token_ranges": [
+        {"min_tokens": 192, "max_tokens": 511, "block_m": 32, "block_n": 128},
+        {"min_tokens": 512, "max_tokens": 2147483647, "block_m": 64, "block_n": 128}
+      ]
+    },
+    {
+      "shape": {"out_features": 4096, "in_features": 5504, "input_group_start_lane": 2},
+      "exact_token_ranges": [
+        {"min_tokens": 192, "max_tokens": 383, "block_m": 32, "block_n": 128},
+        {"min_tokens": 384, "max_tokens": 2147483647, "block_m": 64, "block_n": 128}
+      ]
+    }
+  ],
+  "dense_multi": [
+    {
+      "shape": {
+        "output_widths": [5632, 5632],
+        "in_features": 2048,
+        "input_group_start_lane": 0
+      },
+      "exact_token_ranges": [
+        {"min_tokens": 96, "max_tokens": 2147483647, "block_m": 64, "block_n": 128}
+      ]
+    },
+    {
+      "shape": {
+        "output_widths": [1408, 1408],
+        "in_features": 2048,
+        "input_group_start_lane": 0
+      },
+      "exact_token_ranges": [
+        {"min_tokens": 96, "max_tokens": 2147483647, "block_m": 64, "block_n": 128}
+      ]
+    },
+    {
+      "shape": {
+        "output_widths": [2048, 2048, 2048],
+        "in_features": 4096,
+        "input_group_start_lane": 0
+      },
+      "exact_token_ranges": [
+        {"min_tokens": 80, "max_tokens": 127, "block_m": 32, "block_n": 128},
+        {"min_tokens": 192, "max_tokens": 383, "block_m": 64, "block_n": 128},
+        {"min_tokens": 384, "max_tokens": 2147483647, "block_m": 128, "block_n": 128}
+      ]
+    },
+    {
+      "shape": {
+        "output_widths": [5504, 5504],
+        "in_features": 4096,
+        "input_group_start_lane": 0
+      },
+      "exact_token_ranges": [
+        {"min_tokens": 80, "max_tokens": 2147483647, "block_m": 64, "block_n": 128}
+      ]
+    }
+  ],
+  "moe": [
+    {
+      "shape": {
+        "num_experts": 64,
+        "hidden_size": 2048,
+        "intermediate_size": 704,
+        "physical_intermediate_size": 720,
+        "pad_down_to_k48": true,
+        "down_input_group_start_lane": 2,
+        "assignment_layout": "word_major",
+        "structural_down": true,
+        "top_k": 6,
+        "activation_kind": "silu_mul",
+        "gate_up_input_rounding": "none",
+        "swiglu_limit": null,
+        "down_input_rounding": "none",
+        "down_norm_placement": "gate_up_epilogue"
+      },
+      "exact_token_ranges": [{"min_tokens": 256, "max_tokens": 2147483647}]
+    },
+    {
+      "shape": {
+        "num_experts": 64,
+        "hidden_size": 2048,
+        "intermediate_size": 1408,
+        "physical_intermediate_size": 1408,
+        "pad_down_to_k48": false,
+        "down_input_group_start_lane": 0,
+        "assignment_layout": "word_major",
+        "structural_down": true,
+        "top_k": 6,
+        "activation_kind": "silu_mul",
+        "gate_up_input_rounding": "none",
+        "swiglu_limit": null,
+        "down_input_rounding": "none",
+        "down_norm_placement": "gate_up_epilogue"
+      },
+      "exact_token_ranges": [{"min_tokens": 64, "max_tokens": 2147483647}]
+    }
+  ],
+  "provenance": {
+    "policy": "Choose exact-K48 only where controlled RTX 4090 A/B measurements beat the production Triton kernel; unmatched keys use Triton.",
+    "dense_evidence": [
+      "experiments/rtx4090/results/dense_exact_k48_vs_triton_rtx4090_schema_v2_quick.json",
+      "experiments/rtx4090/results/dense_threeway_moonlight_tp2_large_m_current_gpu2.json",
+      "experiments/rtx4090/results/dense_threeway_moonlight_tp2_m2048_current_gpu2.json",
+      "experiments/rtx4090/results/dense_tp_tiles_o_gpu2.json",
+      "experiments/rtx4090/results/dense_tp_tiles_down_gpu0.json",
+      "experiments/rtx4090/results/dense_tp_tiles_column_gpu1.json",
+      "experiments/rtx4090/results/dense_tp_tiles_o_crossover_gpu2.json",
+      "experiments/rtx4090/results/dense_tp_tiles_down_crossover_gpu0.json",
+      "experiments/rtx4090/results/dense_tp_tiles_column_crossover_gpu1.json",
+      "experiments/rtx4090/results/dense_tp_boundary_interior_fastpath_ab_gpu0.json",
+      "experiments/rtx4090/results/dense_tp_boundary_norm_hoist_ab_gpu0.json",
+      "experiments/rtx4090/results/dense_tp_tiles_final_column_gpu0.json",
+      "experiments/rtx4090/results/dense_tp_tiles_final_o_gpu1.json",
+      "experiments/rtx4090/results/dense_tp_tiles_final_down_gpu2.json",
+      "experiments/rtx4090/results/dense_fused_exact_tile_profile_gpu2.json",
+      "experiments/rtx4090/results/dense_fused_exact_tile_profile_direct_aligned_full_gpu2_20260810.json",
+      "experiments/rtx4090/results/dense_fused_exact_tile_profile_direct_aligned_gpu2_20260810.json",
+      "experiments/rtx4090/results/moonlight_lane4_dense_crossover_3seed_gpu0_20260810.json",
+      "experiments/rtx4090/results/moonlight_dense_multi_large_m_3seed_gpu2_20260810.json",
+      "experiments/rtx4090/results/moonlight_dense_multi_crossover_3seed_gpu2_20260810.json"
+    ],
+    "moe_policy": "Moonlight TP2 I704 switches at M=256; I1408 switches at M=64. M32 stays on Triton because hotspot routing loses despite a balanced-routing Exact win."
+  }
+}

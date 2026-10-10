@@ -227,10 +227,8 @@ def load_weight(
     include_moe_experts: bool = True,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     # FTW checkpoint: dense weights are stored post-iter_weights, so we replay them
-    # model-agnostically instead of re-running the per-model reader. Which tensors exist is
-    # decided at conversion (offload -> experts live in banks, not here); a backend mismatch
-    # fails loudly in load_state_dict (strict missing/unexpected expert keys), so the reader
-    # just yields the stored weight tensors regardless of the include_moe_experts flag.
+    # model-agnostically instead of re-running the per-model reader. Routed experts may be
+    # replaced independently; every other key still reaches strict model-state validation.
     from freetoken.checkpoint.ftw import is_ftw_checkpoint, iter_ftw_weights
     from freetoken.models.config import VISION_KEY_PREFIXES, vision_load_enabled
 
@@ -240,7 +238,8 @@ def load_weight(
         # model never builds the tower, so replaying those tensors would trip load_state_dict's
         # strict unexpected-key check. Skip them here to match the model the engine built.
         skip_vision = not vision_load_enabled()
-        for name, tensor in iter_ftw_weights(model_path):
+        include = None if include_moe_experts else lambda name: not _resident_expert_weight(name)
+        for name, tensor in iter_ftw_weights(model_path, include_name=include):
             if skip_vision and name.startswith(VISION_KEY_PREFIXES):
                 continue
             yield name, tensor
@@ -254,6 +253,16 @@ def load_weight(
         include_moe_experts=include_moe_experts,
         include_non_moe=True,
     )
+
+
+def _resident_expert_weight(name: str) -> bool:
+    """Tensor fields emitted by the existing resident MoE components."""
+    parent, _, field = name.rpartition(".")
+    return parent.endswith(".experts") and field in {
+        "gate_up_proj", "down_proj", "gate_up_scale_inv", "down_scale_inv",
+        "gate_up_proj_blocks", "gate_up_proj_scales", "gate_up_proj_bias",
+        "down_proj_blocks", "down_proj_scales", "down_proj_bias",
+    }
 
 
 def load_moe_expert_sources(

@@ -346,7 +346,7 @@ def _transient_buffer(nbytes: int) -> mmap.mmap:
 
 
 def iter_ftw_weights(path: str, *, kinds=("weight",), workers: int = 8,
-                       chunk: int = _DEFAULT_CHUNK, prefetch: int = 2):
+                       chunk: int = _DEFAULT_CHUNK, prefetch: int = 2, include_name=None):
     """Yield ``(name, host_tensor)`` for the requested kinds, reading each tensor via
     chunked O_DIRECT. A background thread prefetches the next ``prefetch`` tensors so the
     disk stays busy while the consumer copies the current one to the GPU. Transient buffers
@@ -358,6 +358,8 @@ def iter_ftw_weights(path: str, *, kinds=("weight",), workers: int = 8,
 
     reader = FTWReader(path)
     entries = reader.entries(*kinds)
+    if include_name is not None:
+        entries = [entry for entry in entries if include_name(entry["name"])]
     q: queue.Queue = queue.Queue(maxsize=max(1, prefetch))
     _DONE = object()
     err: list[BaseException] = []
@@ -412,7 +414,8 @@ def iter_ftw_weights(path: str, *, kinds=("weight",), workers: int = 8,
 
 
 def load_ftw_banks(
-    path: str, *, num_layers: int, workers: int = 8, chunk: int = _DEFAULT_CHUNK
+    path: str, *, num_layers: int, workers: int = 8, chunk: int = _DEFAULT_CHUNK,
+    prepare=None, layer_sink=None,
 ):
     """Reconstruct the offload :class:`ExpertBanks` from the FTW's ``experts_bank``
     entries, on the per-layer host bank contract (one pinned ``[num_experts, ...]``
@@ -440,14 +443,18 @@ def load_ftw_banks(
     vectors, unaffected by the row split (fixed GPU residency; see
     ``cache_budget.expert_bytes_per_slot``).
     """
-    from freetoken.moe.host_banks import HostBank, PinPipeline, alloc_banks
+    from freetoken.moe.host_banks import HostBank, LayerCompletionTracker, PinPipeline, alloc_banks
     from freetoken.utils.progress import byte_bar
 
     reader = FTWReader(path)
+    format_state = reader.meta("expert_format_state")
     bank_entries = reader.entries("experts_bank")
     if not bank_entries:
         reader.close()
         return None
+    if prepare is not None:
+        bank_names = {_LAYER_ENTRY_RE.sub(r"\g<base>", e["name"]) for e in bank_entries}
+        format_state = prepare(format_state, bank_names=bank_names)
 
     alpha_entries = [e for e in bank_entries if e["name"] in _ALPHA_NAMES]
     row_entries = [e for e in bank_entries if e["name"] not in _ALPHA_NAMES]
@@ -505,7 +512,7 @@ def load_ftw_banks(
             bank = HostBank((win_end - win_off,), torch.uint8)
             row_hb[name].append(bank)
             row_view_args[name].append((head_pad, layer_bytes, num_experts, tuple(row_shape), dtype))
-            row_jobs.append((name, bank, win_off, win_end - win_off, layer_bytes))
+            row_jobs.append((name, layer_id, bank, win_off, win_end - win_off, layer_bytes))
 
     for base, by_layer in per_layer_groups.items():
         assert sorted(by_layer) == list(range(num_layers)), (
@@ -520,7 +527,7 @@ def load_ftw_banks(
             bank = HostBank(tuple(e["shape"]), _dtype_of(e["dtype"]))
             row_hb[base].append(bank)
             row_view_args[base].append(None)
-            layer_jobs.append((base, bank, e))
+            layer_jobs.append((base, layer_id, bank, e))
 
     total_bytes = sum(e["nbytes"] for e in bank_entries)
     bar = byte_bar(total_bytes, "Loading expert banks (FTW)")
@@ -528,8 +535,24 @@ def load_ftw_banks(
     # Jobs are per (bank, layer) -- many small reads, so a wider pool; each bank pins
     # as its read completes, overlapping cudaHostRegister with the remaining reads.
     n_jobs = len(alpha_entries) + len(row_jobs) + len(layer_jobs)
+    completion = (LayerCompletionTracker(len(row_hb), row_hb, layer_sink)
+                  if layer_sink is not None else None)
     try:
         with PinPipeline() as pins:
+
+            def _finish(name, layer, bank):
+                view_args = row_view_args[name][layer]
+                if view_args is None:
+                    view = bank.tensor
+                else:
+                    head_pad, nbytes, experts, shape, dtype = view_args
+                    view = bank.tensor[head_pad:head_pad + nbytes].view(dtype).view(experts, *shape)
+                bank.tensor = view
+                row_view_args[name][layer] = None
+                if completion is None:
+                    pins.submit(bank)
+                else:
+                    completion.note(layer)
 
             def _read_alpha(e):
                 bank = alpha_hb[e["name"]]
@@ -538,16 +561,16 @@ def load_ftw_banks(
                 bar.update(e["nbytes"])
 
             def _read_row(job):
-                _name, bank, win_off, win_len, layer_bytes = job
+                name, layer, bank, win_off, win_len, layer_bytes = job
                 reader.read_into(bank.memoryview(), {"global_off": win_off, "nbytes": win_len},
                                  workers=workers, chunk=chunk)
-                pins.submit(bank)
+                _finish(name, layer, bank)
                 bar.update(layer_bytes)
 
             def _read_layer(job):
-                _name, bank, entry = job
+                name, layer, bank, entry = job
                 reader.read_into(bank.memoryview(), entry, workers=workers, chunk=chunk)
-                pins.submit(bank)
+                _finish(name, layer, bank)
                 bar.update(entry["nbytes"])
 
             with ThreadPoolExecutor(min(max(_BANK_CONCURRENCY, 16), max(n_jobs, 1))) as ex:
@@ -556,6 +579,13 @@ def load_ftw_banks(
                 futures += [ex.submit(_read_layer, job) for job in layer_jobs]
                 for f in futures:
                     f.result()
+            # Format-wide tensors (the NoWAG codebook): one entry each, not per layer.
+            shared = {}
+            for e in reader.entries("experts_shared"):
+                bank = HostBank(tuple(e["shape"]), _dtype_of(e["dtype"]))
+                reader.read_into(bank.memoryview(), e, workers=workers, chunk=chunk)
+                pins.submit(bank)
+                shared[e["name"]] = bank.tensor
     finally:
         bar.close()
         reader.close()
@@ -577,11 +607,20 @@ def load_ftw_banks(
     # alphas are the small per-expert scale vectors, distinguished by their reserved names
     # (not a separate kind); everything else under experts_bank is a weight source.
     alpha_kw = {n: alpha_hb[n].tensor for n in alpha_hb}
-    return ExpertBanks(reader.meta("quant_format"), sources, **alpha_kw)
+    return ExpertBanks(reader.meta("quant_format"), sources, **alpha_kw, shared=shared,
+                       format_state=format_state, streamed=layer_sink is not None)
+
+
+def ftw_quant_format(path: str) -> str | None:
+    """The expert format an FTW checkpoint stores, or None for any other directory."""
+    if not is_ftw_checkpoint(path):
+        return None
+    with open(os.path.join(path, INDEX_NAME)) as f:
+        return json.load(f).get("quant_format")
 
 
 __all__ = [
     "INDEX_NAME", "FORMAT_TAG", "FORMAT_VERSION", "ALIGN", "DEFAULT_SHARD_LIMIT",
     "is_ftw_checkpoint", "FTWWriter", "FTWReader",
-    "iter_ftw_weights", "load_ftw_banks", "layer_bank_entry_name",
+    "iter_ftw_weights", "load_ftw_banks", "layer_bank_entry_name", "ftw_quant_format",
 ]

@@ -131,7 +131,7 @@ def _make_case(
         num_layers=1,
         num_experts=experts,
         bank_sources=bank_sources,
-        host_codebook=codebook,
+        host_shared={"codebook": codebook},
     )
     return SimpleNamespace(
         cache=cache,
@@ -165,7 +165,7 @@ def _project(case, name, expert, inputs, codebook, device_banks):
 
 
 def _reference(case, hidden, topk_weights, topk_ids, model_type, swiglu_limit=None):
-    codebook = case.cache.host_codebook.to(device=hidden.device)
+    codebook = case.cache.host_shared["codebook"].to(device=hidden.device)
     device_banks = {
         key: layers[0].to(device=hidden.device)
         for key, layers in case.cache.bank_sources.items()
@@ -194,13 +194,31 @@ def _reference(case, hidden, topk_weights, topk_ids, model_type, swiglu_limit=No
             gate = gate.float().clamp(max=swiglu_limit)
             up = up.float().clamp(min=-swiglu_limit, max=swiglu_limit)
 
-        middle = (F.silu(gate.float()) * up.float()).to(torch.bfloat16)
+        route_weights = topk_weights[positions[:, 0], positions[:, 1]].float()[:, None]
+        middle = F.silu(gate.float()) * up.float()
         if model_type == "deepseek_v4":
-            middle = _fp8_roundtrip(middle)
+            # DSV4 scales the down input by the router weight before its rounding.
+            middle = _fp8_roundtrip((middle * route_weights).to(torch.bfloat16))
+            route_weights = 1.0
+        else:
+            middle = middle.to(torch.bfloat16)
         down = _project(case, "down", expert, middle, codebook, device_banks)
-        route_weights = topk_weights[positions[:, 0], positions[:, 1]].float()
-        result.index_add_(0, tokens, down.float() * route_weights[:, None])
+        result.index_add_(0, tokens, down.float() * route_weights)
     return result.to(torch.bfloat16)
+
+
+def _expert_math_kwargs(model_type):
+    # DeepSeek-V4 experts compute on E4M3-rounded inputs and weight the down input;
+    # Qwen keeps BF16 inputs and weights the down output.
+    from freetoken.moe.expert_format import E4M3_GROUP128_UE8M0
+
+    dsv4 = model_type == "deepseek_v4"
+    rounding = E4M3_GROUP128_UE8M0 if dsv4 else None
+    return {
+        "gate_up_input_rounding": rounding,
+        "down_input_rounding": rounding,
+        "router_weight_on_down_input": dsv4,
+    }
 
 
 def _executor(
@@ -210,6 +228,7 @@ def _executor(
     batch_size=8,
     apply_router_weight_on_input=False,
     limit=None,
+    **overrides,
 ):
     from freetoken.moe.cpu_executor import CpuMoeExecutor
 
@@ -221,8 +240,9 @@ def _executor(
         max_tokens=max(8, batch_size),
         device=torch.device("cuda"),
         swiglu_alpha=1.0,
-        nowag_model_type=model_type,
+        **_expert_math_kwargs(model_type),
     )
+    kwargs.update(overrides)
     if limit is not None:
         kwargs["swiglu_limit"] = limit
     return CpuMoeExecutor(case.cache, **kwargs)
@@ -372,9 +392,13 @@ def _assert_synchronous_rejection(action):
     assert str(captured.value).strip()
 
 
-def test_deepseek_v4_requires_swiglu_limit():
+def test_nowag_rejects_unsupported_down_input_rounding():
     case = _make_case(128, 128, top_k=6, variant=0)
-    _assert_synchronous_rejection(lambda: _executor(case, model_type="deepseek_v4"))
+    _assert_synchronous_rejection(
+        lambda: _executor(
+            case, model_type="deepseek_v4", down_input_rounding="not_a_rounding"
+        )
+    )
 
 
 def test_nowag_rejects_router_weight_on_input():
@@ -388,10 +412,12 @@ def test_nowag_rejects_router_weight_on_input():
     )
 
 
-def test_nowag_rejects_unknown_model_rule():
+def test_nowag_rejects_unsupported_gate_up_input_rounding():
     case = _make_case(14, 8, top_k=8, variant=0)
     _assert_synchronous_rejection(
-        lambda: _executor(case, model_type="not_a_nowag_model")
+        lambda: _executor(
+            case, model_type="qwen3_5_moe", gate_up_input_rounding="not_a_rounding"
+        )
     )
 
 
@@ -410,7 +436,7 @@ def _make_hybrid_cache(case, model_type, limit, max_fetch):
         name: [tensor.pin_memory() for tensor in layers]
         for name, layers in case.cache.bank_sources.items()
     }
-    case.cache.host_codebook = case.cache.host_codebook.pin_memory()
+    case.cache.host_shared = {"codebook": case.cache.host_shared["codebook"].pin_memory()}
     executor = _executor(case, model_type=model_type, limit=limit)
     cache = OffloadMoeCache(
         num_layers=1,
@@ -423,7 +449,7 @@ def _make_hybrid_cache(case, model_type, limit, max_fetch):
         hybrid_fetch_fraction=0.0,
     )
     cache.set_bank_sources(case.cache.bank_sources)
-    cache.set_codebook(case.cache.host_codebook)
+    cache.set_shared(case.cache.host_shared)
     cache.set_alphas(None, None)
     cache.set_cpu_executor(executor)
     return cache, executor

@@ -608,7 +608,7 @@ def moe_align_block_size_adaptive(
     and BM16 alignment.  ``num_experts`` is the physical expert-row count; the
     align output retains its extra sentinel expert while both task queues
     exclude it.  The three output buffers must use the fixed capacities
-    supplied by ``nowag_vllm.cuda_ops.adaptive_task_capacities``.
+    supplied by ``freetoken.kernel.nowag.cuda_ops.adaptive_task_capacities``.
     """
     if topk_ids.dtype != torch.int32 or not topk_ids.is_contiguous():
         raise ValueError("topk_ids must be contiguous int32")
@@ -773,7 +773,7 @@ def moe_align_block_size_adaptive_tail64(
     if num_experts <= 0:
         raise ValueError("num_experts must be positive")
 
-    from nowag_vllm.cuda_ops import adaptive_tail64_task_capacities
+    from freetoken.kernel.nowag.cuda_ops import adaptive_tail64_task_capacities
 
     capacity64, capacity16 = adaptive_tail64_task_capacities(
         num_routes=numel,

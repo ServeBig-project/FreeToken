@@ -1,8 +1,7 @@
 """Quant-aware dense-linear factories, shared by the models that serve quantized
 dense projections (qwen3_5_moe, muse_glimmer).
 
-Maps the model's quant config (``expert_quant`` for the dense MLP / shared-expert path,
-``attn_quant`` for attention + GatedDeltaNet projections) to the right ``BaseOP`` linear:
+Maps ``attn_quant`` for attention + GatedDeltaNet projections to the right ``BaseOP`` linear:
 block-FP8, per-tensor-FP8 and NVFP4 implementations live under ``freetoken.kernel.triton``;
 the bf16 fallback is the framework's TP-aware ``freetoken.layers``. Only the *dispatch*
 (config -> layer class) lives here.
@@ -11,10 +10,10 @@ the bf16 fallback is the framework's TP-aware ``freetoken.layers``. Only the *di
 from __future__ import annotations
 
 
-def make_col_merged_quant(expert_quant: str, attn_quant: str, in_f: int,
+def make_col_merged_quant(attn_quant: str, in_f: int,
                           output_sizes: list[int], has_bias: bool = False):
     """Column-merged linear for a dense projection: block-fp8 / per-tensor-fp8 / nvfp4 / bf16."""
-    if expert_quant == "fp8_block":
+    if attn_quant == "fp8_block":
         from freetoken.kernel.triton.fp8_block_linear import Fp8BlockColMerged
 
         return Fp8BlockColMerged(in_f, output_sizes, has_bias)
@@ -31,10 +30,10 @@ def make_col_merged_quant(expert_quant: str, attn_quant: str, in_f: int,
     return LinearColParallelMerged(in_f, output_sizes, has_bias=has_bias)
 
 
-def make_replicated_quant(expert_quant: str, attn_quant: str, in_f: int, out_f: int,
+def make_replicated_quant(attn_quant: str, in_f: int, out_f: int,
                           has_bias: bool = False):
     """Replicated linear for a dense projection: block-fp8 / per-tensor-fp8 / nvfp4 / bf16."""
-    if expert_quant == "fp8_block":
+    if attn_quant == "fp8_block":
         from freetoken.kernel.triton.fp8_block_linear import Fp8BlockLinear
 
         return Fp8BlockLinear(in_f, out_f, has_bias)
@@ -55,7 +54,7 @@ def make_replicated(config, in_f: int, out_f: int, has_bias: bool = False):
     """Config-driven replicated linear: ``Fp8BlockLinear`` under block-fp8, ``Fp8PerTensorLinear``
     under per-tensor-fp8 attention, ``Nvfp4DenseLinear`` under nvfp4, else ``LinearReplicated``."""
     return make_replicated_quant(
-        getattr(config, "expert_quant", "none"), getattr(config, "attn_quant", "none"),
+        config.attn_quant,
         in_f, out_f, has_bias,
     )
 
@@ -65,7 +64,7 @@ def make_col_merged(config, in_f: int, output_sizes: list[int], has_bias: bool =
     ``Fp8PerTensorColMerged`` under per-tensor-fp8 attention, ``Nvfp4DenseColMerged`` under
     nvfp4, else ``LinearColParallelMerged``."""
     return make_col_merged_quant(
-        getattr(config, "expert_quant", "none"), getattr(config, "attn_quant", "none"),
+        config.attn_quant,
         in_f, output_sizes, has_bias,
     )
 

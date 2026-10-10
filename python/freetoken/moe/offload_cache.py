@@ -30,71 +30,10 @@ _SMALL_BANK_FEAT_BYTES = 256 * 1024
 # converts the complete working set back to a finite tie-break epoch.
 _RESIDENT_PINNED_USAGE = (1 << 63) - 1
 
+from freetoken.moe.expert_format import _BANK_SCHEMAS, _OPTIONAL_BANKS
 from freetoken.utils import init_logger
 
 logger = init_logger(__name__)
-
-# quant_format -> bank names, in registration order: the single place a format's bank
-# layout is declared. The cache machinery (copy_missing, the prefill double buffers,
-# bank_views) iterates banks in this order, the layers' kernel dispatch unpacks views
-# in this order, and set_bank_sources validates against it.
-_BANK_SCHEMAS: dict[str, tuple[str, ...]] = {
-    # dense bf16 expert weights
-    "bf16": ("gate_up", "down"),
-    # DeepSeek-V3-style 128x128 block-fp8 experts (Qwen3.5-FP8): fp8-e4m3 weights +
-    # bf16 per-block weight_scale_inv. gate_up [L*E, 2I, H] fp8 + gate_up_scale
-    # [L*E, 2I//128, H//128] bf16; down [L*E, H, I] fp8 + down_scale [L*E, H//128, I//128].
-    # Half the host/cache footprint of bf16; the grouped GEMM (kernel/triton/fp8_blockscale_moe)
-    # reads the routed fp8 rows directly and dequantizes in the K-loop (no bf16 materialization).
-    "fp8_block": ("gate_up", "gate_up_scale", "down", "down_scale"),
-    # native GGUF Q4_0 experts: packed block bytes per output row, dequantized inside
-    # the borrowed ggml MoE kernels. gate_up [L*E, 2I, H//32*18], down [L*E, H, I//32*18].
-    "q4_0": ("gate_up", "down"),
-    # native ModelOpt rows for the Triton inline-dequant kernels: packed e2m1 codes +
-    # fp8-e4m3 per-16 block scales + per-output-row fp16 globals (w1/w3 carry distinct
-    # globals, and folding them into the e4m3 block scales would underflow)
-    "nvfp4": (
-        "gate_up_packed",
-        "gate_up_scale",
-        "gate_up_global",
-        "down_packed",
-        "down_scale",
-        "down_global",
-    ),
-    # pre-tiled layouts for the borrowed kernels; the globals are folded into the
-    # block scales at repack time and collapse to [L*E] GPU-resident alpha vectors
-    # (set_alphas), so they are not banks
-    "nvfp4_marlin": ("gate_up_packed", "gate_up_scale", "down_packed", "down_scale"),
-    "nvfp4_b12x": ("gate_up_packed", "gate_up_scale", "down_packed", "down_scale"),
-    # gpt-oss mxfp4, transposed split-K layout (N innermost): per-expert blocks_t
-    # [K//2, N] (uint8), scales_t [K//32, N] (uint8 e8m0), bias [N]. No folded alphas
-    # (scales are a bank); split-K GEMV decode + transposed _t grouped prefill.
-    "mxfp4_triton": (
-        "gate_up_blocks",
-        "gate_up_scales",
-        "gate_up_bias",
-        "down_blocks",
-        "down_scales",
-        "down_bias",
-    ),
-    # DeepSeek-V4 FP4: packed e2m1 codes + e8m0 per-32 block scales, no global scale
-    # (4 banks). Read by DeepSeek-V4's own DS-FP4 grouped GEMV kernels via bank_views().
-    "ds_fp4": ("gate_up_packed", "gate_up_scale", "down_packed", "down_scale"),
-    # NoWAG: three projections, each with word-major packed assignments [W, N]
-    # and input/output normalizers. The model-wide shared codebook is installed
-    # separately once.
-    "nowag": (
-        "gate_assignments",
-        "gate_input_norm",
-        "gate_output_norm",
-        "up_assignments",
-        "up_input_norm",
-        "up_output_norm",
-        "down_assignments",
-        "down_input_norm",
-        "down_output_norm",
-    ),
-}
 
 # vLLM's marlin grouped-GEMM hands the full [cache_size] slot cache as its expert
 # dimension; moe_align_block_size requires round_up(experts, 32) < 1024, i.e. <= 992.
@@ -430,11 +369,11 @@ class OffloadMoeCache:
         # stable full-slot scale view per resident group position instead.
         self._joint_gate_up_alpha_slots: torch.Tensor | None = None
         self._joint_down_alpha_slots: torch.Tensor | None = None
-        # One model-wide NoWAG codebook; it is not replicated per cache slot.  Keep
-        # both views alive: GPU offload reads ``codebook`` while cpu/hybrid reads the
-        # original host tensor directly from the persistent CPU worker pool.
-        self.codebook: torch.Tensor | None = None
-        self.host_codebook: torch.Tensor | None = None
+        # Format-wide read-only tensors (the NoWAG codebook), never replicated per
+        # slot. Keep both views alive: GPU compute reads ``shared`` while cpu/hybrid
+        # reads the host tensors directly from the persistent CPU worker pool.
+        self.shared: dict[str, torch.Tensor] = {}
+        self.host_shared: dict[str, torch.Tensor] = {}
         # Opt-in decode miss-rate instrumentation. Accumulated on-device (no per-step host
         # sync); read via ``decode_miss_stats``. Graph-safe: the ``+=`` is captured into the
         # decode graph and re-executes with each replay's REAL routing (record_decode_stats
@@ -684,6 +623,10 @@ class OffloadMoeCache:
         """
         from freetoken.moe.host_banks import HostResidency
 
+        optional = _OPTIONAL_BANKS.get(self.quant_format, ())
+        self.bank_schema = _BANK_SCHEMAS[self.quant_format] + tuple(
+            name for name in optional if name in sources
+        )
         assert set(sources) == set(self.bank_schema), (
             f"banks {sorted(sources)} do not match the {self.quant_format!r} "
             f"schema {self.bank_schema}"
@@ -944,16 +887,10 @@ class OffloadMoeCache:
             shape, dtype=self.down_alpha.dtype, device=self.device
         )
 
-    def set_codebook(self, codebook: torch.Tensor | None) -> None:
-        """Install the model-wide NoWAG codebook on the host and cache device."""
-        if codebook is None:
-            return
-        if codebook.ndim != 2:
-            raise ValueError(
-                f"NoWAG codebook must be [entries, group_size], got {tuple(codebook.shape)}"
-            )
-        self.host_codebook = codebook.contiguous()
-        self.codebook = self.host_codebook.to(self.device).contiguous()
+    def set_shared(self, shared: dict[str, torch.Tensor]) -> None:
+        """Install the format's shared tensors once on the host and cache device."""
+        self.host_shared = {name: t.contiguous() for name, t in shared.items()}
+        self.shared = {name: t.to(self.device) for name, t in self.host_shared.items()}
 
     def set_cpu_executor(self, executor) -> None:
         """Attach the CPU MoE executor (``decode_target`` in {"cpu", "hybrid"}).
@@ -2322,7 +2259,7 @@ class OffloadMoeCache:
 
 
 def iter_offload_moe_layers(model) -> Iterator:
-    from freetoken.layers import BaseOP, OffloadMoELayer
+    from freetoken.layers import OffloadMoELayer
 
     # A model whose MoE blocks are bespoke nn.Modules (not OffloadMoELayer) declares its
     # offload layers explicitly via this hook (e.g. DeepSeek-V4-Flash); attach_offload_moe_cache
@@ -2331,8 +2268,14 @@ def iter_offload_moe_layers(model) -> Iterator:
     if hook is not None:
         yield from hook()
         return
+    yield from iter_moe_layers(model, OffloadMoELayer)
 
-    if isinstance(model, OffloadMoELayer):
+
+def iter_moe_layers(model, layer_cls) -> Iterator:
+    """Every ``layer_cls`` instance under ``model``, in model order."""
+    from freetoken.layers import BaseOP
+
+    if isinstance(model, layer_cls):
         yield model
 
     if not isinstance(model, BaseOP):
@@ -2340,10 +2283,10 @@ def iter_offload_moe_layers(model) -> Iterator:
 
     for value in model.__dict__.values():
         if isinstance(value, BaseOP):
-            yield from iter_offload_moe_layers(value)
+            yield from iter_moe_layers(value, layer_cls)
         elif isinstance(value, (list, tuple)):
             for item in value:
-                yield from iter_offload_moe_layers(item)
+                yield from iter_moe_layers(item, layer_cls)
 
 
 def attach_offload_moe_cache(model, cache: OffloadMoeCache) -> list:
