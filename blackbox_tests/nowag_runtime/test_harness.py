@@ -55,3 +55,19 @@ def test_greedy_requests_pin_top_p_and_leave_sampling_alone():
     assert sampled["temperature"] == 0.8 and "top_p" not in sampled
     streamed = H.completion_body("p", 4, {"stream": True, "cache_group": "g"})
     assert streamed["top_p"] == 1 and streamed["stream"] and streamed["cache_group"] == "g"
+
+
+def test_wait_gpu_idle_polls_until_the_approved_gpu_is_free(monkeypatch):
+    apps = iter([["GPU-b", "GPU-a", ""], ["GPU-b", ""], ["GPU-b", ""]])
+
+    def fake(*query):
+        if query[0] == "--query-gpu=index,uuid":
+            return ["0, GPU-a", "1, GPU-b", ""]
+        return next(apps)
+    monkeypatch.setattr(H, "smi", fake)
+    monkeypatch.setattr(H.time, "sleep", lambda s: None)
+    H.wait_gpu_idle("0")                       # index 0 -> GPU-a, free after one poll
+    assert next(apps) == ["GPU-b", ""]         # stopped polling once GPU-a was gone
+    monkeypatch.setattr(H, "smi", lambda *q: ["0, GPU-a", ""] if "index" in q[0] else ["GPU-a", ""])
+    with pytest.raises(RuntimeError):
+        H.wait_gpu_idle("GPU-a", timeout=-1)

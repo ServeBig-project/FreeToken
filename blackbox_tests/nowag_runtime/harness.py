@@ -45,11 +45,33 @@ class StartupFailed(RuntimeError):
         self.code, self.log = code, log
 
 
+def smi(*query):
+    return subprocess.run(["nvidia-smi", *query, "--format=csv,noheader"], capture_output=True,
+                          text=True, check=True).stdout.split("\n")
+
+
+def gpu_uuids(gpu):
+    """--gpu takes UUIDs or nvidia-smi indices, comma-separated."""
+    index = dict(line.replace(" ", "").split(",") for line in smi("--query-gpu=index,uuid") if line)
+    return {index.get(g.strip(), g.strip()) for g in str(gpu).split(",")}
+
+
+def wait_gpu_idle(gpu, timeout=180):
+    """A server that just exited can hold its memory for seconds; the next one would then OOM."""
+    uuids = gpu_uuids(gpu)
+    deadline = time.monotonic() + timeout
+    while uuids & {line.strip() for line in smi("--query-compute-apps=gpu_uuid")}:
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"GPU {gpu} still has compute processes after {timeout}s")
+        time.sleep(1)
+
+
 class Server:
     def __init__(self, label, args, gpu, timeout=1800, source=None, port=PORT):
         with socket.socket() as probe:
             if probe.connect_ex(("127.0.0.1", port)) == 0:
                 raise RuntimeError(f"port {port} busy; one server at a time")
+        wait_gpu_idle(gpu)
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         self.label, self.url = label, f"http://127.0.0.1:{port}"
         self.log_path = LOG_DIR / f"{label}.log"
