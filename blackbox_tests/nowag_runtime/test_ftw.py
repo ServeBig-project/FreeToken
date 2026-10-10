@@ -197,18 +197,17 @@ def test_ftw_missing_data_rejected(tmp_path):
 
 
 @pytest.mark.parametrize("which", ["tiny-qwen3-d4", "tiny-qwen3-d6"])
-def test_ftw_tp2_matches_tp1(which):
+def test_ftw_tp2_rejected_tp1_serves(which):
+    """Contract §69/§133: FTW checkpoints serve with TP1 only; TP>1 is refused before ready.
+    The same FTW still serves under TP1 (control)."""
     gpus = need_tp2()
     gpu = need_gpu()
     dest = converted(which)["dest"]
     with Server(f"ftw_tp1_{which}", serve_args(dest, which), gpu) as s:
-        tp1 = run_prompts(s)
-    with Server(f"ftw_tp2_{which}", serve_args(dest, which, None, "--tensor-parallel-size", "2"),
-                gpus) as s:
-        tp2, ranks = run_prompts(s), experts(s.status())["ranks"]
-    assert sorted(r["rank"] for r in ranks) == [0, 1]
-    assert len({str(r["device"]) for r in ranks}) == 2
-    cross_path(tp1, tp2, f"{which} FTW TP1 vs TP2", task=which in ("qwen36", "dsv4"))
+        assert all(o.strip() for o in run_prompts(s))
+    log = expect_rejected(f"ftw_tp2_{which}",
+                          serve_args(dest, which, None, "--tensor-parallel-size", "2"), gpus)
+    assert "tensor parallel size 1" in log
 
 
 def base_copy_without(base, work, drop):
