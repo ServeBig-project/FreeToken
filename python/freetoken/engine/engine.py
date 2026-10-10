@@ -320,6 +320,7 @@ class Engine:
     dflash_layout = None  # the drafter's storage layout, set when a DFlash path is given
     runtime = None  # shared runtime blocks (--runtime-cache-gib)
     runtime_limits = None  # the context and concurrency limits derived from it
+    _runtime_initial_cache_size = None  # with --moe-cache-auto: the expert cache planned around R
     page_units = None  # the runtime chunks each KV page id maps, target and drafter
 
     def __init__(self, config: EngineConfig):
@@ -434,9 +435,13 @@ class Engine:
         available_memory -= transfer_device_bytes(config)
         if config.runtime_cache_gib is not None:
             # This rank's own room: ranks agree only that every one of them holds its R.
-            self._init_runtime(config, _startup_kv_budget(
-                config.memory_ratio, local_init_free, self._local_free)
-                - transfer_device_bytes(config))
+            available = _startup_kv_budget(
+                config.memory_ratio, local_init_free, self._local_free) - transfer_device_bytes(config)
+            if self._runtime_initial_cache_size is not None:
+                # The auto-sized expert cache left R in its plan; a fresh reading would count the
+                # allocator slack since the weights against R (the KV-pages plan is honored too).
+                available = max(available, int(config.runtime_cache_gib * (1 << 30)))
+            self._init_runtime(config, available)
             self._alloc_expert_workspace(config)  # part of the runtime's execution room
         else:
             available_memory -= state_pool_bytes(config)
