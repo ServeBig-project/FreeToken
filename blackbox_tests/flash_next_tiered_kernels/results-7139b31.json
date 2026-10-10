@@ -1,0 +1,50 @@
+{
+  "reference_atol": 0.015625,
+  "reference_rtol": 0.015625,
+  "results": [
+    {
+      "name": "eager/torch.bfloat16/single/heads=2/host/layer=0",
+      "status": "passed"
+    },
+    {
+      "name": "eager/torch.bfloat16/boundary/heads=4/mixed/layer=1",
+      "status": "passed"
+    },
+    {
+      "name": "eager/torch.bfloat16/groups/heads=8/mixed/layer=2",
+      "status": "passed"
+    },
+    {
+      "name": "eager/torch.int8/groups/heads=8/mixed/layer=2",
+      "status": "passed"
+    },
+    {
+      "name": "eager/torch.int8/single/heads=2/host/layer=0",
+      "status": "passed"
+    },
+    {
+      "name": "eager/torch.int8/boundary/heads=4/gpu/layer=1",
+      "status": "passed"
+    },
+    {
+      "name": "eager/torch.bfloat16/groups/heads=4/host/layer=0",
+      "status": "passed"
+    },
+    {
+      "name": "eager/torch.bfloat16/maximum/heads=4/mixed/layer=1",
+      "status": "passed"
+    },
+    {
+      "name": "eager/torch.int8/maximum/heads=4/mixed/layer=1",
+      "status": "passed"
+    },
+    {
+      "name": "graph/torch.bfloat16/address-residency-selection-replay",
+      "status": "passed"
+    },
+    {
+      "name": "graph/torch.int8/address-residency-selection-replay",
+      "status": "passed"
+    }
+  ]
+}

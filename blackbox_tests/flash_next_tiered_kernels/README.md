@@ -7,7 +7,7 @@ source, existing internal tests, implementation diffs, or implementation notes.
 Run from any directory, choosing the Python environment used by the candidate:
 
 ```bash
-PYTHONPATH=/absolute/path/to/candidate \
+PYTHONPATH=/absolute/path/to/candidate/python \
 python /absolute/path/to/test-worktree/blackbox_tests/flash_next_tiered_kernels/run.py \
   --report /absolute/path/to/results.json
 ```
@@ -15,6 +15,10 @@ python /absolute/path/to/test-worktree/blackbox_tests/flash_next_tiered_kernels/
 `--suite eager` and `--suite graph` select a subset. The process prints one JSON
 record per case and exits nonzero on failure. It records exception type and
 message, without a traceback or production source inspection.
+
+Candidate `7139b31` passed all 11 cases on physical GPU 2 in
+`ft-flash-next-i3a-gpu2`, using the unchanged tolerances below.
+See [the numerical acceptance report](results-7139b31.json).
 
 ## Fixed acceptance rules
 
