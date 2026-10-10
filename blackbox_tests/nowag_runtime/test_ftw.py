@@ -20,8 +20,8 @@ import access as A  # noqa: E402
 import sidecar as S  # noqa: E402
 from cases import (QWEN36_BASE, QWEN36_SIDE, DSV4_BASE, DSV4_SIDE, GPTOSS_BASE,  # noqa: E402
                    need_gpu, need_path, need_scratch, need_tp2)
-from harness import (LOG_DIR, Server, expect_rejected, experts, ft, run_prompts, same_execution,  # noqa: E402
-                     cross_path)
+from harness import (LOG_DIR, PROMPTS, Server, expect_rejected, experts, ft, run_prompts,  # noqa: E402
+                     same_execution, cross_path)
 
 CACHE = {"qwen36": os.environ.get("NOWAG_QWEN36_CACHE", "1536"),
          "dsv4": os.environ.get("NOWAG_DSV4_CACHE", "640"),
@@ -247,3 +247,37 @@ def test_gptoss_ftw_missing_one_bias_group_rejected(tmp_path, group):
         index["counts"]["experts_bank"] -= len(names)
     copy = ftw_with_index(converted("gptoss")["dest"], tmp_path / "ftw", drop)
     expect_rejected(f"ftw_gptoss_no_{group}_bias", serve_args(copy, "gptoss"), gpu)
+
+
+def second_side(which):
+    """A different valid SIDE for the same BASE: random D4 (the FTW was made from a D6 SIDE)."""
+    if which == "qwen36":
+        return A.sidecar_dir("qwen36-d4-random")
+    base = need_path(GPTOSS_BASE, "GPT-OSS base")
+    return S.synth_dir(S.gptoss_geometry(base), need_scratch() / "synth-gptoss-d4-random-row_major",
+                       4, "random")
+
+
+@pytest.mark.parametrize("which", ["qwen36", "gptoss"])
+def test_explicit_side_overrides_ftw_experts(which):
+    """Contract §1: with a FTW as BASE, an explicit SIDE supplies the routed-expert projections
+    (BASE keeps non-expert weights and, for GPT-OSS, the expert biases); without SIDE the FTW
+    loads its own experts. (a) native BASE + SIDE_A, (b) FTW + SIDE_B == native BASE + SIDE_B
+    and != FTW alone, (c) FTW alone == native BASE + SIDE_A, (d) the same for GPT-OSS."""
+    gpu = need_gpu()
+    info = converted(which)
+    side_b = second_side(which)
+    runs = {}
+    for label, model, side in (("native_a", info["base"], info["side"]),
+                               ("ftw_self", info["dest"], None),
+                               ("native_b", info["base"], side_b),
+                               ("ftw_b", info["dest"], side_b)):
+        with Server(f"override_{which}_{label}", serve_args(model, which, side), gpu) as s:
+            runs[label] = (run_prompts(s), experts(s.status()))
+    task = which == "qwen36"                  # only the calibrated SIDE_A gives real text
+    cross_path(runs["native_a"][0], runs["ftw_self"][0], f"{which} (c) FTW alone", task=task)
+    cross_path(runs["native_b"][0], runs["ftw_b"][0], f"{which} (b) FTW + SIDE_B", task=False)
+    assert runs["ftw_self"][1]["format_parameters"]["d"] == S.manifest(info["side"])["d"]
+    assert runs["ftw_b"][1]["format_parameters"]["d"] == S.manifest(side_b)["d"]
+    differ = sum(x != y for x, y in zip(runs["ftw_b"][0], runs["ftw_self"][0]))
+    assert differ * 2 >= len(PROMPTS), f"{which}: FTW + SIDE_B still gives the FTW's own output"
