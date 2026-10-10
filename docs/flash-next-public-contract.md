@@ -110,6 +110,8 @@ I3不能只在64对齐位置暂停。I4不能只跑预知长度的固定C1/C4/C1
 
 `/v1/cache/status` 的 `prefix_cache.runtime.kv_host_read_bytes` 累计服务启动以来读取的选中主机K/V及scale逻辑字节，不含PCIe协议开销。统计异步更新，允许落后一次采样。同一 `runtime` 对象内的 `kv_host_payload_pages`／`kv_gpu_payload_pages` 是保留的逻辑页数，可能含冷缓存，不能仅凭它们证明活跃attention读取了主机历史。
 
+同一 `runtime` 对象的 `host_active_kv_bytes`、`host_paused_bytes`、`host_cold_bytes` 按归属拆分主机数据，每个字节只计一次：请求仍持有的页的K/V与scale主机副本；暂停请求持有且不属于前者的副本；其余为冷数据，即前缀副本、无人持有的页和在途复制，取 `host_used_bytes` 减去前两者。暂停请求在保存复制完成、释放显存页之前，其字节仍计入活跃。
+
 复制仍在途时允许资源继续受保护；完成后必须能回收。仅槽号释放而实际容量永远不能重新使用不算通过。通过持续负载验证进度；没有新请求到达时也必须完成已有恢复和取消。
 
 公开错误至少覆盖：缺失词表分片／scale、词表无法驻留、非法共享预算或冲突旧配额、显式选择未支持的attention／SD／TP或请求类型、超过公布单请求可执行范围。沿现有错误通道给出可理解原因，不增加专用测试端点。

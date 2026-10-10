@@ -116,25 +116,19 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         valid &= (physical_page >= 0) & (physical_page < num_cache_blocks)
         # physical_page * block stride can overflow int32 for large caches.
         safe_page = tl.maximum(physical_page, 0).to(tl.int64)
-        key_ptrs = (k_cache_ptr
-            + safe_page[None, :] * stride_k_block
-            + page_offset[None, :] * stride_k_token
-            + kv_head * stride_k_head
-            + dim_offsets[:, None])
-        value_ptrs = (v_cache_ptr
-            + safe_page[:, None] * stride_v_block
-            + page_offset[:, None] * stride_v_token
-            + kv_head * stride_v_head
-            + dim_offsets[None, :])
+        key_rows = (k_cache_ptr + safe_page * stride_k_block + page_offset * stride_k_token
+                    + kv_head * stride_k_head)
+        value_rows = (v_cache_ptr + safe_page * stride_v_block + page_offset * stride_v_token
+                      + kv_head * stride_v_head)
         if TIERED:
+            # Choose each token's row start, not every element: a full-tile pointer select
+            # doubles the tile's registers and, for 2-byte K/V, overflows shared memory.
             resident = tl.load(resident_ptr + safe_page * resident_stride, valid, other=1) != 0
             scratch = ((row * TOPK + columns) * KV_HEADS + kv_head) * HEAD_DIM
-            key_ptrs = tl.where(resident[None, :], key_ptrs,
-                                gathered_k + scratch[None, :] + dim_offsets[:, None])
-            value_ptrs = tl.where(resident[:, None], value_ptrs,
-                                  gathered_v + scratch[:, None] + dim_offsets[None, :])
-        keys = tl.load(key_ptrs, valid[None, :], other=0.0)
-        values = tl.load(value_ptrs, valid[:, None], other=0.0)
+            key_rows = tl.where(resident, key_rows, gathered_k + scratch)
+            value_rows = tl.where(resident, value_rows, gathered_v + scratch)
+        keys = tl.load(key_rows[None, :] + dim_offsets[:, None], valid[None, :], other=0.0)
+        values = tl.load(value_rows[:, None] + dim_offsets[None, :], valid[:, None], other=0.0)
         if INT8:
             # q * s per token and KV head, decoded to the query dtype before the dot
             ks_ptrs = k_scale_ptr + safe_page * stride_ks_block + page_offset * stride_ks_token + kv_head

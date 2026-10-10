@@ -14,7 +14,7 @@ from freetoken.kvcache.radix_cache import CacheHandle, RadixCache
 from freetoken.kvcache.runtime_pool import Claim, upload
 
 from .host_tier import HostTier, build_components, wait_ms
-from freetoken.kvcache.prefix_store import units_of
+from freetoken.kvcache.prefix_store import HostSeries, HostSpan, units_of
 from freetoken.utils import align_down, div_ceil
 
 if TYPE_CHECKING:
@@ -285,6 +285,7 @@ class CacheManager:
         self._prefill_execution: _PrefillExecutionSession | None = None
         self.speculative_slots: list[int] | None = None  # shared runtime: claimed for one round
         # Shared runtime: requests paused under memory pressure, kept on the host or recomputed.
+        self._paused_states: dict[int, PausedState] = {}  # host copies held by paused requests
         self.paused_stats = dict(paused=0, recompute=0, restored=0, recomputed_tokens=0,
                                  paused_ms=0.0, short_decode=0, short_prefill=0, compactions=0,
                                  claim_ms=0.0)
@@ -437,6 +438,8 @@ class CacheManager:
                                   evictable_bytes=self._evictable_bytes())
             if self.residency is not None:
                 out["runtime"].update(self.residency.status())
+            if self.host is not None:
+                out["runtime"].update(self._host_split())
         if self.swa_paged:
             # Physical slots: free, held by the tree (locked by request handles or window
             # copies, else evictable), and the rest owned by running requests. Copies in
@@ -1009,6 +1012,7 @@ class CacheManager:
         state = PausedState(window=window)
         state.copies = self.host.save(units, len(window), lambda: setattr(state, "saved", True))
         if self._agree(state.copies is not None):
+            self._paused_states[id(state)] = state
             return state
         if state.copies is not None:  # another TP rank keeps no copy: all recompute
             self.discard_paused(state)
@@ -1061,6 +1065,7 @@ class CacheManager:
         units, _ = self._paused_units(req)
 
         def loaded():
+            self._paused_states.pop(id(state), None)
             for copy in state.copies:
                 copy.release()
             state.loaded = True
@@ -1068,8 +1073,32 @@ class CacheManager:
         return True
 
     def discard_paused(self, state: PausedState) -> None:
+        self._paused_states.pop(id(state), None)
         for copy in state.copies:
             copy.release()
+
+    def _host_split(self) -> dict:
+        """Host data bytes by owner, each byte once: K/V of pages requests still hold, then
+        paused requests' copies; the rest is cold (prefix copies, unheld pages, copies in
+        flight)."""
+        active, held = 0, set()
+        if self.residency is not None:
+            ps = self.page_size
+            cold = {int(p) for kv in (self.tree.unlocked_kv() if self.tree is not None else ())
+                    for p in kv[::ps] // ps}
+            for page, span in self.residency.backups.items():
+                if page not in cold:
+                    active += self.residency.page_bytes
+                    held.add((id(span.copy), span.start))
+        paused = 0
+        for state in self._paused_states.values():
+            for copy in state.copies:
+                parts = copy.parts if isinstance(copy, HostSeries) else [HostSpan(copy, 0, copy.units)]
+                for part in parts:
+                    free = sum((id(part.copy), part.start + i) not in held for i in range(part.count))
+                    paused += free * sum(part.copy.rows)
+        cold = max(self.host.store.used - active - paused, 0)
+        return dict(host_active_kv_bytes=active, host_paused_bytes=paused, host_cold_bytes=cold)
 
     def _paused_units(self, req: Req):
         """(component, unit indices) of a request's state through ``cached_len``, and the
