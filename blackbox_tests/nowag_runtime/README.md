@@ -116,6 +116,11 @@ export NOWAG_LOG_DIR=/data2/servebig-envs/nowag_runtime_acceptance_20261009
    $P -m pytest -rs "$T/test_tp_numeric.py" "$T/test_service.py" "$T/test_ftw.py" "$T/test_cache_status.py" "$T/test_public_errors.py" -k tp2
    ```
 
+   `test_tp2_native` uses NoWAG sidecars fitted to the tiny BASE's BF16 experts plus a
+   rank-1-shuffled control (`tiny_model.fitted_side`, ~6-10 min of single-thread CPU each on
+   first use, cached under `NOWAG_SCRATCH`), and the rule frozen in `harness.tp2_rule`. Its
+   CPU basis is `test_tp_fixture.py` (reference only, ~8 min).
+
 No broad suite run should hide skips: missing GPT-OSS currently affects 12 GPU rows;
 source-isolated FTW has its own container row. DSV4/Qwen/DFlash inputs are available.
 

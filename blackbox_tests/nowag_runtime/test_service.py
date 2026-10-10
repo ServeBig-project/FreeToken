@@ -17,7 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 from cases import (QWEN36_BASE, QWEN36_BF16, QWEN36_SIDE, DSV4_BASE, DSV4_SIDE,  # noqa: E402
                    DFLASH_DRAFT, need_gpu, need_path, need_tp2)
-from harness import (assert_agreement, BASELINE_SOURCE, LOG_DIR, PROMPTS, Server, StartupFailed, cross_path,  # noqa: E402
+from harness import (tp2_rule, BASELINE_SOURCE, LOG_DIR, PROMPTS, Server, StartupFailed, cross_path,  # noqa: E402
                      experts, get, loops, run_prompts, same_execution, task_ok, text)
 from test_cache_status import sizes  # noqa: E402
 
@@ -214,36 +214,39 @@ def check_sd_observed(server, before, graph=None):
     (LOG_DIR / f"{server.label}-stats.json").write_text(json.dumps(stats, indent=2))
 
 
-# 48 prompts in the tiny model's word vocabulary (word4..word255), 12 greedy tokens each.
-TINY_PROMPTS = [" ".join(f"word{4 + (17 * i + 29 * j) % 252}" for j in range(6)) for i in range(48)]
 _TINY = {}
 
 
-def tiny_run(d, backend, tp):
-    """Greedy outputs and expert ranks of one tiny Qwen3MoE server (cached per config)."""
+def tiny_run(kind, d, backend, tp):
+    """Greedy outputs and expert ranks of one tiny Qwen3MoE server (cached per config).
+    kind None = BASE's own BF16 experts; "fit"/"shuffled" = tiny_model.fitted_side."""
     import tiny_model as tiny
-    key = (d, backend, tp)
+    key = (kind, d if kind else None, backend, tp)
     if key not in _TINY:
         gpus = need_tp2() if tp == 2 else need_gpu()
-        base, side = tiny.paths(d)
-        with Server(f"svc_tiny_tp{tp}_{backend}_d{d}",
+        base, _ = tiny.paths(d)
+        side = tiny.fitted_side(d, kind) if kind else None
+        with Server(f"svc_tiny_{kind or 'bf16'}_tp{tp}_{backend}_d{d}",
                     tiny.serve_args(base, side, tp=tp, backend=backend), gpus) as s:
-            _TINY[key] = (s.greedy(TINY_PROMPTS, 12), experts(s.status())["ranks"])
+            _TINY[key] = (s.greedy(tiny.PROMPTS, tiny.GREEDY_TOKENS),
+                          experts(s.status())["ranks"])
     return _TINY[key]
 
 
 @pytest.mark.parametrize("d", [4, 6])
 @pytest.mark.parametrize("backend", ["offload", "cpu", "hybrid"])
 def test_tp2_native(d, backend):
-    """TP2 vs TP1 on the same backend; numerics are owned by the component TP2 tests, this row
-    catches a grossly wrong shard (harness assert_agreement)."""
+    """NoWAG TP2 vs TP1 on the same backend, against BF16 TP2 vs TP1 and a wrong-shard control
+    (harness tp2_rule, frozen before the GPU run)."""
     need_tp2()
-    reference = tiny_run(d, backend, 1)[0]
-    out, ranks = tiny_run(d, backend, 2)
+    bf16 = [tiny_run(None, d, backend, tp)[0] for tp in (1, 2)]
+    nowag_tp1 = tiny_run("fit", d, backend, 1)[0]
+    nowag_tp2, ranks = tiny_run("fit", d, backend, 2)
+    shuffled = tiny_run("shuffled", d, backend, 1)[0]
     assert sorted(r["rank"] for r in ranks) == [0, 1]
     assert len({str(r["device"]) for r in ranks}) == 2
-    got = assert_agreement(reference, out, f"tiny Qwen3MoE D{d} {backend} TP1 vs TP2")
-    (LOG_DIR / f"tiny-tp2-d{d}-{backend}.json").write_text(json.dumps({"agreement_tp2": got}))
+    got = tp2_rule(*bf16, nowag_tp1, nowag_tp2, shuffled, f"tiny Qwen3MoE D{d} {backend}")
+    (LOG_DIR / f"tiny-tp2-d{d}-{backend}.json").write_text(json.dumps(got))
 
 
 @pytest.mark.parametrize("backend", ["offload", "cpu", "hybrid", "fused"])

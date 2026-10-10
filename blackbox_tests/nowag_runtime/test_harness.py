@@ -66,11 +66,15 @@ def test_stop_group_waits_for_children_that_outlive_the_leader():
     assert not H.group_alive(proc.pid)
 
 
-def test_agreement_floor_rule():
+def test_tp2_rule():
     ref = [f"w{i} a b c d e f g h" for i in range(48)]
-    H.assert_agreement(ref, [("y " + r) if i < 31 else r for i, r in enumerate(ref)])  # 17/48
-    with pytest.raises(AssertionError):                                           # 16/48
-        H.assert_agreement(ref, [("y " + r) if i < 32 else r for i, r in enumerate(ref)])
+    split = lambda n: [("y " + r) if i < n else r for i, r in enumerate(ref)]
+    got = H.tp2_rule(ref, split(1), ref, split(12), split(40))        # 0.98, 0.75, 0.17
+    assert got["nowag"] == 0.75
+    with pytest.raises(AssertionError):                               # NoWAG 0.71 < 0.73
+        H.tp2_rule(ref, split(1), ref, split(14), split(40))
+    with pytest.raises(AssertionError):                               # control 0.75 not caught
+        H.tp2_rule(ref, split(1), ref, split(1), split(12))
     with pytest.raises(AssertionError):
-        H.assert_agreement(ref, [""] + ref[1:])
+        H.tp2_rule(ref, ref, ref, [""] + ref[1:], split(40))
     assert H.agreement(["w0 w1"], ["w0 w1"]) == 1 and H.agreement(["w0 w1"], ["w0 w1 w2"]) == 0

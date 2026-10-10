@@ -256,19 +256,21 @@ def experts(status):
 #   neither loops; at least half the prompts must be identical.
 # * Task check: the expected answer appears in the greedy continuation; a run passes when at
 #   least 3 of the 4 prompts do. Loop check: no word 4-gram repeats more than 3 times.
-# Amendment 2026-10-10 (coordinator request, revised twice after TP2 results; see the
-#   acceptance record): the random tiny-model sidecars give expert outputs ~32x the BF16
-#   experts', so greedy text splits at near-ties from a single extra bf16 rounding. TP2
-#   numerics are owned by the component tests (rank sums match TP1 to 0.0034 relative, the
-#   same as BF16 experts split the same way). The service row only catches a grossly wrong
-#   shard: over 48 prompts, the share whose first AGREE_WORDS generated words agree with TP1
-#   must be >= AGREE_FLOOR. Basis: legal runs measured 0.62-0.83 on 24 prompts; a wrong shard
-#   (lost rank contribution, doubled down bias, regrouped boundary lanes) perturbs the hidden
-#   state ~10x more than that rounding (percents vs 0.34%), i.e. a per-word split chance of
-#   roughly 0.3 instead of 0.03, so ~0.7**8 = 0.06 of prompts would agree. With 48 prompts
-#   the binomial SD is ~0.07 at 0.62 and ~0.035 at 0.06, so 0.35 sits ~4 SD above the
-#   wrong-shard level and ~4 SD below the lowest legal share. No numeric tolerance changes.
-AGREE_WORDS, AGREE_FLOOR = 8, 0.35
+# Tiny-model TP2 rule, frozen 2026-10-10 before its GPU run (replaces three earlier service
+#   rules that were revised after seeing results; see the acceptance record).
+#   Inputs: the tiny Qwen3MoE BASE with its own BF16 experts (control), a NoWAG sidecar fitted
+#   to those experts (tiny_model.fitted_side "fit": cos 0.987 D4 / 0.954 D6, norm ratio
+#   0.95-0.98) and a wrong-shard stand-in ("shuffled": rank 1's half of the gate/up rows has
+#   its assignments permuted). 48 prompts, 12 greedy tokens, first AGREE_WORDS words compared.
+#   Rule (tp2_rule): with a_bf16 = agreement(BF16 TP1, BF16 TP2), the NoWAG TP2 vs TP1
+#   agreement must reach a_bf16 - TP2_MARGIN, and the shuffled control (TP1) must fall below
+#   that same threshold, otherwise the row cannot tell a wrong shard and fails.
+#   Basis (test_tp_fixture.py, reference only): emulating TP2's one extra bf16 rounding of the
+#   cross-rank sum on CPU gives agreement 0.979 for BF16 experts, 0.938 (D4) / 0.979 (D6) for
+#   the fitted NoWAG experts, and 0.229 (D4) / 0.333 (D6) for the shuffled control. The
+#   margin 0.25 puts the threshold ~0.73; the binomial SD over 48 prompts is ~0.035 near 0.94
+#   and ~0.07 near 0.3, so legal runs sit >5 SD above and the control >5 SD below.
+AGREE_WORDS, TP2_MARGIN = 8, 0.25
 
 
 def agreement(a, b, words=AGREE_WORDS):
@@ -280,12 +282,15 @@ def agreement(a, b, words=AGREE_WORDS):
     return sum(agree(x, y) for x, y in zip(a, b)) / len(a)
 
 
-def assert_agreement(reference, candidate, label=""):
-    """Non-empty outputs whose agreement with the reference reaches AGREE_FLOOR."""
-    for outputs in (reference, candidate):
+def tp2_rule(bf16_tp1, bf16_tp2, nowag_tp1, nowag_tp2, shuffled_tp1, label=""):
+    """Frozen tiny-model TP2 rule (see above). Returns the three agreements."""
+    for outputs in (bf16_tp1, bf16_tp2, nowag_tp1, nowag_tp2, shuffled_tp1):
         assert all(o.strip() for o in outputs), f"{label}: empty output {outputs}"
-    got = agreement(reference, candidate)
-    assert got >= AGREE_FLOOR, f"{label}: agreement {got:.2f} < {AGREE_FLOOR}"
+    got = {"bf16": agreement(bf16_tp1, bf16_tp2), "nowag": agreement(nowag_tp1, nowag_tp2),
+           "shuffled": agreement(nowag_tp1, shuffled_tp1)}
+    threshold = got["bf16"] - TP2_MARGIN
+    assert got["shuffled"] < threshold, f"{label}: wrong-shard control not caught {got}"
+    assert got["nowag"] >= threshold, f"{label}: NoWAG TP2 agreement below threshold {got}"
     return got
 
 
