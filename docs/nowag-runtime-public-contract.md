@@ -1,6 +1,6 @@
 # NoWAG 在线接入：独立公开验收契约
 
-状态：设计契约，尚无本轮实现或通过结果。2026-10-09。
+状态：验收契约；实现已进入独立验收，未宣称完整矩阵通过。2026-10-09。
 
 本文可独立交给黑盒测试作者。只提供本文、公开模型数学／权重格式、CLI/API、固定输入产物和获准的运行资源；不得提供生产源码、实现设计、diff、内部测试或实现笔记。测试作者不修改生产代码；实现者不读取黑盒源码。
 
@@ -156,7 +156,7 @@ Graph与SD的实际执行继续由既有配置、Graph／speculative统计和独
 - **层覆盖**：sidecar 必须恰好覆盖基座的全部 MoE 解码器层 `[first_k_dense_replace, num_layers)`，层号为解码器层号；部分覆盖拒绝。MTP 层不在其中。
 - **状态**：NoWAG 的 `format` 为 `"nowag"`，`format_parameters` 为 `{"d", "assignment_bits"}`；其他格式报实际绑定格式名（如 `bf16`、`fp8_block`、`nvfp4_marlin`、`ds_fp4`），`format_parameters` 为 `{}`。`workspace_device_bytes` 是 decode 流（decode、SD 起草与 verify）预留的专家临时空间，按 `max(并发上限, 图最大批) × (草稿步数 + 1)` 行和 `workspace_spec` 计算，计入共享 runtime 的执行额度或分池模式的固定成本；prefill tile 的临时空间按次分配，计入实测的 prefill 峰值。非 NoWAG 格式为 0。
 - **容量**：沿用现有 CLI 语义（`ft serve --help`）；`--moe-cache-size` 以专家槽计（一槽 = 一层的一个专家的全部 bank）。非法容量以 ready 前的公开错误为准。
-- **不支持的组合**：NoWAG 不支持路由权重乘在 gate/up 输入、上述以外的激活或舍入；gpt-oss 的 NoWAG 只走 `offload`／`cpu`／`hybrid`。TP 切片属于 P4，交付前 TP>1 的 NoWAG 结果不计为通过。
+- **不支持的组合**：NoWAG 不支持路由权重乘在 gate/up 输入、上述以外的激活或舍入。gpt-oss 全驻 GPU 和 CPU／hybrid TP 均纳入本轮要求；实现完成不代替各路径的独立验收结果。
 - **数学族与模型**：SwiGLU-OAI（MiniMax-M3 `swigluoai`、gpt-oss）为 `clamp(gate, max=L) * sigmoid(α·gate) * (clamp(up, ±L) + 1)`；tanh-GELU 对应 Gemma4；erf-GELU 目前无已注册模型，不要求覆盖。
 - **padding**：CUDA Graph 补齐行的路由 id 为 `-1`，`run` 对其贡献为零；这是公共调度实际产生的输入。
 - **合成 gpt-oss sidecar**：沿用通用 v1 键（`format="nowag_expert_sidecar_v1"`、`model_type="gpt_oss"`、`hidden_size`、`moe_intermediate_size`、`num_experts`、`num_moe_layers`）；sidecar 不含 bias，bias 取自基座。

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from functools import lru_cache
-import weakref
 from pathlib import Path
 
 import torch
@@ -11,40 +10,6 @@ import torch
 
 ADAPTIVE_RESIDUAL_BM16 = "bm16"
 ADAPTIVE_RESIDUAL_TAIL64 = "tail64"
-
-_aligned_codebooks: dict[
-    tuple[object, ...],
-    tuple[weakref.ReferenceType[torch.Tensor], torch.Tensor],
-] = {}
-
-
-def aligned_codebook(codebook: torch.Tensor) -> torch.Tensor:
-    """Return a cached HBM ``[E,C,8]`` view with two zero padding lanes.
-
-    This is a lookup-friendly physical replica, not a shared-memory cache.
-    The source tensor version participates in the key so model-load mutation
-    cannot leave a stale runtime representation behind.
-    """
-    key = (
-        codebook.device.type,
-        codebook.device.index,
-        codebook.data_ptr(),
-        codebook._version,
-        tuple(codebook.shape),
-        codebook.dtype,
-    )
-    cached = _aligned_codebooks.get(key)
-    if cached is not None and cached[0]() is codebook:
-        return cached[1]
-    aligned = torch.zeros(
-        (*codebook.shape[:-1], 8),
-        device=codebook.device,
-        dtype=codebook.dtype,
-    )
-    aligned[..., : codebook.shape[-1]].copy_(codebook)
-    _aligned_codebooks[key] = (weakref.ref(codebook), aligned)
-    return aligned
-
 
 _CSRC = Path(__file__).with_name("csrc")
 
@@ -127,58 +92,6 @@ def adaptive_task_metadata_rows(
     int32_elements = 2 * capacity64 + 2 * capacity16 + 2
     row_bytes = physical_intermediate_size * torch.bfloat16.itemsize
     return (int32_elements * torch.int32.itemsize + row_bytes - 1) // row_bytes
-
-
-def moe_gate_up_pipeline(
-    *,
-    hidden_states: torch.Tensor,
-    gate_codebook: torch.Tensor,
-    gate_packed_assignments: torch.Tensor,
-    gate_input_norm: torch.Tensor,
-    gate_output_norm: torch.Tensor,
-    up_codebook: torch.Tensor,
-    up_packed_assignments: torch.Tensor,
-    up_input_norm: torch.Tensor,
-    up_output_norm: torch.Tensor,
-    down_input_norm: torch.Tensor,
-    sorted_tickets: torch.Tensor,
-    expert_ids: torch.Tensor,
-    num_tickets_post_padded: torch.Tensor,
-    gate_up_workspace: torch.Tensor,
-    num_routes: int,
-    top_k: int,
-    num_m_blocks: int,
-    alignment_block_ratio: int,
-    block_m: int,
-    word_major_assignments: bool,
-    use_block12_decoder: bool,
-    debug_trace: torch.Tensor | None = None,
-) -> None:
-    """Launch two pipelined projections and the fused SiLU/norm epilogue."""
-    _extension().moe_gate_up_pipeline(
-        hidden_states,
-        gate_codebook,
-        gate_packed_assignments,
-        gate_input_norm,
-        gate_output_norm,
-        up_codebook,
-        up_packed_assignments,
-        up_input_norm,
-        up_output_norm,
-        down_input_norm,
-        sorted_tickets,
-        expert_ids,
-        num_tickets_post_padded,
-        gate_up_workspace,
-        num_routes,
-        top_k,
-        num_m_blocks,
-        alignment_block_ratio,
-        block_m,
-        word_major_assignments,
-        use_block12_decoder,
-        debug_trace,
-    )
 
 
 def moe_gate_up_exact_k48(

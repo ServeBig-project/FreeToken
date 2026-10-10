@@ -24,6 +24,7 @@ import torch
 from freetoken.utils import init_logger
 
 from .expert_format import _BANK_SCHEMAS
+from .nowag.weights import load_banks as _load_nowag_banks, prepare_ftw_banks as _prepare_nowag
 
 logger = init_logger(__name__)
 
@@ -280,27 +281,6 @@ def _dsfp4_banks(model_path, model_config, device, dtype, dummy, parallel=False,
     )
 
 
-def _nowag_banks(model_path, model_config, device, dtype, dummy, parallel=False, workers=8, chunk=_PARALLEL_CHUNK, decode_target="gpu", layer_sink=None) -> ExpertBanks:
-    if dummy:
-        raise ValueError("NoWAG experts require a completed quantization output")
-    from freetoken.moe.nowag.weights import load_nowag_expert_sources
-
-    path = getattr(model_config, "nowag_expert_path", None)
-    if not path:
-        raise ValueError("NoWAG expert path was not configured")
-    sources, shared, state = load_nowag_expert_sources(
-        path, model_config, dtype=dtype, layer_sink=layer_sink
-    )
-    # The sidecar carries only the projections; a model with expert biases supplies
-    # them from the original checkpoint.
-    load_biases = _model_hook(model_config, "load_expert_biases")
-    if load_biases is not None:
-        sources.update(load_biases(model_path, model_config, dtype=dtype))
-    return ExpertBanks(
-        "nowag", sources, shared=shared, format_state=state, streamed=layer_sink is not None
-    )
-
-
 def _model_hook(model_config, name: str):
     architectures = getattr(model_config, "architectures", None)
     if not architectures:
@@ -318,13 +298,7 @@ def _model_hook(model_config, name: str):
         return None
 
 
-def _prepare_nowag(stored_state, model_config):
-    from freetoken.moe.nowag.weights import prepare_ftw_banks
-
-    return prepare_ftw_banks(stored_state, model_config)
-
-
-# Formats whose FTW banks need the format's own restore (encoding state, TP slicing).
+# Formats whose FTW banks need preparation before pinning (encoding state, TP slicing).
 _FTW_PREPARE = {"nowag": _prepare_nowag}
 
 # ModelConfig.expert_quant -> provider
@@ -332,9 +306,16 @@ _PROVIDERS = {
     "none": _bf16_banks,
     "nvfp4": _nvfp4_banks,
     "ds_fp4": _dsfp4_banks,
-    "nowag": _nowag_banks,
     "q4_0": _q4_0_banks,
 }
+
+
+# These components supply routed weights independently of the base model's loader.
+_WEIGHT_OVERRIDES = {"nowag": _load_nowag_banks}
+
+
+def has_expert_weight_override(quant_format: str) -> bool:
+    return quant_format in _WEIGHT_OVERRIDES
 
 
 def _build_expert_banks(model_path, model_config, device, dtype, dummy, parallel, workers, chunk, decode_target="gpu", layer_sink=None) -> ExpertBanks:
@@ -346,9 +327,10 @@ def _build_expert_banks(model_path, model_config, device, dtype, dummy, parallel
     materialize-and-write path (``ExpertBanks.streamed`` reports which happened)."""
     # A model's own setup reads its checkpoint's native experts; a separately supplied
     # format (NoWAG) is read by that format's provider.
-    setup = None
-    if model_config.expert_quant != "nowag":
-        setup = _model_hook(model_config, "setup_offload_expert_banks")
+    override = _WEIGHT_OVERRIDES.get(model_config.expert_quant)
+    if override is not None:
+        return override(model_path, model_config, device, dtype, dummy, layer_sink=layer_sink)
+    setup = _model_hook(model_config, "setup_offload_expert_banks")
     if setup is not None:
         import inspect
 
@@ -447,6 +429,7 @@ def load_expert_banks(
         banks = load_ftw_banks(
             model_path, num_layers=model_config.num_moe_layers, workers=workers, chunk=chunk,
             prepare=partial(prepare, model_config=model_config) if prepare is not None else None,
+            layer_sink=layer_sink,
         )
         if banks is not None:
             logger.info_rank0(f"expert banks: FTW fast path (FTW checkpoint {model_path})")

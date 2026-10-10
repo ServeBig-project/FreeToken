@@ -64,12 +64,11 @@ MAX_STRUCTURAL_DOWN_BLOCK_N: Final = 128
 ROUTE_ALIGNMENT_SMALL_CAP: Final = 1024
 
 MoeSchedule = Literal["baseline", "route_density_grouped"]
-GateUpBackend = Literal["triton", "cuda_pipeline", "cuda_exact_k48", "auto"]
+GateUpBackend = Literal["triton", "cuda_exact_k48", "auto"]
 DownBackend = Literal["triton", "cuda_exact_k48", "auto"]
 BASELINE_SCHEDULE: Final[MoeSchedule] = "baseline"
 ROUTE_DENSITY_GROUPED_SCHEDULE: Final[MoeSchedule] = "route_density_grouped"
 TRITON_GATE_UP_BACKEND: Final[GateUpBackend] = "triton"
-CUDA_PIPELINE_GATE_UP_BACKEND: Final[GateUpBackend] = "cuda_pipeline"
 CUDA_EXACT_K48_GATE_UP_BACKEND: Final[GateUpBackend] = "cuda_exact_k48"
 TRITON_DOWN_BACKEND: Final[DownBackend] = "triton"
 CUDA_EXACT_K48_DOWN_BACKEND: Final[DownBackend] = "cuda_exact_k48"
@@ -1393,7 +1392,6 @@ def nowag_fused_moe(
     gate_up_backend: GateUpBackend = TRITON_GATE_UP_BACKEND,
     down_backend: DownBackend = TRITON_DOWN_BACKEND,
     pad_down_to_k48: bool = False,
-    gate_up_debug_trace: torch.Tensor | None = None,
     cuda_launch_plan: MoeCudaLaunchPlan | None = None,
     swiglu_limit: float | None = None,
     activation_kind: ActivationKind = SILU_MUL,
@@ -1453,11 +1451,8 @@ def nowag_fused_moe(
     stores the intermediate in expert-sorted order, and can fold the Down
     input norm into Gate/Up's epilogue.  Set it to ``False`` for the legacy
     A/B path.
-    ``gate_up_backend="cuda_pipeline"`` selects the experimental SM80+
-    two-stage shared-memory lookup/MMA pipeline for route-dense tiles.  Small-M
-    tiles retain the Triton kernel because they cannot hide pipeline startup.
     Under TP, Gate/Up are already output-sharded and Down returns this rank's
-    partial output for vLLM to all-reduce. ``down_input_group_start_lane``
+    partial output for the caller to all-reduce. ``down_input_group_start_lane``
     preserves a global D-wide codeword when a row-shard boundary cuts through
     it. EP and zero-point variants remain outside this contract.
 
@@ -1493,9 +1488,6 @@ def nowag_fused_moe(
     model count.  Tensor validation, route IDs, and alignment continue to use
     the physical row count.  They are identical without cache indirection.
 
-    ``gate_up_debug_trace`` is an internal profiling hook for the CUDA
-    pipeline.  Supplying an int64 CUDA buffer selects a separately compiled
-    instrumented kernel; the normal ``None`` path has no tracing branches.
     """
     if triton is None:
         raise RuntimeError("Triton is required for nowag_fused_moe")
@@ -1590,12 +1582,11 @@ def nowag_fused_moe(
         )
     if gate_up_backend not in (
         TRITON_GATE_UP_BACKEND,
-        CUDA_PIPELINE_GATE_UP_BACKEND,
         CUDA_EXACT_K48_GATE_UP_BACKEND,
         AUTO_GATE_UP_BACKEND,
     ):
         raise ValueError(
-            "gate_up_backend must be 'triton', 'cuda_pipeline', "
+            "gate_up_backend must be 'triton', "
             "'cuda_exact_k48', or 'auto', "
             f"got {gate_up_backend!r}"
         )
@@ -1609,7 +1600,6 @@ def nowag_fused_moe(
             f"got {down_backend!r}"
         )
     if gate_up_backend in (
-        CUDA_PIPELINE_GATE_UP_BACKEND,
         CUDA_EXACT_K48_GATE_UP_BACKEND,
         AUTO_GATE_UP_BACKEND,
     ) and not structural_down:
@@ -1623,26 +1613,6 @@ def nowag_fused_moe(
         raise ValueError(
             "down_backend='cuda_exact_k48'/'auto' requires structural_down=True"
         )
-    if (
-        gate_up_debug_trace is not None
-        and gate_up_backend != CUDA_PIPELINE_GATE_UP_BACKEND
-    ):
-        raise ValueError(
-            "gate_up_debug_trace requires gate_up_backend='cuda_pipeline'"
-        )
-    if (
-        gate_up_backend == CUDA_PIPELINE_GATE_UP_BACKEND
-        and activation_math.down_norm_placement != GATE_UP_EPILOGUE_NORM
-    ):
-        raise ValueError(
-            "cuda_pipeline requires down_norm_placement="
-            "'gate_up_epilogue'"
-        )
-    if (
-        gate_up_backend == CUDA_PIPELINE_GATE_UP_BACKEND
-        and activation_math.swiglu_limit is not None
-    ):
-        raise ValueError("cuda_pipeline does not implement clamped SwiGLU")
     if assignment_layout not in ("row_major", "word_major"):
         raise ValueError(
             "assignment_layout must be 'row_major' or 'word_major', "
@@ -2044,7 +2014,7 @@ def nowag_fused_moe(
         else num_routes
     )
     supports_exact_k48_device = torch.cuda.get_device_capability(device) >= (8, 0)
-    pipeline_block_m = (
+    exact_gate_up_block_m = (
         cuda_launch_plan.gate_up.block_m
         if cuda_launch_plan is not None
         and cuda_launch_plan.gate_up.block_m in (16, 32, 64, 128)
@@ -2053,10 +2023,6 @@ def nowag_fused_moe(
         else 32
         if down_block_m >= 32
         else None
-    )
-    use_cuda_pipeline = (
-        gate_up_backend == CUDA_PIPELINE_GATE_UP_BACKEND
-        and pipeline_block_m is not None
     )
     exact_gate_up_block_n = (
         cuda_launch_plan.gate_up.block_n
@@ -2073,7 +2039,7 @@ def nowag_fused_moe(
         and structural_down
         and dtype == torch.bfloat16
         and assignment_layout == "word_major"
-        and pipeline_block_m is not None
+        and exact_gate_up_block_m is not None
         and exact_gate_up_block_n in (64, 128)
         and intermediate_size % exact_gate_up_block_n == 0
         and hidden_size % 2 == 0
@@ -2140,7 +2106,7 @@ def nowag_fused_moe(
         physical_intermediate_size=physical_intermediate_size,
         structural_down=structural_down,
         compute_slabs=(
-            2 if use_cuda_pipeline or use_cuda_exact_gate_up else 1
+            2 if use_cuda_exact_gate_up else 1
         ),
         adaptive_m_tiles=use_adaptive_m_tiles,
         caller_owned_alignment_storage=caller_owned_alignment_storage,
@@ -2378,9 +2344,9 @@ def nowag_fused_moe(
             preapply_down_norm=preapply_down_norm,
         )
     elif use_cuda_exact_gate_up:
-        assert pipeline_block_m is not None
+        assert exact_gate_up_block_m is not None
         assert exact_gate_up_block_n is not None
-        pipeline_alignment_ratio = down_block_m // pipeline_block_m
+        pipeline_alignment_ratio = down_block_m // exact_gate_up_block_m
         pipeline_num_m_blocks = down_num_m_blocks * pipeline_alignment_ratio
         gate_up_kwargs = dict(
             hidden_states=hidden_states,
@@ -2401,7 +2367,7 @@ def nowag_fused_moe(
             top_k=top_k,
             num_m_blocks=pipeline_num_m_blocks,
             alignment_block_ratio=pipeline_alignment_ratio,
-            block_m=pipeline_block_m,
+            block_m=exact_gate_up_block_m,
             block_n=exact_gate_up_block_n,
             output_start_lane=middle_offset,
             swiglu_limit=activation_math.swiglu_limit,
@@ -2424,36 +2390,6 @@ def nowag_fused_moe(
             from .cuda_ops import moe_gate_up_exact_k48
 
             moe_gate_up_exact_k48(**gate_up_kwargs)
-    elif use_cuda_pipeline:
-        from .cuda_ops import aligned_codebook, moe_gate_up_pipeline
-
-        assert pipeline_block_m is not None
-        pipeline_alignment_ratio = down_block_m // pipeline_block_m
-        pipeline_num_m_blocks = down_num_m_blocks * pipeline_alignment_ratio
-        moe_gate_up_pipeline(
-            hidden_states=hidden_states,
-            gate_codebook=aligned_codebook(gate_codebook),
-            gate_packed_assignments=gate_packed_assignments,
-            gate_input_norm=gate_input_norm,
-            gate_output_norm=gate_output_norm,
-            up_codebook=aligned_codebook(up_codebook),
-            up_packed_assignments=up_packed_assignments,
-            up_input_norm=up_input_norm,
-            up_output_norm=up_output_norm,
-            down_input_norm=down_input_norm,
-            sorted_tickets=sorted_tickets,
-            expert_ids=expert_ids,
-            num_tickets_post_padded=num_tickets_post_padded,
-            gate_up_workspace=middle_storage[: 2 * required_middle_rows],
-            num_routes=num_routes,
-            top_k=top_k,
-            num_m_blocks=pipeline_num_m_blocks,
-            alignment_block_ratio=pipeline_alignment_ratio,
-            block_m=pipeline_block_m,
-            word_major_assignments=assignment_layout == "word_major",
-            use_block12_decoder=use_block12_decoder,
-            debug_trace=gate_up_debug_trace,
-        )
     else:
         _nowag_moe_gate_up_kernel[gate_grid](
             hidden_states,

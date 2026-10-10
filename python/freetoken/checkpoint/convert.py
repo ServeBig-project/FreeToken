@@ -201,9 +201,10 @@ def convert_checkpoint(
     cfg = EngineConfig(model_path=model_path, tp_info=DistributedInfo(tp.rank, tp.size),
                        dtype=dtype, moe_backend=moe_backend, nowag_expert_path=nowag_expert_path)
     mc = cfg.model_config
-    offload = moe_backend == "offload" and getattr(mc, "is_moe", False)
-    if nowag_expert_path is not None and not offload:
-        raise SystemExit("NoWAG experts are stored as expert banks: convert with --moe-backend offload")
+    from freetoken.moe.expert_banks import has_expert_weight_override
+
+    offload = ((moe_backend == "offload" or has_expert_weight_override(mc.expert_quant))
+               and getattr(mc, "is_moe", False))
     include_moe_experts = not offload
 
     from freetoken.utils.progress import byte_bar, count_bar

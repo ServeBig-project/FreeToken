@@ -530,14 +530,27 @@ def _build_cpu_moe_executor(
         decode_target="cpu", cpu_executor=None,
         host_shared=banks.shared,
     )
+    method = None
+    if fmt == "nowag":
+        from freetoken.moe.expert_format import ExpertLayout, ExpertMath, bind_expert_method
+        from freetoken.moe.nowag.weights import NowagState
+
+        method = bind_expert_method(
+            ExpertMath(activation=wl.activation, activation_alpha=wl.swiglu_alpha,
+                       activation_limit=wl.swiglu_limit,
+                       gate_up_input_rounding=wl.gate_up_input_rounding,
+                       down_input_rounding=wl.down_input_rounding,
+                       router_weight_on_down_input=wl.router_weight_on_down_input),
+            ExpertLayout(fmt, wl.hidden, wl.inter, E), NowagState(6, 12, wl.inter),
+            device=torch.device("cpu"), backend="cpu",
+        )
     return CpuMoeExecutor(
         cache, top_k=wl.top_k, activation=wl.activation,
         apply_router_weight_on_input=False, num_threads=num_threads, max_tokens=1,
         device=torch.device("cuda"), swiglu_alpha=wl.swiglu_alpha,
         swiglu_limit=wl.swiglu_limit,
         gate_up_input_rounding=wl.gate_up_input_rounding,
-        down_input_rounding=wl.down_input_rounding,
-        router_weight_on_down_input=wl.router_weight_on_down_input,
+        expert_method=method,
     )
 
 

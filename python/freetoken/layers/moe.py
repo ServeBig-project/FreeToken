@@ -537,13 +537,14 @@ def make_moe_layer(
         activation=activation,
         apply_router_weight_on_input=apply_router_weight_on_input,
     )
-    # NoWAG experts come from their own loader (engine), never from this checkpoint.
-    nowag = getattr(config, "expert_quant", "none") == "nowag"
+    from freetoken.moe.expert_banks import has_expert_weight_override
+
+    separate_weights = has_expert_weight_override(config.expert_quant)
     if offload:
         assert layer_id is not None, "offload MoE backends need the layer_id"
         kwargs["layer_id"] = layer_id
-    elif nowag:
-        kwargs.update(weight_format="nowag", allocate_experts=False)
+    elif separate_weights:
+        kwargs.update(weight_format=config.expert_quant, allocate_experts=False)
     else:
         kwargs["weight_format"] = weight_format
     layer = layer_cls(**kwargs)
@@ -554,7 +555,7 @@ def make_moe_layer(
         layer.router = ROUTERS[config.moe_router](layer.top_k, layer.renormalize)
     for name, value in (extra_attrs or {}).items():
         setattr(layer, name, value)
-    if not offload and not nowag:
+    if not offload and not separate_weights:
         bind_resident_method(layer)
     return layer
 

@@ -7,11 +7,12 @@ in the callers, which only hand the bound method bank views whose rows the route
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Callable
 
 import torch
+from .nowag.weights import BANK_NAMES as NOWAG_BANK_NAMES, BIAS_NAMES as NOWAG_BIAS_NAMES
 
 # quant_format -> bank names, in registration order: the single place a format's bank
 # layout is declared. The cache machinery (copy_missing, the prefill double buffers,
@@ -60,28 +61,11 @@ _BANK_SCHEMAS: dict[str, tuple[str, ...]] = {
     "ds_fp4": ("gate_up_packed", "gate_up_scale", "down_packed", "down_scale"),
     # NoWAG: three projections, each with word-major packed assignments [W, N]
     # and input/output normalizers. The model-wide codebook is a shared tensor.
-    "nowag": (
-        "gate_assignments",
-        "gate_input_norm",
-        "gate_output_norm",
-        "up_assignments",
-        "up_input_norm",
-        "up_output_norm",
-        "down_assignments",
-        "down_input_norm",
-        "down_output_norm",
-    ),
+    "nowag": NOWAG_BANK_NAMES,
 }
 
 # Banks a format carries only when the model has them (expert biases).
-_OPTIONAL_BANKS: dict[str, tuple[str, ...]] = {"nowag": ("gate_bias", "up_bias", "down_bias")}
-
-# Speculative-decoding capabilities by ModelConfig.expert_quant: experts whose compute
-# is captured in the draft/verify CUDA graphs, and experts whose rows the measured
-# missing-expert loads and verify prefetch move (they copy whole bank rows of any
-# layout and cost them by measured copy time).
-SPECULATIVE_GRAPH_FORMATS = ("none", "nvfp4", "nowag")
-SPECULATIVE_LOAD_FORMATS = ("none", "nowag")
+_OPTIONAL_BANKS: dict[str, tuple[str, ...]] = {"nowag": NOWAG_BIAS_NAMES}
 
 # Dynamic per-token, per-128-lane E4M3 quantize/dequantize with UE8M0 scales
 # (DeepSeek-V4 expert inputs).
@@ -130,6 +114,11 @@ class ExpertMethod:
     # format's own encoding parameters.
     kernel_backends: tuple[str, ...] = ()
     format_parameters: dict = field(default_factory=dict)
+    speculative_graphs: bool = False
+    speculative_loads: bool = False
+    # Format-owned CPU descriptor preparation; the executor retains the returned
+    # buffers and passes the native arguments to its existing worker pool.
+    prepare_cpu: Callable | None = None
 
 
 def expert_math(layer) -> ExpertMath:
@@ -268,19 +257,20 @@ def _run_ds_fp4(math, resident, x, rows, weights, banks, shared, *, workspace=No
     return _into(out, routed_experts_fp4(x, rows, weights, *w, math.activation_limit))
 
 
-_RUNS = {
-    "bf16": _run_bf16,
-    "fp8_block": _run_fp8_block,
-    "nvfp4": _run_nvfp4,
-    "nvfp4_marlin": partial(_run_nvfp4_tiled, "nvfp4_marlin"),
-    "nvfp4_b12x": partial(_run_nvfp4_tiled, "nvfp4_b12x"),
-    "q4_0": _run_q4_0,
-    "mxfp4_triton": _run_mxfp4,
-    "ds_fp4": _run_ds_fp4,
+_METHODS = {
+    "bf16": ExpertMethod(_run_bf16, _no_workspace, logical_sort=True,
+                          speculative_graphs=True, speculative_loads=True),
+    "fp8_block": ExpertMethod(_run_fp8_block, _no_workspace, logical_sort=True),
+    "nvfp4": ExpertMethod(_run_nvfp4, _no_workspace, logical_sort=True,
+                           speculative_graphs=True),
+    "nvfp4_marlin": ExpertMethod(partial(_run_nvfp4_tiled, "nvfp4_marlin"), _no_workspace,
+                                  speculative_graphs=True),
+    "nvfp4_b12x": ExpertMethod(partial(_run_nvfp4_tiled, "nvfp4_b12x"), _no_workspace,
+                                speculative_graphs=True),
+    "q4_0": ExpertMethod(_run_q4_0, _no_workspace),
+    "mxfp4_triton": ExpertMethod(_run_mxfp4, _no_workspace, logical_sort=True),
+    "ds_fp4": ExpertMethod(_run_ds_fp4, _no_workspace, logical_sort=True),
 }
-
-
-_LOGICAL_SORT = ("bf16", "nvfp4", "fp8_block", "mxfp4_triton", "ds_fp4")
 
 
 def bind_expert_method(
@@ -300,11 +290,11 @@ def bind_expert_method(
         from freetoken.moe.nowag.method import bind_nowag_method
 
         return bind_nowag_method(math, layout, format_state, device=device, backend=backend)
-    if layout.format not in _RUNS:
+    if layout.format not in _METHODS:
         raise ValueError(f"no expert compute method for format {layout.format!r}")
-    run = partial(_RUNS[layout.format], math, backend == "fused")
-    return ExpertMethod(run, _no_workspace, logical_sort=layout.format in _LOGICAL_SORT,
-                        kernel_backends=(layout.format,))
+    method = _METHODS[layout.format]
+    return replace(method, run=partial(method.run, math, backend == "fused"),
+                   kernel_backends=(layout.format,))
 
 
 __all__ = [

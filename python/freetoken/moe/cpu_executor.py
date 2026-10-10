@@ -77,25 +77,6 @@ _WFMT_IDS = {
     "nowag": 5,
 }
 
-_NOWAG_BANK_NAMES = (
-    "gate_assignments",
-    "gate_input_norm",
-    "gate_output_norm",
-    "up_assignments",
-    "up_input_norm",
-    "up_output_norm",
-    "down_assignments",
-    "down_input_norm",
-    "down_output_norm",
-)
-# Optional per-expert biases; their descriptor slots stay 0 when absent.
-_NOWAG_BIAS_NAMES = ("gate_bias", "up_bias", "down_bias")
-
-
-def _nowag_assignment_words(width: int, d: int) -> int:
-    return ((width + d - 1) // d * 12 + 31) // 32
-
-
 def compiled_extension_supports(
     activation: str,
     quant_format: str | None = None,
@@ -192,8 +173,7 @@ class CpuMoeExecutor:
         swiglu_alpha: float = 1.702,
         swiglu_limit: float | None = None,
         gate_up_input_rounding: str | None = None,
-        down_input_rounding: str | None = None,
-        router_weight_on_down_input: bool = False,
+        expert_method=None,
     ) -> None:
         from freetoken.kernel import _cpu_moe
 
@@ -233,29 +213,16 @@ class CpuMoeExecutor:
         self.quant_format = fmt
         self.device = device
         self.max_tokens = int(max_tokens)
-        nowag_flags = (False, False, False, False)
-        if fmt == "nowag":
-            from freetoken.moe.expert_format import ExpertMath
-            from freetoken.moe.nowag.method import nowag_cpu_flags
-
-            nowag_flags = nowag_cpu_flags(ExpertMath(
-                activation=activation,
-                activation_alpha=swiglu_alpha,
-                activation_limit=swiglu_limit,
-                router_weight_on_input=bool(apply_router_weight_on_input),
-                router_weight_on_down_input=router_weight_on_down_input,
-                gate_up_input_rounding=gate_up_input_rounding,
-                down_input_rounding=down_input_rounding,
-            ))
         router_weight_on_input = bool(apply_router_weight_on_input)
         self.apply_router_weight_on_input = router_weight_on_input
         # The per-layer tensors and their pointer tables must outlive the executor
         # (C++ holds raw addresses into both).
         self._banks: list[torch.Tensor] = []
-        ptrs, (self.H, self.I) = self._resolve_banks(cache, fmt)
-        ptrs.setdefault("nowag_bank_table_ptr", 0)
-        ptrs.setdefault("nowag_codebook_ptr", 0)
-        ptrs.setdefault("nowag_group_size", 0)
+        if expert_method is not None and expert_method.prepare_cpu is not None:
+            ptrs, (self.H, self.I), self._banks = expert_method.prepare_cpu(
+                cache.bank_sources, cache.host_shared)
+        else:
+            ptrs, (self.H, self.I) = self._resolve_banks(cache, fmt)
 
         # Decide the flag handshake up front (env + device + a functional stream-memop
         # probe): its coordinator needs a core of its own, which the auto thread sizing
@@ -298,10 +265,6 @@ class CpuMoeExecutor:
             weight_format=_WFMT_IDS[fmt],
             swiglu_alpha=float(swiglu_alpha),
             swiglu_limit=float(swiglu_limit) if swiglu_limit is not None else float("inf"),
-            nowag_round_input=nowag_flags[0],
-            nowag_round_middle=nowag_flags[1],
-            nowag_preapply_down_norm=nowag_flags[2],
-            nowag_weight_middle=nowag_flags[3],
             core_ids=core_ids,
             **ptrs,
         )
@@ -366,7 +329,7 @@ class CpuMoeExecutor:
         # Move a required input FP8 round-trip to the captured GPU path before D2H;
         # the C++ executor then skips its serial host-side equivalent.
         self._gpu_prequant = (
-            fmt == "ds_fp4" or (fmt == "nowag" and nowag_flags[0])
+            fmt == "ds_fp4" or gate_up_input_rounding is not None
         ) and device.type == "cuda"
         if self._gpu_prequant:
             self._ext.set_input_prequant(True)
@@ -407,9 +370,6 @@ class CpuMoeExecutor:
         bank's -- the C++ ctor resolves ``tbl[layer_id]`` per task.
         """
         banks = cache.bank_sources
-        if fmt == "nowag":
-            return self._resolve_nowag_banks(banks, cache.host_shared.get("codebook"))
-
         if fmt == "bf16":
             gate_up = banks["gate_up"]
             down = banks["down"]
@@ -465,82 +425,6 @@ class CpuMoeExecutor:
             down_global_ptr=self._make_table(dng).data_ptr(),
             gate_up_bias_ptr=0,
             down_bias_ptr=0,
-        )
-        return ptrs, (H, I)
-
-    def _resolve_nowag_banks(
-        self,
-        banks: dict,
-        codebook: torch.Tensor | None,
-    ) -> tuple[dict, tuple[int, int]]:
-        """Resolve the D4/D6 B12 word-major NoWAG banks without expanding weights.
-
-        A compact ``[layer, bank]`` pointer descriptor is the only extra metadata;
-        the C++ kernel reads the nine original pinned banks and the shared BF16
-        codebook in place.
-        """
-        if codebook is None:
-            raise RuntimeError("NoWAG CPU MoE cache has no host codebook")
-        d = int(codebook.shape[1]) if codebook.ndim == 2 else 0
-        if codebook.dtype != torch.bfloat16 or tuple(codebook.shape) != (4096, d) or d not in (4, 6):
-            raise ValueError(
-                "NoWAG CPU MoE requires a shared BF16 [4096, D] codebook with D in (4, 6)"
-            )
-        gate_in = banks["gate_input_norm"]
-        gate_out = banks["gate_output_norm"]
-        H = int(gate_in[0].shape[1])
-        I = int(gate_out[0].shape[1])
-
-        expected = {
-            "gate_assignments": (self.num_experts, _nowag_assignment_words(H, d), I),
-            "gate_input_norm": (self.num_experts, H),
-            "gate_output_norm": (self.num_experts, I),
-            "up_assignments": (self.num_experts, _nowag_assignment_words(H, d), I),
-            "up_input_norm": (self.num_experts, H),
-            "up_output_norm": (self.num_experts, I),
-            "down_assignments": (self.num_experts, _nowag_assignment_words(I, d), H),
-            "down_input_norm": (self.num_experts, I),
-            "down_output_norm": (self.num_experts, H),
-            "gate_bias": (self.num_experts, I),
-            "up_bias": (self.num_experts, I),
-            "down_bias": (self.num_experts, H),
-        }
-        names = _NOWAG_BANK_NAMES + tuple(n for n in _NOWAG_BIAS_NAMES if n in banks)
-        for name in names:
-            want_dtype = torch.int32 if name.endswith("assignments") else torch.bfloat16
-            for layer_id, tensor in enumerate(banks[name]):
-                if tensor.dtype != want_dtype or tuple(tensor.shape) != expected[name]:
-                    raise ValueError(
-                        f"NoWAG bank {name!r} layer {layer_id} must be "
-                        f"{expected[name]} {want_dtype}, got {tuple(tensor.shape)} "
-                        f"{tensor.dtype}"
-                    )
-        descriptor = torch.tensor(
-            [
-                [
-                    banks[name][layer_id].data_ptr() if name in banks else 0
-                    for name in _NOWAG_BANK_NAMES + _NOWAG_BIAS_NAMES
-                ]
-                for layer_id in range(self.num_layers)
-            ],
-            dtype=torch.int64,
-        )
-        self._banks.append(descriptor)
-        for name in names:
-            self._banks.extend(banks[name])
-        self._banks.append(codebook)
-        ptrs = dict(
-            gate_up_ptr=0,
-            down_ptr=0,
-            gate_up_scale_ptr=0,
-            gate_up_global_ptr=0,
-            down_scale_ptr=0,
-            down_global_ptr=0,
-            gate_up_bias_ptr=0,
-            down_bias_ptr=0,
-            nowag_bank_table_ptr=descriptor.data_ptr(),
-            nowag_codebook_ptr=codebook.data_ptr(),
-            nowag_group_size=d,
         )
         return ptrs, (H, I)
 

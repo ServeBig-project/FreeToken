@@ -413,7 +413,7 @@ def iter_ftw_weights(path: str, *, kinds=("weight",), workers: int = 8,
 
 def load_ftw_banks(
     path: str, *, num_layers: int, workers: int = 8, chunk: int = _DEFAULT_CHUNK,
-    prepare=None,
+    prepare=None, layer_sink=None,
 ):
     """Reconstruct the offload :class:`ExpertBanks` from the FTW's ``experts_bank``
     entries, on the per-layer host bank contract (one pinned ``[num_experts, ...]``
@@ -441,7 +441,7 @@ def load_ftw_banks(
     vectors, unaffected by the row split (fixed GPU residency; see
     ``cache_budget.expert_bytes_per_slot``).
     """
-    from freetoken.moe.host_banks import HostBank, PinPipeline, alloc_banks
+    from freetoken.moe.host_banks import HostBank, LayerCompletionTracker, PinPipeline, alloc_banks
     from freetoken.utils.progress import byte_bar
 
     reader = FTWReader(path)
@@ -533,32 +533,42 @@ def load_ftw_banks(
     # Jobs are per (bank, layer) -- many small reads, so a wider pool; each bank pins
     # as its read completes, overlapping cudaHostRegister with the remaining reads.
     n_jobs = len(alpha_entries) + len(row_jobs) + len(layer_jobs)
+    completion = (LayerCompletionTracker(
+        len(row_hb), row_hb,
+        lambda layer, banks: layer_sink(layer, {n: b for n, b in banks.items() if b is not None}),
+    ) if layer_sink is not None else None)
     try:
         with PinPipeline() as pins:
 
             def _finish(name, layer, bank):
+                view_args = row_view_args[name][layer]
+                if view_args is None:
+                    view = bank.tensor
+                else:
+                    head_pad, nbytes, experts, shape, dtype = view_args
+                    view = bank.tensor[head_pad:head_pad + nbytes].view(dtype).view(experts, *shape)
+                bank.tensor = view
+                row_view_args[name][layer] = None
                 if transform is not None:
-                    view_args = row_view_args[name][layer]
-                    if view_args is None:
-                        view = bank.tensor
-                    else:
-                        head_pad, nbytes, experts, shape, dtype = view_args
-                        view = bank.tensor[head_pad:head_pad + nbytes].view(dtype).view(experts, *shape)
                     local = transform(name, view)
                     if local is None:
                         row_hb[name][layer] = None
                         del local, view
                         bank.close()
+                        if completion is not None:
+                            completion.note(layer)
                         return
                     if local is not view:
                         target = HostBank(tuple(local.shape), local.dtype)
                         target.tensor.copy_(local)
                         row_hb[name][layer] = target
-                        row_view_args[name][layer] = None
                         del local, view
                         bank.close()
                         bank = target
-                pins.submit(bank)
+                if completion is None:
+                    pins.submit(bank)
+                else:
+                    completion.note(layer)
 
             def _read_alpha(e):
                 bank = alpha_hb[e["name"]]
@@ -616,7 +626,7 @@ def load_ftw_banks(
     # (not a separate kind); everything else under experts_bank is a weight source.
     alpha_kw = {n: alpha_hb[n].tensor for n in alpha_hb}
     return ExpertBanks(reader.meta("quant_format"), sources, **alpha_kw, shared=shared,
-                       format_state=format_state)
+                       format_state=format_state, streamed=layer_sink is not None)
 
 
 def ftw_quant_format(path: str) -> str | None:

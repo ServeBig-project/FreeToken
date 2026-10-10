@@ -20,6 +20,9 @@ RUNTIME_ASSIGNMENT_LAYOUT = "word_major"
 # The files keep the projection names used by the first DSV4 quantizer.  Their
 # meaning is model-independent: w1 is gate, w3 is up, and w2 is down.
 _PROJECTION_BANK = {"w1": "gate", "w3": "up", "w2": "down"}
+BANK_NAMES = tuple(f"{projection}_{kind}" for projection in ("gate", "up", "down")
+                   for kind in ("assignments", "input_norm", "output_norm"))
+BIAS_NAMES = ("gate_bias", "up_bias", "down_bias")
 
 
 @dataclass(frozen=True)
@@ -356,3 +359,24 @@ def prepare_ftw_banks(stored_state, model_config):
         return shard.apply(name, tensor)
 
     return state, transform
+
+
+def load_banks(model_path, model_config, device, dtype, dummy, *, layer_sink=None):
+    if dummy:
+        raise ValueError("NoWAG experts require a completed quantization output")
+    from freetoken.moe.expert_banks import ExpertBanks, _model_hook
+
+    path = getattr(model_config, "nowag_expert_path", None)
+    if not path:
+        raise ValueError("NoWAG expert path was not configured")
+    sources, shared, state = load_nowag_expert_sources(
+        path, model_config, dtype=dtype, layer_sink=layer_sink
+    )
+    # The sidecar carries only the projections; a model with expert biases supplies
+    # them from the original checkpoint.
+    load_biases = _model_hook(model_config, "load_expert_biases")
+    if load_biases is not None:
+        sources.update(load_biases(model_path, model_config, dtype=dtype))
+    return ExpertBanks(
+        "nowag", sources, shared=shared, format_state=state, streamed=layer_sink is not None
+    )

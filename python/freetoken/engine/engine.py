@@ -16,7 +16,7 @@ from freetoken.layers import set_rope_device
 from freetoken.models import create_model, load_weight
 from freetoken.moe import create_moe_backend, is_offload_moe_backend
 from freetoken.moe.expert_format import ExpertLayout, ExpertMethod, bind_expert_method, expert_math
-from freetoken.moe.expert_banks import load_expert_banks
+from freetoken.moe.expert_banks import has_expert_weight_override, load_expert_banks
 from freetoken.moe.offload_cache import (
     OffloadMoeCache,
     attach_offload_moe_cache,
@@ -398,7 +398,7 @@ class Engine:
         self.expert_shared_bytes = 0
         if is_offload_moe_backend(config.moe_backend):
             self._init_offload_moe_cache(config)
-        elif config.model_config.expert_quant == "nowag":
+        elif has_expert_weight_override(config.model_config.expert_quant):
             self._init_resident_expert_banks(config)
             self._weights_bytes = self._baseline_free - self._sync_get_memory()[0]
         if hasattr(self.model, "prepare_for_runtime"):
@@ -827,7 +827,7 @@ class Engine:
                 config.model_path,
                 self.device,
                 include_moe_experts=not is_offload_moe_backend(config.moe_backend)
-                and config.model_config.expert_quant != "nowag",
+                and not has_expert_weight_override(config.model_config.expert_quant),
             ),
             device=self.device,
         )
@@ -941,6 +941,13 @@ class Engine:
             device=self.device,
             backend=config.moe_backend,
         )
+        if config.speculative_graphs and not self.expert_method.speculative_graphs:
+            raise ValueError(f"{quant_format} expert method does not support SD CUDA Graph")
+        if (config.speculative_draft_load_missing or config.speculative_verify_prefetch
+                ) and not self.expert_method.speculative_loads:
+            raise ValueError(f"{quant_format} expert method does not support SD missing loads/prefetch")
+        if config.speculative_adaptive_cost and not self.expert_method.speculative_graphs:
+            raise ValueError(f"{quant_format} expert method does not support measured SD controls")
         self._expert_top_k = sample.top_k
         for layer in layers:
             layer.expert_method = self.expert_method
@@ -1260,8 +1267,7 @@ class Engine:
             swiglu_alpha=getattr(sample, "hidden_act_alpha", 1.702),
             swiglu_limit=getattr(sample, "swiglu_limit", None),
             gate_up_input_rounding=getattr(sample, "gate_up_input_rounding", None),
-            down_input_rounding=getattr(sample, "down_input_rounding", None),
-            router_weight_on_down_input=getattr(sample, "router_weight_on_down_input", False),
+            expert_method=self.expert_method,
         )
         cache.set_cpu_executor(executor)
         self.cpu_moe_executor = executor
@@ -2163,7 +2169,7 @@ _DENSE_MOE_SETTINGS = {
 
 
 _SD_GRAPH_UNSUPPORTED = (
-    "SD CUDA Graph requires BF16 activations and BF16, NVFP4 or NoWAG experts "
+    "SD CUDA Graph requires BF16 activations and a graph-capable expert method "
     "with --moe-backend offload or hybrid, "
     "FlashInfer attention, page size 1 and at most 8 draft steps; "
     "pass --cuda-graph-max-bs 0 to run speculation eagerly"
@@ -2365,24 +2371,6 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
             "and let every layer decode on the GPU offload path instead."
         )
 
-    # The CPU NoWAG GEMV reads whole codewords; a TP shard can start mid-codeword.
-    nowag_cpu_ok = expert_quant != "nowag" or config.tp_info.size == 1
-    if expert_quant == "nowag" and (
-        config.moe_backend in ("cpu", "hybrid") or config.moe_cpu_layers
-    ):
-        from freetoken.moe.cpu_executor import compiled_extension_supports
-
-        if not nowag_cpu_ok:
-            raise ValueError("NoWAG experts on the CPU (cpu/hybrid/--moe-cpu-layers) need TP=1")
-        if not compiled_extension_supports(
-            getattr(model_config, "hidden_act", "silu"), "nowag"
-        ):
-            raise RuntimeError(
-                "NoWAG cpu/hybrid requires a _cpu_moe extension with the NoWAG "
-                "weight format; rebuild it with `python setup.py build_ext "
-                "--inplace` (or reinstall the wheel)."
-            )
-
     if is_moe and config.moe_backend == "auto":
         # A MoE model always defaults to the offload family: experts stream from pinned host
         # banks into an auto-sized GPU slot cache, which is the only default that serves a model
@@ -2417,11 +2405,6 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
                     f"benchbw profile recommends hybrid, but the CPU MoE executor does not "
                     f"support this model's expert activation "
                     f"{getattr(model_config, 'hidden_act', None)!r}; staying on offload"
-                )
-            elif not nowag_cpu_ok:
-                logger.info_rank0(
-                    "benchbw profile recommends hybrid, but NoWAG CPU experts need TP=1; "
-                    "staying on offload"
                 )
             elif moe_wfmt != "mxfp4" and not compiled_extension_supports(
                 _act, bench_fmt
@@ -2501,7 +2484,8 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
 
     if (
         is_moe
-        and expert_quant not in ("none", "fp8_block", "nowag")
+        and expert_quant not in ("none", "fp8_block")
+        and not has_expert_weight_override(expert_quant)
         and not is_offload_moe_backend(config.moe_backend)
     ):
         raise ValueError(

@@ -3,30 +3,6 @@
 #include <optional>
 #include <vector>
 
-void nowag_moe_gate_up_pipeline_cuda(
-    torch::Tensor hidden_states,
-    torch::Tensor gate_codebook,
-    torch::Tensor gate_packed_assignments,
-    torch::Tensor gate_input_norm,
-    torch::Tensor gate_output_norm,
-    torch::Tensor up_codebook,
-    torch::Tensor up_packed_assignments,
-    torch::Tensor up_input_norm,
-    torch::Tensor up_output_norm,
-    torch::Tensor down_input_norm,
-    torch::Tensor sorted_tickets,
-    torch::Tensor expert_ids,
-    torch::Tensor num_tickets_post_padded,
-    torch::Tensor gate_up_workspace,
-    int64_t num_routes,
-    int64_t top_k,
-    int64_t num_m_blocks,
-    int64_t alignment_block_ratio,
-    int64_t block_m,
-    bool word_major_assignments,
-    bool use_block12_decoder,
-    std::optional<torch::Tensor> debug_trace);
-
 void nowag_moe_down_padded64_cuda(
     torch::Tensor sorted_middle,
     torch::Tensor codebook,
@@ -241,10 +217,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
       "moe_down_exact_k48_adaptive",
       &nowag_moe_down_exact_k48_adaptive_cuda,
       "Exact-K48 Down over device-built BM64/BM16 task queues");
-  module.def(
-      "moe_gate_up_pipeline",
-      &nowag_moe_gate_up_pipeline_cuda,
-      "NoWag SM80+ two-stage Gate/Up lookup-MMA pipeline");
   module.def(
       "moe_gate_up_exact_k48",
       &nowag_moe_gate_up_exact_k48_cuda_legacy,

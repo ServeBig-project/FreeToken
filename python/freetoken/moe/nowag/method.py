@@ -99,6 +99,8 @@ def bind_nowag_method(
     device: torch.device,
     backend: str,
 ) -> ExpertMethod:
+    from .cpu import prepare_cpu_weights
+
     check_nowag_math(math)
     kernel_backend = os.environ.get("FREETOKEN_NOWAG_BACKEND", "auto")
     if kernel_backend not in ("triton", "auto"):
@@ -115,6 +117,9 @@ def bind_nowag_method(
         workspace_spec=partial(_workspace_spec, layout, state),
         kernel_backends=("triton", "cuda_exact_k48") if exact else ("triton",),
         format_parameters={"d": state.d, "assignment_bits": state.assignment_bits},
+        speculative_graphs=True,
+        speculative_loads=True,
+        prepare_cpu=partial(prepare_cpu_weights, math, state),
     )
 
 
@@ -239,18 +244,4 @@ def _run(
         ),
         caller_owned_alignment_storage=False,
         sum_routes=moe_sum_reduce_triton,
-    )
-
-
-
-
-def nowag_cpu_flags(math: ExpertMath) -> tuple[bool, bool, bool]:
-    """``(round_input, round_middle, preapply_down_norm, weight_middle)`` for the C++
-    NoWAG GEMV."""
-    check_nowag_math(math)
-    return (
-        math.gate_up_input_rounding is not None,
-        math.down_input_rounding is not None,
-        math.down_input_rounding is None,
-        math.router_weight_on_down_input,
     )
