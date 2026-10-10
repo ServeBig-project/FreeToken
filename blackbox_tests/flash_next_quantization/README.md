@@ -50,4 +50,6 @@ BF16 and actual quantized INT8 payloads use `Hq=24, Hkv=2, D=256`, mixed host/GP
 residency, five queries, and eager/CUDA Graph execution. It reuses the existing
 independent selected-token attention reference with unchanged `atol=rtol=1/64`
 and exact tiered-versus-all-GPU comparison. It does not rerun the old I3 matrix.
-GPU integration is prepared but has not yet been executed.
+Candidate `0abb433` passed both GPU integration cases using test commit `587963a`
+on physical GPU 2, including eager and CUDA Graph; the container exited with code 0.
+See [the I2 GPU integration report](results-i2-0abb433-gpu.json).

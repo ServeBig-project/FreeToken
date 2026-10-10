@@ -1,0 +1,38 @@
+{
+  "phase": "I2 quantized KV tiered integration",
+  "device": "cuda",
+  "results": [
+    {
+      "name": "bf16/actual-qsa-geometry",
+      "status": "passed",
+      "heads": 24,
+      "kv_heads": 2,
+      "head_dim": 256,
+      "tokens": 5,
+      "selection_width": 19,
+      "modes": [
+        "eager",
+        "cuda_graph"
+      ],
+      "tiered_vs_gpu": "exact",
+      "reference_atol": 0.015625,
+      "reference_rtol": 0.015625
+    },
+    {
+      "name": "int8/quantization-to-tiered-attention",
+      "status": "passed",
+      "heads": 24,
+      "kv_heads": 2,
+      "head_dim": 256,
+      "tokens": 5,
+      "selection_width": 19,
+      "modes": [
+        "eager",
+        "cuda_graph"
+      ],
+      "tiered_vs_gpu": "exact",
+      "reference_atol": 0.015625,
+      "reference_rtol": 0.015625
+    }
+  ]
+}
