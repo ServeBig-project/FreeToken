@@ -168,16 +168,13 @@ def test_ftw_tp2_matches_tp1(which):
     cross_path(tp1, tp2, f"{which} FTW TP1 vs TP2", task=which in ("qwen36", "dsv4"))
 
 
-def test_gptoss_native_without_base_bias_rejected():
-    """Native NoWAG has no bias; a missing BASE expert bias must not be read as zero."""
-    gpu = need_gpu()
-    base, side = sources("gptoss")
-    work = need_scratch() / "gptoss-nobias"
+def base_copy_without(base, work, drop):
+    """Symlink copy of an HF BASE whose shards no longer contain the tensors `drop` selects."""
     shutil.rmtree(work, ignore_errors=True)
     copy = S.link_copy(base, work, mutable=("model.safetensors.index.json",))
     index_path = copy / "model.safetensors.index.json"
     index = json.loads(index_path.read_text())
-    dropped = {k for k in index["weight_map"] if ".experts." in k and k.endswith("_bias")}
+    dropped = {k for k in index["weight_map"] if drop(k)}
     assert dropped
     for shard in sorted({index["weight_map"][k] for k in dropped}):
         with safe_open(str(base / shard), "pt") as f:
@@ -186,4 +183,67 @@ def test_gptoss_native_without_base_bias_rejected():
         save_file(keep, str(copy / shard), metadata={"format": "pt"})
     index["weight_map"] = {k: v for k, v in index["weight_map"].items() if k not in dropped}
     index_path.write_text(json.dumps(index))
+    return copy
+
+
+def expert_bias(key, layer=None):
+    hit = ".experts." in key and key.endswith("_bias")
+    return hit and (layer is None or f".layers.{layer}." in key)
+
+
+def test_gptoss_native_without_base_bias_rejected():
+    """Native NoWAG has no bias; a missing BASE expert bias must not be read as zero."""
+    gpu = need_gpu()
+    base, side = sources("gptoss")
+    copy = base_copy_without(base, need_scratch() / "gptoss-nobias", expert_bias)
     expect_rejected("gptoss_no_bias", serve_args(copy, "gptoss", side), gpu)
+
+
+def test_gptoss_one_layer_without_bias_rejected_native_and_converted():
+    """Only the last layer's expert biases are missing from BASE: the native load must refuse,
+    and conversion must either refuse or yield a FTW that the server refuses before ready."""
+    gpu = need_gpu()
+    base, side = sources("gptoss")
+    last = json.loads((base / "config.json").read_text())["num_hidden_layers"] - 1
+    copy = base_copy_without(base, need_scratch() / "gptoss-nobias-last-layer",
+                             lambda k: expert_bias(k, last))
+    expect_rejected("gptoss_no_bias_last_layer", serve_args(copy, "gptoss", side), gpu)
+    dest = need_scratch() / "ftw-gptoss-nobias-last-layer"
+    shutil.rmtree(dest, ignore_errors=True)
+    proc = ft(["checkpoint", "--model", copy, "--nowag-expert-path", side, "--out", dest,
+               "--moe-backend", "offload", "--gpu", gpu], label="ftw_convert_gptoss_nobias_last")
+    if proc.returncode == 0:
+        expect_rejected("ftw_gptoss_no_bias_last_layer", serve_args(dest, "gptoss"), gpu)
+
+
+def ftw_with_index(dest, work, edit):
+    """FTW copy (shards symlinked) whose freetoken_weight.json index went through `edit`."""
+    copy = S.link_copy(dest, work, mutable=("freetoken_weight.json",))
+    path = copy / "freetoken_weight.json"
+    index = json.loads(path.read_text())
+    edit(index)
+    path.write_text(json.dumps(index))
+    return copy
+
+
+def test_gptoss_ftw_rewritten_index_still_serves(tmp_path):
+    """Control for the bias-group rows: re-serialising the index alone is accepted, so their
+    rejections come from the missing bias, not from touching the index."""
+    gpu = need_gpu()
+    copy = ftw_with_index(converted("gptoss")["dest"], tmp_path / "ftw", lambda index: None)
+    with Server("ftw_gptoss_index_control", serve_args(copy, "gptoss"), gpu) as s:
+        assert all(o.strip() for o in run_prompts(s))
+
+
+@pytest.mark.parametrize("group", ["gate", "up", "down"])
+def test_gptoss_ftw_missing_one_bias_group_rejected(tmp_path, group):
+    gpu = need_gpu()
+
+    def drop(index):
+        names = {t["name"] for t in index["tensors"]
+                 if t["kind"] == "experts_bank" and t["name"].split("#")[0] == f"{group}_bias"}
+        assert names, f"no {group}_bias bank in the FTW index"
+        index["tensors"] = [t for t in index["tensors"] if t["name"] not in names]
+        index["counts"]["experts_bank"] -= len(names)
+    copy = ftw_with_index(converted("gptoss")["dest"], tmp_path / "ftw", drop)
+    expect_rejected(f"ftw_gptoss_no_{group}_bias", serve_args(copy, "gptoss"), gpu)
