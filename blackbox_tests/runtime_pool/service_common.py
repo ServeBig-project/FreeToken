@@ -214,7 +214,7 @@ class Client:
             return r.status_code, {"text": r.text}
 
     def body(self, prompt, max_tokens, **kw):
-        return dict(model=self.model, prompt=prompt, max_tokens=max_tokens, temperature=0, **kw)
+        return dict(model=self.model, prompt=prompt, max_tokens=max_tokens, **{"temperature": 0, **kw})
 
     def generate(self, prompt, max_tokens, timeout=1800, **kw):
         """Non-streaming completion; returns (http status, body) so error bodies stay visible."""

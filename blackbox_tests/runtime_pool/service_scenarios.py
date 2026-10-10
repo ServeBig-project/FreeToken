@@ -252,3 +252,30 @@ def ready_combo(svc, batching, sd, graph, draft=None):
     if draft:
         assert draft in names, names
     assert rt["held_bytes"] <= rt["budget_bytes"], rt
+
+
+def burst(svc, n, prompt_tokens, out, seed, **kw):
+    """`n` requests of about `prompt_tokens` input and exactly `out` output tokens arrive at
+    once (ignore_eos); all must finish with their full output under the budget."""
+    t = tok()
+    streams = [svc.c.stream(t.filler(prompt_tokens, seed=seed + i) + "\nSummary:", out, ignore_eos=True, **kw)
+               for i in range(n)]
+    with Watch(svc.c) as w:
+        run_streams(streams, 1800)
+    record(f"{svc.name}:burst", n=n, prompt_tokens=prompt_tokens, out=out, kw=kw, overlap=overlap(streams),
+           watch=w.report(), streams=[s.summary() for s in streams])
+    assert not w.violations, w.report()
+    for s in streams:
+        assert s.error is None and s.done and s.finish == "length", s.summary()
+        assert s.usage["completion_tokens"] == out, s.usage
+    svc.c.wait_idle()
+    assert svc.c.get("/health").get("status") == "ok"
+    return streams
+
+
+def shared_stats_contract(svc):
+    """Shared mode reports runtime memory in prefix_cache.runtime, not as a page total in
+    /v1/stats (as for GDN slots and windows)."""
+    kv = svc.c.stats().get("kv") or {}
+    record(f"{svc.name}:stats_kv", kv=kv)
+    assert not kv.get("total_pages"), f"/v1/stats still reports a KV page total in shared mode: {kv}"
