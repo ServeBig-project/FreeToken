@@ -10,7 +10,7 @@ import os
 
 import pytest
 
-from service_common import (COMMON, DFLASH_ARGS, GIB, Watch, assert_enum, assert_length, components,
+from service_common import (COMMON, DFLASH_ARGS, GIB, Watch, assert_enum, assert_length, cached_tokens, components,
                             dump, enum_prompt, graph_replays, record, run_streams, sd_enabled, sd_num,
                             service, tok)
 
@@ -94,6 +94,26 @@ def test_concurrent_sd_requests_intact_under_one_budget(svc):
     assert d["rounds"] > 0 and d["drafted"] > 0, d
     svc.c.wait_idle()
 
+
+
+def test_sd_rounds_do_not_evict_the_prefix_cache(svc):
+    """Without memory pressure, DFlash rounds take draft space without evicting cached
+    prefixes: evictable bytes do not shrink and a warmed prompt still hits in full."""
+    warm = tok().filler(1500, seed=33000) + "\nQuestion:"
+    first = svc.c.complete(warm, 1, cache_group="sdkeep")
+    hit0 = cached_tokens(svc.c.complete(warm, 1, cache_group="sdkeep")["usage"])
+    svc.c.wait_idle()
+    e0, before = svc.rt()["evictable_bytes"], sd_counts(svc.c.stats())
+    starts = [40000 + 1000 * i for i in range(4)]
+    run_streams([svc.c.stream(enum_prompt(s, 40), 300, ignore_eos=True) for s in starts], 900)
+    svc.c.wait_idle()
+    e1, rounds = svc.rt()["evictable_bytes"], sd_counts(svc.c.stats())["rounds"] - before["rounds"]
+    hit1 = cached_tokens(svc.c.complete(warm, 1, cache_group="sdkeep")["usage"])
+    record(f"{NAME}:sd_keeps_prefix", evictable_before=e0, evictable_after=e1, rounds=rounds,
+           prompt_tokens=first["usage"]["prompt_tokens"], hit_before=hit0, hit_after=hit1)
+    assert rounds > 0, "no SD round ran"
+    assert hit0 > 0 and hit1 >= hit0, (hit0, hit1)
+    assert e1 >= e0, (e0, e1)
 
 def test_runtime_budget_rebuild_keeps_real_sd(svc):
     code, j = svc.c.rebuild({"runtime_cache_gib": 3})
