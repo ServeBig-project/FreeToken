@@ -265,7 +265,7 @@ class GraphRunner:
         adapter = self.layered_execution_adapter
         if (
             cache is None
-            or getattr(cache, "prefill_group_decode_reserve_layers", 0) == 0
+            or getattr(cache, "prefill_group_size", 0) == 0
             or adapter is None
             or not adapter.supports_range_graphs
         ):

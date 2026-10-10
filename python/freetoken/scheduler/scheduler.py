@@ -45,13 +45,12 @@ from .layered_batch import (
     LayeredPrefillChunk,
     LayeredPrefillWave,
 )
-from .joint_execution import JointWaveExecutor
 from .layered_pipeline import LayeredPipelineExecutor
 from .mixed_batch import LegacyBatchComposer, MixedBatchComposer
 from .pause import PauseManager
 from .prefill import ChunkedReq, PrefillManager
 from .resident_decode import StableDecodeInput, prepare_stable_decode
-from .resident_wave import ResidentExecutor, request_output_view
+from .resident_wave import request_output_view
 from .status import SchedulerStatusReporter
 from .speculative import SpeculativeDecoder
 from .table import TableManager
@@ -124,7 +123,6 @@ class Scheduler(SchedulerIOMixin):
         self.layered_composer: LayeredBatchComposer | None = None
         self.layered_wave: LayeredPrefillWave | None = None
         self.layered_stats = LayeredExecutionStats()
-        self.resident_executor: ResidentExecutor | None = None
         self.layered_pipeline_executor: LayeredPipelineExecutor | None = None
         self.adaptive_fast_path_gate: AdaptiveFastPathGate | None = None
         self.adaptive_fast_path_stats = AdaptiveFastPathStats()
@@ -144,19 +142,6 @@ class Scheduler(SchedulerIOMixin):
                 decode_manager=self.decode_manager,
                 max_prefill_reqs=1,
             )
-        elif config.batching_policy == "joint":
-            composer_cls = None
-            self.resident_executor = JointWaveExecutor(
-                engine=self.engine,
-                prefill_manager=self.prefill_manager,
-                decode_manager=self.decode_manager,
-                table_manager=self.table_manager,
-                max_chunks=config.prefill_wave_max_chunks,
-                prepare_batch=self._prepare_batch,
-                report_prompt_admissions=self._report_prompt_admissions,
-                restore_linear_states=self._restore_linear_states,
-                free_req_resources=self._free_req_resources,
-            )
         elif config.batching_policy == "layered-pipeline":
             composer_cls = None
             self.layered_pipeline_executor = LayeredPipelineExecutor(
@@ -175,7 +160,6 @@ class Scheduler(SchedulerIOMixin):
                 free_req_resources=self._free_req_resources,
                 speculative=self.speculative,
             )
-            self.resident_executor = self.layered_pipeline_executor
             if adaptive_gate_enabled(
                 str(ENV.LP_ADAPTIVE_GATE), warn=logger.warning_rank0
             ):
@@ -272,7 +256,7 @@ class Scheduler(SchedulerIOMixin):
         finished requests. All TP ranks must call this with identical arguments.
         """
         assert self.layered_wave is None, "rebuild requires no active layered prefill"
-        resident_executor = getattr(self, "resident_executor", None)
+        resident_executor = getattr(self, "layered_pipeline_executor", None)
         assert not (
             resident_executor is not None and resident_executor.active
         ), "rebuild requires no active resident prefill"
@@ -791,8 +775,8 @@ class Scheduler(SchedulerIOMixin):
         return owner
 
     def resident_loop(self) -> None:
-        """Advance either resident-wave policy and drain outputs one stage later."""
-        executor = self.resident_executor
+        """Advance the layered-pipeline wave and drain outputs one stage later."""
+        executor = self.layered_pipeline_executor
         assert executor is not None
         last_outputs = self._resident_last_outputs
         blocking = not (
@@ -872,10 +856,7 @@ class Scheduler(SchedulerIOMixin):
                         continuation_uids=continuation_uids,
                     )
                 if use_fast_path:
-                    pipeline_executor = self.layered_pipeline_executor
-                    if pipeline_executor is None:
-                        raise RuntimeError("adaptive fast path requires layered pipeline")
-                    pipeline_executor.discard_staged_admission()
+                    executor.discard_staged_admission()
                     outputs = self._forward_direct_resident_batch(batch)
                     self.adaptive_fast_path_stats.fast_path_forwards += 1
                     self.adaptive_fast_path_stats.fast_path_prefills += len(
@@ -894,18 +875,15 @@ class Scheduler(SchedulerIOMixin):
                 outputs = executor.advance_step()
             if self.adaptive_fast_path_gate is not None and not executor.active:
                 self.adaptive_fast_path_gate.note_wave_closed(time.monotonic())
-            if self.config.batching_policy == "layered-pipeline":
-                for data in outputs:
-                    output_batch = data[0].batch
-                    if output_batch.is_decode_only and data[1].speculative_ends is None:
-                        # finish_decode has enqueued the sampled-token copy and advanced every
-                        # request's lengths. Reserve a page-boundary-crossing next query now,
-                        # on the scheduler stream, while the current group forward is still in
-                        # flight. The following prepare_step consumes the reservation through
-                        # the normal allocate_paged path, exactly like resident pure decode.
-                        self.cache_manager.reserve_next_decode(
-                            output_batch.decode_reqs
-                        )
+            for data in outputs:
+                output_batch = data[0].batch
+                if output_batch.is_decode_only and data[1].speculative_ends is None:
+                    # finish_decode has enqueued the sampled-token copy and advanced every
+                    # request's lengths. Reserve a page-boundary-crossing next query now,
+                    # on the scheduler stream, while the current group forward is still in
+                    # flight. The following prepare_step consumes the reservation through
+                    # the normal allocate_paged path, exactly like resident pure decode.
+                    self.cache_manager.reserve_next_decode(output_batch.decode_reqs)
 
         # Any page-table/cache writes performed while draining the prior iteration must follow
         # the just-enqueued forward, which can still read those entries. This is the same
@@ -972,10 +950,7 @@ class Scheduler(SchedulerIOMixin):
             assert torch.cuda.current_stream() == self.stream
             while True:
                 self.layered_loop()
-        elif self.config.batching_policy in (
-            "joint",
-            "layered-pipeline",
-        ):
+        elif self.config.batching_policy == "layered-pipeline":
             assert torch.cuda.current_stream() == self.stream
             while True:
                 self.resident_loop()
@@ -1215,8 +1190,8 @@ class Scheduler(SchedulerIOMixin):
         launched = [self._last_data] if getattr(self, "_last_data", None) is not None else []
         launched += getattr(self, "_resident_last_outputs", ())
         reqs = {req for data in launched for req in data[0].batch.reqs}
-        if self.resident_executor is not None:
-            reqs.update(self.resident_executor.wave_reqs)
+        if self.layered_pipeline_executor is not None:
+            reqs.update(self.layered_pipeline_executor.wave_reqs)
         if self.layered_wave is not None:
             reqs.update(req for chunk in self.layered_wave.chunks
                         for req in chunk.forward_input.batch.reqs)
@@ -1348,7 +1323,7 @@ class Scheduler(SchedulerIOMixin):
             if getattr(self, "pause_manager", None) is not None:
                 self.pause_manager.abort(msg.uid)
             layered_req = self._abort_layered_wave(msg.uid)
-            resident_executor = getattr(self, "resident_executor", None)
+            resident_executor = getattr(self, "layered_pipeline_executor", None)
             resident_req = (
                 resident_executor.abort(msg.uid)
                 if resident_executor is not None
@@ -1404,8 +1379,8 @@ class Scheduler(SchedulerIOMixin):
             elif (
                 self.layered_wave is not None
                 or (
-                    self.resident_executor is not None
-                    and self.resident_executor.active
+                    self.layered_pipeline_executor is not None
+                    and self.layered_pipeline_executor.active
                 )
                 or self._queued
                 or self.decode_manager.runnable
@@ -1604,12 +1579,7 @@ class Scheduler(SchedulerIOMixin):
                     f"MoE cache {moe.cache_size}/{moe.num_layers * moe.num_experts}"
                     f" ({_gib(moe.cache_size * unit['moe_bytes_per_expert'])})"
                 )
-                if self.config.batching_policy == "joint":
-                    parts.append(
-                        f"joint group {moe.effective_prefill_group_size} layers "
-                        f"({moe.decode_cache_size} shared expert slots)"
-                    )
-                elif self.config.batching_policy == "layered-pipeline":
+                if self.config.batching_policy == "layered-pipeline":
                     parts.append(
                         f"layered pipeline group {moe.effective_prefill_group_size} layers "
                         f"({moe.decode_cache_size} shared expert slots)"

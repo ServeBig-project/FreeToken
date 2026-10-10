@@ -364,7 +364,7 @@ class Engine:
             batching_policy == "layered-pipeline"
             and self._layered_execution_adapter is None
         ) or (
-            batching_policy in ("layered", "joint")
+            batching_policy == "layered"
             and not all(
                 hasattr(self.model, name)
                 for name in legacy_layer_group_methods
@@ -848,9 +848,6 @@ class Engine:
             kv_reserve_tokens=max(reserve, min_reserve),
             page_size=page_tokens,
             quant_format=banks.quant_format,
-            prefill_overlap_min_layers=(
-                1 if getattr(config, "batching_policy", "legacy") == "joint" else 2
-            ),
             page_extra_bytes=page_extra,
         )
 
@@ -901,8 +898,7 @@ class Engine:
 
                 # The smallest expert cache the plan may keep bounds the concurrency; the plan
                 # then takes what the runtime and that concurrency's execution tables leave.
-                layers = 1 if getattr(config, "batching_policy", "legacy") == "joint" else 2
-                floor = (layers if config.moe_prefill_overlap else 1) * config.model_config.num_experts
+                floor = (2 if config.moe_prefill_overlap else 1) * config.model_config.num_experts
                 self._resolve_runtime(config, floor * expert_bytes_per_slot(banks.sources))
             if config.moe_cache_auto:
                 size, pages, overlap = self._resolve_auto_moe_cache_size(config, banks)
@@ -941,10 +937,7 @@ class Engine:
             if (self.dflash_layout is not None and not config.moe_cache_auto
                     and config.runtime_cache_gib is None):
                 self._fit_dflash_experts(config, banks)
-            if batching_policy in (
-                "joint",
-                "layered-pipeline",
-            ) and (
+            if batching_policy == "layered-pipeline" and (
                 not config.moe_prefill_overlap
                 or config.moe_cache_size < config.model_config.num_experts
             ):
@@ -967,11 +960,6 @@ class Engine:
                 ),
                 prefill_group_size=(
                     getattr(config, "prefill_layer_group_size", 1)
-                    if batching_policy in ("joint", "layered-pipeline")
-                    else 0
-                ),
-                prefill_group_decode_reserve_layers=(
-                    1
                     if batching_policy == "layered-pipeline"
                     else 0
                 ),
@@ -983,16 +971,7 @@ class Engine:
             cache.set_bank_sources(banks.sources, layer_residency=banks.layer_residency)
             cache.set_alphas(banks.gate_up_alpha, banks.down_alpha)
             cache.set_codebook(banks.codebook)
-            if getattr(config, "batching_policy", "legacy") == "joint":
-                logger.info_rank0(
-                    "Joint group-resident batching: "
-                    f"requested_group_size={config.prefill_layer_group_size}, "
-                    f"effective_group_size={cache.effective_prefill_group_size}, "
-                    f"prefill_wave_max_chunks={config.prefill_wave_max_chunks}, "
-                    f"pool_slots={cache.decode_cache_size}, "
-                    "mapping=logical-expert-to-physical-slot"
-                )
-            elif getattr(config, "batching_policy", "legacy") == "layered-pipeline":
+            if getattr(config, "batching_policy", "legacy") == "layered-pipeline":
                 logger.info_rank0(
                     "Layered pipeline cache: "
                     f"requested_group_size={config.prefill_layer_group_size}, "
@@ -2365,7 +2344,6 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
                 fallbacks.append(dict(feature="batching", reason="layered_unsupported", detail=reason))
     if batching_policy in (
         "layered",
-        "joint",
         "layered-pipeline",
     ):
         if not is_moe or config.moe_backend not in ("offload", "hybrid"):
@@ -2414,26 +2392,6 @@ def _adjust_config(config: EngineConfig) -> list[dict]:
         ):
             raise ValueError(
                 f"{batching_policy} requires at least two expert layers of shared cache"
-            )
-        if (
-            batching_policy == "joint"
-            and not config.moe_cache_auto
-            and config.moe_cache_size < model_config.num_experts
-        ):
-            raise ValueError(
-                f"{batching_policy} batching requires at least num_experts expert slots: "
-                f"got moe_cache_size={config.moe_cache_size}, "
-                f"num_experts={model_config.num_experts}"
-            )
-        if (
-            batching_policy == "joint"
-            and config.attention_backend.split(",")[0].strip() != "triton"
-        ):
-            raise ValueError(
-                "joint batching prepares several prefill batches before execution, "
-                "which requires independent Triton prefill metadata; use "
-                "--attention-backend triton (or a hybrid string whose prefill "
-                f"backend is triton), got {config.attention_backend!r}"
             )
 
     if is_moe:

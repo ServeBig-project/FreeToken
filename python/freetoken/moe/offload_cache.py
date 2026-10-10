@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Iterator, Sequence
 
 import torch
-from flashlib.kernels.slot_cache import N_STATS, Stat, lru_ensure
+from flashlib.kernels.slot_cache import N_STATS, Stat
 
 # Fuse the per-bank expert copies into a single multi-bank launch (one per copy_missing
 # instead of one per bank). Set FREETOKEN_FUSED_COPY=0 to force the legacy per-bank path
@@ -276,19 +276,16 @@ class OffloadMoeCache:
     prefill_overlap: bool = False
     # Layered batching keeps full-layer prefill buffers outside the decode slot
     # cache while preserving ``cache_size`` as the total HBM expert-row budget.
-    # Legacy/mixed retain their aliasing layout; joint instead uses the canonical
-    # slot pool below and therefore leaves this false.
+    # Legacy/mixed retain their aliasing layout; layered-pipeline instead uses the
+    # canonical slot pool below and therefore leaves this false.
     separate_prefill_buffer: bool = False
-    # Shared-pool group-resident batching requests this many consecutive expert layers.
+    # Layered-pipeline requests this many consecutive expert layers per resident group.
     # All prefill and decode routes share one canonical slot pool; an admitted
     # group pins its full G*E working set in that pool, then unpins (without
     # discarding) it after the group's queued compute completes.  Zero selects
     # the ordinary prefill layouts.
+    # Decode keeps one full expert layer outside the persistent resident group.
     prefill_group_size: int = 0
-    # Layered-pipeline keeps one full expert layer available for decode outside
-    # the persistent resident group.  Joint has no such reserve because its
-    # decode and prefill rows traverse the same active group together.
-    prefill_group_decode_reserve_layers: int = 0
     # Prefill hit/miss split: experts already resident in the slot cache (slots
     # >= 2 * num_experts) are gathered device-side into the double buffer instead
     # of re-crossing PCIe; only the misses are H2D'd (one cudaMemcpyBatchAsync of
@@ -335,12 +332,6 @@ class OffloadMoeCache:
         # offload/PCIe path. Set by the engine after construction (empty = all-GPU,
         # all layers = the plain --moe-backend cpu case).
         self.cpu_layer_ids: frozenset = frozenset()
-        assert self.prefill_group_decode_reserve_layers >= 0, (
-            "prefill_group_decode_reserve_layers must be >= 0"
-        )
-        assert not self.prefill_group_decode_reserve_layers or self.prefill_group_size, (
-            "decode reserve applies only to resident prefill groups"
-        )
         # Cache attachment replaces this constructor registration with the
         # actual per-layer working sets.  The rectangular canonical bank still
         # validates equal expert-row counts today; stage packing itself no
@@ -353,13 +344,9 @@ class OffloadMoeCache:
         )
         assert self.prefill_group_size >= 0, "prefill_group_size must be >= 0"
         assert not self.prefill_group_size or not self.separate_prefill_buffer, (
-            "joint group residency uses the canonical expert pool, not a separate buffer"
+            "group residency uses the canonical expert pool, not a separate buffer"
         )
-        overlap_floor = (
-            (1 + self.prefill_group_decode_reserve_layers) * self.num_experts
-            if self.prefill_group_size
-            else 2 * self.num_experts
-        )
+        overlap_floor = 2 * self.num_experts
         assert not self.prefill_overlap or self.cache_size >= overlap_floor, (
             "Prefill overlap does not fit its expert working set: "
             f"cache_size={self.cache_size}, required_slots={overlap_floor}"
@@ -392,8 +379,8 @@ class OffloadMoeCache:
         self._allocate_joint_group_mask_buffers()
         self._allocate_resident_prefetch_plan_buffers()
         self.num_indices = torch.zeros((1,), dtype=torch.int64, device=self.device)
-        # Joint reuses the ordinary LRU admission entry point with an immutable
-        # logical-id query and a separate reusable physical-slot output.
+        # Resident admission queries a full logical layer and writes physical slots
+        # to a separate reusable output.
         self._joint_expert_ids: torch.Tensor | None = None
         self._joint_admit_ids: torch.Tensor | None = None
         if self.prefill_group_size:
@@ -425,7 +412,7 @@ class OffloadMoeCache:
         # marlin/b12x per-expert global scales ([L*E], GPU resident, see set_alphas).
         self.gate_up_alpha: torch.Tensor | None = None
         self.down_alpha: torch.Tensor | None = None
-        # Joint cannot derive per-slot scales from the globally mutable inverse
+        # Resident groups cannot derive per-slot scales from the globally mutable inverse
         # map while later group layers are admitted on the copy stream.  Keep one
         # stable full-slot scale view per resident group position instead.
         self._joint_gate_up_alpha_slots: torch.Tensor | None = None
@@ -522,8 +509,8 @@ class OffloadMoeCache:
         self.prefill_h2d_bytes = 0
         self._prefill_full_layer_bytes = 0
         self._expert_row_bytes = 0
-        # Joint's total is statically E rows per admitted layer, so keep it on
-        # the host.  Dynamic misses accumulate in lru_ensure's existing stats
+        # The resident total is statically E rows per admitted layer, so keep it on
+        # the host.  Dynamic misses accumulate in the admission kernel's stats
         # output, avoiding a separate device add after every admission.
         self.joint_prefill_total_rows = 0
         self.joint_prefill_lru_stats = torch.zeros(
@@ -591,10 +578,7 @@ class OffloadMoeCache:
     def _resident_stage_ranges(self) -> tuple[tuple[int, int], ...]:
         if self.prefill_group_size == 0:
             return ()
-        reserve_rows = (
-            self.prefill_group_decode_reserve_layers
-            * max(self._resident_working_set_rows)
-        )
+        reserve_rows = max(self._resident_working_set_rows)  # one decode layer
         stage_capacity = self.decode_cache_size - reserve_rows
         ranges: list[tuple[int, int]] = []
         start = 0
@@ -794,16 +778,10 @@ class OffloadMoeCache:
             2 if self.separate_prefill_buffer else 0,
         )
         if self.prefill_group_size:
-            required_layers = 1 + self.prefill_group_decode_reserve_layers
-            if cache_size < required_layers * self.num_experts:
-                if self.prefill_group_decode_reserve_layers:
-                    raise ValueError(
-                        "resident layered prefill requires at least two expert layers "
-                        "of shared cache"
-                    )
+            if cache_size < 2 * self.num_experts:
                 raise ValueError(
-                    "joint group batching requires at least num_experts expert slots: "
-                    f"got total_slots={cache_size}, num_experts={self.num_experts}"
+                    "resident layered prefill requires at least two expert layers "
+                    "of shared cache"
                 )
         decode_size = partition["decode_slots"]
         if self.quant_format == "nvfp4_marlin" and decode_size > MARLIN_MAX_CACHE_SIZE:
@@ -895,11 +873,7 @@ class OffloadMoeCache:
         self.joint_prefill_lru_stats.zero_()
         self._hit_d2d_fallback_logged = False  # geometry changed; re-log if still unusable
         # 5. Re-evaluate prefill overlap against the new size.
-        overlap_floor = (
-            (1 + self.prefill_group_decode_reserve_layers) * self.num_experts
-            if self.prefill_group_size
-            else 2 * self.num_experts
-        )
+        overlap_floor = 2 * self.num_experts
         if self.prefill_overlap and cache_size < overlap_floor:
             logger.warning(
                 f"Disabling MoE prefill overlap on rebuild: cache_size {cache_size} "
@@ -931,7 +905,7 @@ class OffloadMoeCache:
         self._init_joint_alpha_slots()
 
     def _init_joint_alpha_slots(self) -> None:
-        """Allocate stable per-group-position slot scales when joint needs them."""
+        """Allocate stable per-group-position slot scales when resident groups need them."""
         if not self.prefill_group_size or self.gate_up_alpha is None:
             self._joint_gate_up_alpha_slots = None
             self._joint_down_alpha_slots = None
@@ -986,11 +960,11 @@ class OffloadMoeCache:
     def alphas_for_resident_layer_slots(
         self, layer_id: int
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Stable full-slot scales for one active joint resident layer."""
+        """Stable full-slot scales for one active resident layer."""
         if self.gate_up_alpha is None:
             return None
         if self._resident_group_range is None:
-            raise RuntimeError("no joint resident expert group is active")
+            raise RuntimeError("no resident expert group is active")
         start, end = self._resident_group_range
         if not start <= layer_id < end:
             raise RuntimeError(
@@ -1030,7 +1004,7 @@ class OffloadMoeCache:
         self._prefill_buffer_has_release_event = [False] * count
         self._prefill_buffer_has_hit_ready_event = [False] * count
         if self.prefill_group_size:
-            # Joint has no second physical buffer.  These events publish pages
+            # Resident groups have no second physical buffer.  These events publish pages
             # admitted into the canonical slot bank and protect the prior
             # group's queued GEMMs before any page can be reused.
             self._init_joint_alpha_slots()
@@ -1144,9 +1118,8 @@ class OffloadMoeCache:
         """Admit ``[start_layer, end_layer)`` into the canonical expert pool.
 
         Resident hits keep their physical pages and are protected before the first
-        miss is assigned.  Layered-pipeline misses use only non-group pages and
-        evict the owner farthest from ``next_layer``; ordinary resident callers
-        retain their existing LRU admission.  Every admitted page remains stable
+        miss is assigned.  Misses use only non-group pages and evict the owner
+        farthest from ``next_layer``.  Every admitted page remains stable
         until :meth:`end_prefill_group` records the group's queued compute.
         """
         if not 0 <= next_layer < self.num_layers:
@@ -1155,7 +1128,7 @@ class OffloadMoeCache:
             )
         self._activate_resident_prefill_group(start_layer, end_layer)
 
-        if self.device.type == "cuda" and self.prefill_group_decode_reserve_layers:
+        if self.device.type == "cuda":
             # A persistent pipeline group admits on the compute stream before
             # decode traverses layers outside the group.  Decode and admission
             # both mutate the canonical LRU maps, so only the resulting copies
@@ -1208,90 +1181,29 @@ class OffloadMoeCache:
                     )
             return
 
-        def admit() -> None:
-            # Protect every existing hit in Q before assigning the first miss.
-            # The inverse map names the same canonical pages as flat logical ids,
-            # so one range mask avoids compacting/converting Q's sparse slot map.
-            self._pin_resident_group_pages(start_layer, end_layer)
-
-            group_layers = end_layer - start_layer
-            for buffer_id, layer_id in enumerate(range(start_layer, end_layer)):
-                assert self._joint_expert_ids is not None
-                assert self._joint_admit_ids is not None
-                self._pending_src_layer = layer_id
-                if self.device.type == "cuda":
-                    # The immutable full logical layer is the query; physical
-                    # slots are emitted separately for the canonical bank.
-                    lru_ensure(
-                        self._joint_expert_ids,
-                        self.slot_for_id.view(-1),
-                        self.id_of_slot,
-                        self.usage,
-                        self.step,
-                        self._joint_admit_ids,
-                        self.src_indices,
-                        self.evict_slots,
-                        self.num_indices,
-                        stats=self.joint_prefill_lru_stats[layer_id],
-                        id_base=layer_id * self.num_experts,
-                    )
-                else:
-                    if self.prefill_group_decode_reserve_layers:
-                        self._ensure_layered_resident_layer(
-                            layer_id,
-                            next_layer,
-                            start_layer,
-                            end_layer,
-                            self.evict_slots,
-                            self.src_indices,
-                            self.num_indices,
-                        )
-                    else:
-                        self._joint_admit_ids.copy_(self._joint_expert_ids)
-                        self._ensure_resident_layer_cpu(
-                            layer_id,
-                            self._joint_admit_ids,
-                            self.evict_slots,
-                            self.src_indices,
-                            self.num_indices,
-                        )
-                    joint_stats = self.joint_prefill_lru_stats[layer_id]
-                    joint_stats[Stat.ACTIVE] += self.num_experts
-                    joint_stats[Stat.MISS] += self.num_indices[0]
-                    joint_stats[Stat.CALLS] += 1
-
-                self.joint_prefill_total_rows += self.num_experts
-                if self.device.type == "cuda":
-                    self.copy_missing()
-                else:
-                    self._copy_joint_missing_cpu(layer_id)
-                self._prepare_joint_slot_alphas(buffer_id, layer_id)
-                self.prefill_layer_prepares += 1
-                self._prefill_buffer_layer[buffer_id] = layer_id
-                if (
-                    self.prefill_group_decode_reserve_layers
-                    and buffer_id + 1 == group_layers
-                ):
-                    # Resident layered groups may span scheduler iterations.
-                    # Hard-pin their newly admitted pages before later decode
-                    # prefix/suffix work can mutate the non-group LRU pages.
-                    self._pin_resident_group_pages(start_layer, end_layer)
-                if self.prefill_ready_events:
-                    self.prefill_ready_events[buffer_id].record(
-                        self.prefill_copy_stream
-                    )
-
-        if self.prefill_copy_stream is None:
-            admit()
-            return
-
-        current_stream = torch.cuda.current_stream(self.device)
-        self.prefill_begin_event.record(current_stream)
-        self.prefill_copy_stream.wait_event(self.prefill_begin_event)
-        if self._joint_group_has_release_event:
-            self.prefill_copy_stream.wait_event(self._joint_group_release_event)
-        with torch.cuda.stream(self.prefill_copy_stream):
-            admit()
+        # Protect every existing hit before assigning the first miss; CPU copies are synchronous.
+        self._pin_resident_group_pages(start_layer, end_layer)
+        for buffer_id, layer_id in enumerate(range(start_layer, end_layer)):
+            self._ensure_layered_resident_layer(
+                layer_id,
+                next_layer,
+                start_layer,
+                end_layer,
+                self.evict_slots,
+                self.src_indices,
+                self.num_indices,
+            )
+            joint_stats = self.joint_prefill_lru_stats[layer_id]
+            joint_stats[Stat.ACTIVE] += self.num_experts
+            joint_stats[Stat.MISS] += self.num_indices[0]
+            joint_stats[Stat.CALLS] += 1
+            self.joint_prefill_total_rows += self.num_experts
+            self._copy_joint_missing_cpu(layer_id)
+            self._prepare_joint_slot_alphas(buffer_id, layer_id)
+            self.prefill_layer_prepares += 1
+            self._prefill_buffer_layer[buffer_id] = layer_id
+        # Admission gives newly mapped pages finite recency; restore the persistent pin.
+        self._pin_resident_group_pages(start_layer, end_layer)
 
     def _activate_resident_prefill_group(
         self, start_layer: int, end_layer: int
@@ -1527,23 +1439,13 @@ class OffloadMoeCache:
         src_indices: torch.Tensor,
         num_indices: torch.Tensor,
         *,
-        next_layer: int | None = None,
-        protected_start_layer: int | None = None,
-        protected_end_layer: int | None = None,
+        next_layer: int,
+        protected_start_layer: int,
+        protected_end_layer: int,
     ) -> None:
-        """Pure-Torch reference for resident admission on a CPU cache.
-
-        ``next_layer=None`` preserves joint's ordinary LRU. Layered-pipeline
-        supplies a causal cursor and protected range, mirroring the CUDA order:
-        empty first, then farthest next use, usage, and physical slot.
+        """Pure-Torch reference for resident admission on a CPU cache, mirroring the CUDA
+        order: empty first, then farthest next use, usage, and physical slot.
         """
-        causal = next_layer is not None
-        if causal != (
-            protected_start_layer is not None and protected_end_layer is not None
-        ):
-            raise ValueError(
-                "causal resident CPU admission requires a cursor and protected range"
-            )
         flat = expert_ids.reshape(-1)
         seen: list[int] = []
         for expert in flat.tolist():
@@ -1563,16 +1465,13 @@ class OffloadMoeCache:
             if usage == _RESIDENT_PINNED_USAGE
         }
         owners = [int(value) for value in self.id_of_slot.tolist()]
-        if causal:
-            assert protected_start_layer is not None
-            assert protected_end_layer is not None
-            protected_id_start = protected_start_layer * self.num_experts
-            protected_id_end = protected_end_layer * self.num_experts
-            protected.update(
-                slot
-                for slot, owner in enumerate(owners)
-                if protected_id_start <= owner < protected_id_end
-            )
+        protected_id_start = protected_start_layer * self.num_experts
+        protected_id_end = protected_end_layer * self.num_experts
+        protected.update(
+            slot
+            for slot, owner in enumerate(owners)
+            if protected_id_start <= owner < protected_id_end
+        )
         missing: list[int] = []
         for expert in seen:
             slot = int(self.slot_for_id[layer_id, expert].item())
@@ -1589,10 +1488,7 @@ class OffloadMoeCache:
             owner = owners[slot]
             if owner < 0:
                 return (0, 0, 0, slot)
-            distance = 0
-            if next_layer is not None:
-                owner_layer = owner // self.num_experts
-                distance = (owner_layer - next_layer) % self.num_layers
+            distance = (owner // self.num_experts - next_layer) % self.num_layers
             return (1, -distance, usage[slot], slot)
 
         for index, expert in enumerate(missing):
@@ -1602,7 +1498,7 @@ class OffloadMoeCache:
                 if slot not in protected
             ]
             if not candidates:
-                raise RuntimeError("joint working set exceeds canonical expert pool")
+                raise RuntimeError("resident working set exceeds canonical expert pool")
             victim = min(candidates, key=victim_key)
             old_id = owners[victim]
             if old_id >= 0:
@@ -1623,7 +1519,7 @@ class OffloadMoeCache:
             flat[index] = self.slot_for_id[layer_id, raw_id]
 
     def _copy_joint_missing_cpu(self, layer_id: int) -> None:
-        """Copy staged joint misses with ordinary Torch CPU indexing."""
+        """Copy staged resident misses with ordinary Torch CPU indexing."""
         count = int(self.num_indices.item())
         if count == 0:
             return
@@ -1642,10 +1538,10 @@ class OffloadMoeCache:
         if self.device.type == "cuda":
             torch._assert_async(
                 (slots >= 0).all(),
-                "joint alpha mapping found a missing expert slot",
+                "resident alpha mapping found a missing expert slot",
             )
         elif not bool((slots >= 0).all()):
-            raise RuntimeError("joint alpha mapping found a missing expert slot")
+            raise RuntimeError("resident alpha mapping found a missing expert slot")
         slots = slots.clamp_min(0).long()
         lo = layer_id * self.num_experts
         hi = lo + self.num_experts
@@ -1698,7 +1594,7 @@ class OffloadMoeCache:
                 else:
                     if not bool((group_slots >= 0).all()):
                         raise RuntimeError(
-                            "joint group release found a missing expert mapping"
+                            "resident group release found a missing expert mapping"
                         )
                     self.usage[group_slots.long()] = self.step
                 if self._joint_group_release_event is not None:
@@ -1927,7 +1823,7 @@ class OffloadMoeCache:
         """Ready bank views for ``layer_id`` in registration order.
 
         Ordinary streaming returns a contiguous ``[num_experts, ...]`` layer;
-        joint returns the full canonical slot bank after its layer-ready event.
+        a resident group returns the full canonical slot bank after its layer-ready event.
         """
         assert self.prefill_overlap
         if self.prefill_group_size and self._resident_group_range is not None:
@@ -1955,7 +1851,7 @@ class OffloadMoeCache:
 
     def _wait_resident_group_layer(self, layer_id: int) -> None:
         if not self._prefill_group_active or self._resident_group_range is None:
-            raise RuntimeError("no joint resident expert group is active")
+            raise RuntimeError("no resident expert group is active")
         start, end = self._resident_group_range
         if not start <= layer_id < end:
             raise RuntimeError(
@@ -1963,7 +1859,7 @@ class OffloadMoeCache:
             )
         buffer_id = layer_id - start
         if self._prefill_buffer_layer[buffer_id] != layer_id:
-            raise RuntimeError(f"joint resident layer {layer_id} was not admitted")
+            raise RuntimeError(f"resident layer {layer_id} was not admitted")
         if self._resident_group_ready_events:
             torch.cuda.current_stream(self.device).wait_event(
                 self._resident_group_ready_events[buffer_id]
@@ -1985,7 +1881,7 @@ class OffloadMoeCache:
             torch.cuda.current_stream(self.device).wait_stream(self.prefill_copy_stream)
 
     def has_resident_prefill_layer(self, layer_id: int) -> bool:
-        """Whether joint currently protects ``layer_id`` in the canonical pool."""
+        """Whether the resident group protects ``layer_id`` in the canonical pool."""
         if not self.prefill_group_size or self._resident_group_range is None:
             return False
         start, end = self._resident_group_range
@@ -1995,7 +1891,7 @@ class OffloadMoeCache:
         """Map raw expert ids in place to canonical physical slot ids.
 
         This public operation is valid only for a fully admitted layer in the
-        active joint resident group.  Missing mappings are implementation errors;
+        active resident group.  Missing mappings are implementation errors;
         they never trigger a gather or a fallback prefill allocation.
         """
         self._wait_resident_group_layer(layer_id)
@@ -2012,13 +1908,13 @@ class OffloadMoeCache:
         in_range = (raw_ids >= 0) & (raw_ids < self.num_experts)
         if not bool(in_range.all()):
             raise ValueError(
-                f"joint prefill expert ids must be in [0, {self.num_experts})"
+                f"resident prefill expert ids must be in [0, {self.num_experts})"
             )
         safe_ids = raw_ids.clamp(0, self.num_experts - 1)
         mapped = self.slot_for_id[layer_id][safe_ids]
         if not bool((mapped >= 0).all()):
             raise RuntimeError(
-                f"joint resident layer {layer_id} is missing an expert mapping"
+                f"resident layer {layer_id} is missing an expert mapping"
             )
         expert_ids.copy_(mapped)
 
@@ -2200,9 +2096,9 @@ class OffloadMoeCache:
         }
 
     def prefill_h2d_bytes_total(self) -> int:
-        """Exact H2D bytes after explicitly synchronizing joint's row counter.
+        """Exact H2D bytes after explicitly synchronizing the resident row counter.
 
-        Legacy/mixed/layered update ``prefill_h2d_bytes`` on the host.  Joint
+        Legacy/mixed/layered update ``prefill_h2d_bytes`` on the host.  Resident
         admission stays asynchronous and accumulates miss rows on device, so
         callers should use this method only at an explicit statistics boundary,
         never in the scheduler hot path.

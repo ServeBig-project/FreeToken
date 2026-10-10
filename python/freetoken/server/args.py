@@ -413,7 +413,6 @@ def parse_args(
             "legacy",
             "mixed",
             "layered",
-            "joint",
             "layered-pipeline",
         ],
         default=ServerArgs.batching_policy,
@@ -422,9 +421,7 @@ def parse_args(
             "and MoE backend support it, else legacy, and reports why; legacy runs prefill "
             "before decode; mixed combines "
             "decode with chunked prefill in one forward; layered jointly schedules two "
-            "independent forwards and advances prefill by layer group; joint keeps a "
-            "whole layer group resident while one mixed decode/prefill state and its "
-            "remaining prefill chunks traverse it; layered-pipeline freezes one ragged "
+            "independent forwards and advances prefill by layer group; layered-pipeline freezes one ragged "
             "prompt wave and advances the complete wave by exactly one resident group "
             "per scheduler iteration."
         ),
@@ -435,9 +432,8 @@ def parse_args(
         type=_positive_int,
         default=ServerArgs.prefill_layer_group_size,
         help=(
-            "Requested decoder layers per layered/joint/layered-pipeline group step. "
-            "Joint caps the value at floor(shared slots / experts per layer); "
-            "layered-pipeline reserves one full expert layer for decode and caps it "
+            "Requested decoder layers per layered/layered-pipeline group step. "
+            "Layered-pipeline reserves one full expert layer for decode and caps it "
             "one layer lower."
         ),
     )
@@ -447,8 +443,8 @@ def parse_args(
         type=_positive_int,
         default=ServerArgs.prefill_wave_max_chunks,
         help=(
-            "Soft prompt-chunk cap for a joint wave. Layered-pipeline instead uses "
-            "planned chunks only as an aggregate complete-request admission estimate; "
+            "Soft prompt-chunk cap for a layered-pipeline wave, used only as an "
+            "aggregate complete-request admission estimate; "
             "each admitted request is one physical ragged range, and an oversized first "
             "request remains intact and runs alone."
         ),
@@ -758,7 +754,7 @@ def parse_args(
         default=ServerArgs.moe_prefill_overlap,
         help=(
             "Disable overlap for prefill MoE expert copies. Ordinary streaming "
-            "uses two full-layer buffers; resident joint/layered policies require "
+            "uses two full-layer buffers; resident layered policies require "
             "overlap and admit complete layers into their shared expert pool."
         ),
     )
@@ -787,8 +783,7 @@ def parse_args(
             "During prefill prefetch, copy cache-resident experts device-side into "
             "the double buffer and stream only the misses over PCIe "
             "(cudaMemcpyBatchAsync, CUDA >= 13.0). Effective with "
-            "--moe-cache-size > 2 * num_experts; joint directly reuses the shared "
-            "pool and does not use this gather."
+            "--moe-cache-size > 2 * num_experts."
         ),
     )
 

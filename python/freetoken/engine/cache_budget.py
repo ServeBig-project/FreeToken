@@ -65,7 +65,6 @@ def plan_cache_budget(
     prefill_overlap: bool,
     kv_reserve_pages: int,
     max_slots: int,
-    prefill_overlap_min_layers: int = 2,
     page_extra_bytes: Callable[[int], int] = lambda pages: 0,
 ) -> tuple[int, int, bool]:
     """Split ``budget_bytes`` MoE-first into (moe_cache_size, num_pages, prefill_overlap).
@@ -73,17 +72,16 @@ def plan_cache_budget(
     ``budget_bytes`` is the net pool for MoE cache + KV cache (caller already subtracted
     weights + fixed_cache_size; the (1-memory_ratio) remainder is the graph headroom).
     Experts greedily fill the budget after reserving ``kv_reserve_pages`` for KV,
-    clamped to ``[floor, min(total_experts, max_slots)]``.  Ordinary streaming
-    overlap needs two expert layers; joint's canonical pool needs one.  KV pages
+    clamped to ``[floor, min(total_experts, max_slots)]``.  Prefill overlap needs
+    two expert layers.  KV pages
     take whatever remains. ``page_extra_bytes(pages)`` prices storage that grows with the
     pages without being linear in them (a drafter's capped window context).
     """
     assert per_expert_bytes > 0, "per_expert_bytes must be positive"
     assert cache_per_page > 0, "cache_per_page must be positive (owned-KV models unsupported here)"
-    assert prefill_overlap_min_layers >= 1
 
     hi = min(total_experts, max_slots)
-    overlap_slots = prefill_overlap_min_layers * num_experts
+    overlap_slots = 2 * num_experts
     overlap = prefill_overlap and hi >= overlap_slots
     lo = overlap_slots if overlap else num_experts
     assert hi >= lo, f"slot cap {hi} below the minimum {lo} slots"
@@ -125,7 +123,6 @@ def resolve_moe_cache_auto(
     kv_reserve_tokens: int,
     page_size: int,
     quant_format: str,
-    prefill_overlap_min_layers: int = 2,
     page_extra_bytes: Callable[[int], int] = lambda pages: 0,
 ) -> tuple[int, int, bool]:
     """Resolve --moe-cache-auto into (moe_cache_size, num_pages, prefill_overlap).
@@ -146,6 +143,5 @@ def resolve_moe_cache_auto(
         prefill_overlap=prefill_overlap,
         kv_reserve_pages=kv_reserve_pages,
         max_slots=max_slots,
-        prefill_overlap_min_layers=prefill_overlap_min_layers,
         page_extra_bytes=page_extra_bytes,
     )
